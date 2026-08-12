@@ -126,16 +126,16 @@ export class BookDockController {
     const data = await req.file({ limits: { fileSize: limitMb * 1024 * 1024 } });
     if (!data) throw new BadRequestException('No file provided');
 
-    const uploadId = readMultipartField(data.fields.uploadId);
-    const chunkIndex = readMultipartField(data.fields.chunkIndex);
-    const totalChunks = readMultipartField(data.fields.totalChunks);
+    const uploadId = readMultipartField(data.fields?.uploadId);
+    const chunkIndex = readMultipartField(data.fields?.chunkIndex);
+    const totalChunks = readMultipartField(data.fields?.totalChunks);
 
     if (uploadId && chunkIndex !== undefined && totalChunks !== undefined) {
       const result = await this.ingestService.ingestChunk({
         uploadId,
         chunkIndex: Number(chunkIndex),
         totalChunks: Number(totalChunks),
-        rawFilename: readMultipartField(data.fields.fileName) ?? data.filename,
+        rawFilename: readMultipartField(data.fields?.fileName) ?? data.filename,
         chunkStream: data.file as unknown as Readable,
         uploadedBy: user.id,
       });
