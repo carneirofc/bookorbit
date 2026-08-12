@@ -125,6 +125,24 @@ export class BookDockController {
     const data = await req.file({ limits: { fileSize: limitMb * 1024 * 1024 } });
     if (!data) throw new BadRequestException('No file provided');
 
+    const uploadId = readMultipartField(data.fields.uploadId);
+    const chunkIndex = readMultipartField(data.fields.chunkIndex);
+    const totalChunks = readMultipartField(data.fields.totalChunks);
+
+    if (uploadId && chunkIndex !== undefined && totalChunks !== undefined) {
+      const result = await this.ingestService.ingestChunk({
+        uploadId,
+        chunkIndex: Number(chunkIndex),
+        totalChunks: Number(totalChunks),
+        rawFilename: readMultipartField(data.fields.fileName) ?? data.filename,
+        chunkStream: data.file as unknown as Readable,
+        uploadedBy: user.id,
+      });
+
+      if (!result.complete || result.fileId === null) return { chunked: true, complete: false };
+      return this.service.getFile(result.fileId, user.id, this.canManageAll(user));
+    }
+
     const fileId = await this.ingestService.ingestUpload(data.filename, data.file as unknown as Readable, user.id);
     return this.service.getFile(fileId, user.id, this.canManageAll(user));
   }
@@ -284,4 +302,10 @@ export class BookDockController {
   private canManageAll(user: RequestUser): boolean {
     return user.isSuperuser || user.permissions.includes(Permission.ManageBookDock);
   }
+}
+
+function readMultipartField(field: unknown): string | undefined {
+  const candidate = Array.isArray(field) ? field[0] : field;
+  const value = (candidate as { value?: unknown } | undefined)?.value;
+  return typeof value === 'string' ? value : undefined;
 }

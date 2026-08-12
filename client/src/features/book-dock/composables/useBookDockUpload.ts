@@ -19,6 +19,9 @@ export interface UploadItem {
 }
 
 const CONCURRENCY = 3
+// Kept comfortably under common reverse-proxy upload caps (e.g. Cloudflare's 100 MB limit)
+// so large files are sent as sequential chunks instead of one oversized request.
+const CHUNK_SIZE_BYTES = 40 * 1024 * 1024
 
 function validateFile(file: File): string | null {
   const ext = file.name.split('.').pop()?.toLowerCase() ?? ''
@@ -29,50 +32,95 @@ function validateFile(file: File): string | null {
   return null
 }
 
-async function uploadSingle(item: UploadItem): Promise<void> {
+async function sendPart(formData: FormData, onProgress: (loaded: number, total: number) => void): Promise<{ status: number; responseText: string }> {
   const token = await getValidToken()
-  return new Promise((resolve) => {
-    const formData = new FormData()
-    formData.append('file', item.file)
-
+  return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
     xhr.open('POST', '/api/v1/book-dock/upload')
 
     if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`)
 
     xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) item.progress = Math.round((e.loaded / e.total) * 100)
+      if (e.lengthComputable) onProgress(e.loaded, e.total)
     }
-
-    xhr.onload = () => {
-      if (xhr.status === 201) {
-        item.status = 'done'
-        item.progress = 100
-        try {
-          item.bookDockFile = JSON.parse(xhr.responseText) as BookDockFile
-        } catch {
-          // response parsing optional
-        }
-      } else {
-        item.status = 'error'
-        try {
-          item.error = (JSON.parse(xhr.responseText) as { message?: string }).message ?? 'Upload failed'
-        } catch {
-          item.error = `Upload failed (${xhr.status})`
-        }
-      }
-      resolve()
-    }
-
-    xhr.onerror = () => {
-      item.status = 'error'
-      item.error = 'Network error'
-      resolve()
-    }
-
-    item.status = 'uploading'
+    xhr.onload = () => resolve({ status: xhr.status, responseText: xhr.responseText })
+    xhr.onerror = () => reject(new Error('Network error'))
     xhr.send(formData)
   })
+}
+
+function applyResult(item: UploadItem, status: number, responseText: string): void {
+  if (status === 201) {
+    item.status = 'done'
+    item.progress = 100
+    try {
+      item.bookDockFile = JSON.parse(responseText) as BookDockFile
+    } catch {
+      // response parsing optional
+    }
+  } else {
+    item.status = 'error'
+    try {
+      item.error = (JSON.parse(responseText) as { message?: string }).message ?? 'Upload failed'
+    } catch {
+      item.error = `Upload failed (${status})`
+    }
+  }
+}
+
+async function uploadWhole(item: UploadItem): Promise<void> {
+  const formData = new FormData()
+  formData.append('file', item.file)
+
+  const { status, responseText } = await sendPart(formData, (loaded, total) => {
+    item.progress = Math.round((loaded / total) * 100)
+  })
+  applyResult(item, status, responseText)
+}
+
+async function uploadChunked(item: UploadItem): Promise<void> {
+  const uploadId = `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  const totalChunks = Math.ceil(item.file.size / CHUNK_SIZE_BYTES)
+  let uploadedBytes = 0
+
+  for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+    const start = chunkIndex * CHUNK_SIZE_BYTES
+    const end = Math.min(start + CHUNK_SIZE_BYTES, item.file.size)
+    const chunk = item.file.slice(start, end)
+
+    const formData = new FormData()
+    formData.append('uploadId', uploadId)
+    formData.append('chunkIndex', String(chunkIndex))
+    formData.append('totalChunks', String(totalChunks))
+    formData.append('fileName', item.file.name)
+    formData.append('file', chunk, item.file.name)
+
+    const chunkStartBytes = uploadedBytes
+    const { status, responseText } = await sendPart(formData, (loaded) => {
+      item.progress = Math.round(((chunkStartBytes + loaded) / item.file.size) * 100)
+    })
+
+    if (status !== 201 || chunkIndex === totalChunks - 1) {
+      applyResult(item, status, responseText)
+      return
+    }
+
+    uploadedBytes = end
+  }
+}
+
+async function uploadSingle(item: UploadItem): Promise<void> {
+  item.status = 'uploading'
+  try {
+    if (item.file.size > CHUNK_SIZE_BYTES) {
+      await uploadChunked(item)
+    } else {
+      await uploadWhole(item)
+    }
+  } catch {
+    item.status = 'error'
+    item.error = 'Network error'
+  }
 }
 
 const files = ref<UploadItem[]>([])

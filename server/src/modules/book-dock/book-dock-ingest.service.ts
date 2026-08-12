@@ -1,8 +1,11 @@
-import { BadRequestException, Injectable, Logger, OnApplicationBootstrap, OnModuleDestroy } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, OnApplicationBootstrap, OnModuleDestroy, PayloadTooLargeException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { basename, extname, join } from 'path';
-import { mkdir, realpath, stat } from 'fs/promises';
+import { mkdir, realpath, stat, unlink } from 'fs/promises';
+import { createReadStream, createWriteStream } from 'fs';
+import { tmpdir } from 'os';
 import { Readable } from 'stream';
+import { pipeline } from 'stream/promises';
 
 import { isAudioFormat, MetadataProviderKey, resolveBookDockSearchTitle, type BookDockMetadata } from '@bookorbit/types';
 import type { BookDockFileRow } from '../../db/schema';
@@ -25,6 +28,7 @@ const METADATA_QUEUE_INTER_BOOK_DELAY_MIN_MS = 500;
 const METADATA_QUEUE_INTER_BOOK_DELAY_MAX_MS = 1_000;
 const REQUEUE_BATCH_SIZE = 500;
 const PROCESSABLE_METADATA_STATUSES = new Set(['pending', 'extracting', 'fetching']);
+const CHUNK_UPLOAD_ID_PATTERN = /^[a-zA-Z0-9-]{1,64}$/;
 
 @Injectable()
 export class BookDockIngestService implements OnApplicationBootstrap, OnModuleDestroy {
@@ -101,6 +105,60 @@ export class BookDockIngestService implements OnApplicationBootstrap, OnModuleDe
     } catch (err) {
       await Promise.allSettled([this.storage.cleanup(tempPath), destPath ? this.storage.cleanup(destPath) : Promise.resolve()]);
       throw err;
+    }
+  }
+
+  /**
+   * Assembles a large upload sent as sequential chunks (each its own multipart request,
+   * chunkIndex 0..totalChunks-1) into a single temp file, then ingests it once complete.
+   * Chunks for a given uploadId must arrive in order — the caller (single-file XHR loop)
+   * awaits each request before sending the next.
+   */
+  async ingestChunk(params: {
+    uploadId: string;
+    chunkIndex: number;
+    totalChunks: number;
+    rawFilename: string;
+    chunkStream: Readable;
+    uploadedBy?: number;
+  }): Promise<{ complete: boolean; fileId: number | null }> {
+    const { uploadId, chunkIndex, totalChunks, rawFilename, chunkStream, uploadedBy } = params;
+
+    if (!CHUNK_UPLOAD_ID_PATTERN.test(uploadId)) throw new BadRequestException('Invalid upload id');
+    if (!Number.isInteger(totalChunks) || totalChunks < 1 || !Number.isInteger(chunkIndex) || chunkIndex < 0 || chunkIndex >= totalChunks) {
+      throw new BadRequestException('Invalid chunk index');
+    }
+
+    const chunkPath = join(tmpdir(), `bookorbit-chunk-upload-${uploadId}`);
+
+    try {
+      await pipeline(chunkStream, createWriteStream(chunkPath, { flags: chunkIndex === 0 ? 'w' : 'a' }));
+    } catch (err) {
+      await unlink(chunkPath).catch(() => undefined);
+      const errorClass = err instanceof Error ? err.name : 'Error';
+      const errorMessage = sanitizeLogValue(err instanceof Error ? err.message : String(err));
+      this.logger.warn(
+        `[book_dock.chunk_upload] [fail] uploadId=${sanitizeLogValue(uploadId)} chunkIndex=${chunkIndex} errorClass=${errorClass} error="${errorMessage}" - chunk write failed`,
+      );
+      throw err;
+    }
+
+    if (chunkIndex < totalChunks - 1) {
+      return { complete: false, fileId: null };
+    }
+
+    const limitMb = await this.appSettings.getMaxUploadSizeMb();
+    const { size } = await stat(chunkPath);
+    if (size > limitMb * 1024 * 1024) {
+      await unlink(chunkPath).catch(() => undefined);
+      throw new PayloadTooLargeException(`File exceeds the ${limitMb} MB upload limit`);
+    }
+
+    try {
+      const fileId = await this.ingestUpload(rawFilename, createReadStream(chunkPath), uploadedBy);
+      return { complete: true, fileId };
+    } finally {
+      await unlink(chunkPath).catch(() => undefined);
     }
   }
 
