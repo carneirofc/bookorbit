@@ -404,7 +404,7 @@ function onDrop(e: DragEvent) {
       return SUPPORTED_FORMATS.includes(ext)
     })
     const skipped = files.length - valid.length
-    if (skipped > 0) toast.warning(t('upload.rejected.summary', skipped, { named: { count: skipped } }))
+    if (skipped > 0) toast.warning(t('upload.rejected.summary', { count: skipped }))
     if (valid.length) {
       addFiles(valid)
     }

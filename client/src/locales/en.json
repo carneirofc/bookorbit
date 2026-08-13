@@ -7240,9 +7240,9 @@
   "upload": {
     "tray": {
       "uploadingCount": "Uploading {active} of {total}",
-      "queuedCount": "{count} file queued | {count} files queued",
-      "failedCount": "{count} upload failed | {count} uploads failed",
-      "doneCount": "{count} file uploaded | {count} files uploaded",
+      "queuedCount": "{count, plural, one {# file queued} other {# files queued}}",
+      "failedCount": "{count, plural, one {# upload failed} other {# uploads failed}}",
+      "doneCount": "{count, plural, one {# file uploaded} other {# files uploaded}}",
       "andMore": "and {count} more",
       "transferred": "{loaded} of {total}",
       "remaining": "{eta} left",
@@ -7259,7 +7259,7 @@
     },
     "rejected": {
       "unsupported": "{name} is not a supported file type",
-      "summary": "{count} file was skipped | {count} files were skipped"
+      "summary": "{count, plural, one {# file was skipped} other {# files were skipped}}"
     }
   }
 }
