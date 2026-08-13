@@ -238,9 +238,10 @@ export function useUploadQueue<TResult = unknown>(target?: UploadTarget<TResult>
   }
 
   function clearAll(): void {
-    for (const item of [...items.value]) cancel(item.id)
-    entries.clear()
+    const current = items.value
     items.value = []
+    for (const item of current) cancel(item.id)
+    entries.clear()
   }
 
   return {

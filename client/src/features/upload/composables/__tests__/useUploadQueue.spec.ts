@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-vi.mock('@/lib/api', () => ({ getValidToken: vi.fn().mockResolvedValue('token') }))
+vi.mock('@/lib/api', () => ({ getValidToken: vi.fn<() => Promise<string>>().mockResolvedValue('token') }))
 
 const { uploadFileInChunks, cancelChunkedUpload } = vi.hoisted(() => ({
-  uploadFileInChunks: vi.fn(),
-  cancelChunkedUpload: vi.fn().mockResolvedValue(undefined),
+  uploadFileInChunks: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
+  cancelChunkedUpload: vi.fn<(...args: unknown[]) => Promise<void>>().mockResolvedValue(undefined),
 }))
 
 vi.mock('../useChunkedUploader', async (importOriginal) => {
@@ -72,7 +72,7 @@ describe('useUploadQueue', () => {
 
   describe('upload lifecycle', () => {
     it('marks a file done and records the server result', async () => {
-      const onFileDone = vi.fn()
+      const onFileDone = vi.fn<(item: unknown) => void>()
       const queue = useUploadQueue(makeTarget({ onFileDone }))
       uploadFileInChunks.mockResolvedValue({ id: 55 })
 

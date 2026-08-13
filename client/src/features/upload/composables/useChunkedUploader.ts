@@ -192,7 +192,7 @@ export async function uploadFileInChunks<TResult>(options: ChunkedUploadOptions)
 
   // Progress is the sum of every chunk's own counter, so a chunk that fails and retries
   // rewinds only its own contribution rather than the whole file's.
-  const loadedPerChunk = new Array<number>(totalChunks).fill(0)
+  const loadedPerChunk = Array.from({ length: totalChunks }, () => 0)
   let announcedFinalizing = false
   const report = () => {
     const loadedBytes = loadedPerChunk.reduce((a, b) => a + b, 0)

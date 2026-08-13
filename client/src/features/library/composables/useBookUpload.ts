@@ -61,8 +61,9 @@ export function useBookUpload() {
   }
 
   function reset() {
-    for (const id of [...ownedIds.value]) queue.remove(id)
+    const ids = ownedIds.value
     ownedIds.value = []
+    for (const id of ids) queue.remove(id)
   }
 
   async function startUpload(libraryId: number, folderId?: number) {

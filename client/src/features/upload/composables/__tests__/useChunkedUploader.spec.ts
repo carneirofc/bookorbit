@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ChunkUploadErrorCode, MIN_CHUNK_BYTES } from '@bookorbit/types'
 
-vi.mock('@/lib/api', () => ({ getValidToken: vi.fn().mockResolvedValue('token') }))
+vi.mock('@/lib/api', () => ({ getValidToken: vi.fn<() => Promise<string>>().mockResolvedValue('token') }))
 
 import { uploadFileInChunks, UploadCanceledError, type ChunkUploadFailure } from '../useChunkedUploader'
 
@@ -80,7 +80,7 @@ function fileOf(bytes: number, name = 'dune.epub'): File {
   return new File([new Uint8Array(bytes)], name)
 }
 
-async function upload<T>(file: File, signal = new AbortController().signal, onProgress = vi.fn()) {
+async function upload<T>(file: File, signal = new AbortController().signal, onProgress = vi.fn<(p: unknown) => void>()) {
   return uploadFileInChunks<T>({
     file,
     url: '/api/v1/book-dock/upload',
@@ -157,7 +157,7 @@ describe('uploadFileInChunks', () => {
     })
 
     it('reports progress that reaches the full file size', async () => {
-      const onProgress = vi.fn()
+      const onProgress = vi.fn<(p: unknown) => void>()
       responses = [progressEnvelope(1, 2), { status: 201, body: { id: 1 } }]
 
       await upload(fileOf(CHUNK + 10), undefined, onProgress)
