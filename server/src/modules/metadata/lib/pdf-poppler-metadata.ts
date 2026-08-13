@@ -3,6 +3,8 @@ import { promisify } from 'util';
 
 const execFileAsync = promisify(execFile);
 const PDFINFO_MAX_BUFFER_BYTES = 4 * 1024 * 1024;
+// A crafted PDF can make poppler spin; bound the wall-clock so it cannot hang a worker.
+const PDFINFO_TIMEOUT_MS = 30_000;
 
 export interface PopplerPdfMetadata {
   title: string | null;
@@ -50,7 +52,7 @@ function cleanXmp(value: string | null): string | null {
 }
 
 async function runPdfInfo(args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync('pdfinfo', args, { maxBuffer: PDFINFO_MAX_BUFFER_BYTES });
+  const { stdout } = await execFileAsync('pdfinfo', args, { maxBuffer: PDFINFO_MAX_BUFFER_BYTES, timeout: PDFINFO_TIMEOUT_MS });
   return stdout;
 }
 

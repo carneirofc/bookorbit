@@ -27,10 +27,12 @@ describe('extractPdfCover', () => {
 
   it('extracts first-page jpeg bytes and always cleans up temp directory', async () => {
     const coverBytes = Buffer.from('cover-bytes');
-    mockExecFile.mockImplementation((file, args, callback) => {
+    mockExecFile.mockImplementation((...callArgs: unknown[]) => {
+      const [file, args] = callArgs;
+      const callback = callArgs[callArgs.length - 1] as (err: Error | null, stdout: string, stderr: string) => void;
       expect(file).toBe('pdftoppm');
       expect(args).toEqual(['-jpeg', '-singlefile', '-r', '150', '-f', '1', '-l', '1', '/books/test.pdf', '/tmp/pdf-cover-abc/cover']);
-      callback?.(null, '', '');
+      callback(null, '', '');
       return {} as never;
     });
     mockReadFile.mockResolvedValue(coverBytes);
@@ -41,8 +43,9 @@ describe('extractPdfCover', () => {
   });
 
   it('cleans up temp directory even when pdftoppm fails', async () => {
-    mockExecFile.mockImplementation((_file, _args, callback) => {
-      callback?.(new Error('pdftoppm missing'), '', '');
+    mockExecFile.mockImplementation((...callArgs: unknown[]) => {
+      const callback = callArgs[callArgs.length - 1] as (err: Error | null, stdout: string, stderr: string) => void;
+      callback(new Error('pdftoppm missing'), '', '');
       return {} as never;
     });
 

@@ -62,6 +62,17 @@ describe('EpubController', () => {
     expect(reply.send).toHaveBeenCalledWith(stream);
   });
 
+  it('sandboxes attacker-controlled entries so a direct navigation cannot run scripts', async () => {
+    const user = { id: 1, isSuperuser: false, permissions: [] } as any;
+    const reply = { header: vi.fn(), send: vi.fn() };
+    epubService.streamFile.mockResolvedValue({ stream: new PassThrough(), contentType: 'application/xhtml+xml', size: 10 });
+
+    await controller.getFile(9, 'OEBPS/evil.xhtml', undefined, user, reply as any);
+
+    expect(reply.header).toHaveBeenCalledWith('Content-Security-Policy', "sandbox; default-src 'none'");
+    expect(reply.header).toHaveBeenCalledWith('X-Content-Type-Options', 'nosniff');
+  });
+
   it('does not set content-length when size is zero', async () => {
     const user = { id: 1, isSuperuser: false, permissions: [] } as any;
     const stream = new PassThrough();

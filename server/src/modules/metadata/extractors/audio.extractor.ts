@@ -8,6 +8,13 @@ const execFile = promisify(execFileCallback);
 const FFPROBE_PATH = process.env.FFPROBE_PATH || 'ffprobe';
 const FFMPEG_PATH = process.env.FFMPEG_PATH || 'ffmpeg';
 
+const FF_TIMEOUT_MS = 60_000;
+const FF_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
+// Restrict the decoder to local file access. A crafted media file that embeds an
+// HLS/concat playlist would otherwise turn ffmpeg into an SSRF and local-file-read
+// primitive; both listed protocols are local-only.
+const FF_PROTOCOL_ARGS = ['-protocol_whitelist', 'file,subfile'];
+
 export interface AudioExtractResult {
   title: string | null;
   subtitle: string | null;
@@ -50,16 +57,11 @@ interface FfprobeOutput {
 
 export async function extractAudioMetadata(absolutePath: string): Promise<AudioExtractResult> {
   try {
-    const { stdout } = await execFile(FFPROBE_PATH, [
-      '-v',
-      'quiet',
-      '-print_format',
-      'json',
-      '-show_format',
-      '-show_chapters',
-      '-show_streams',
-      absolutePath,
-    ]);
+    const { stdout } = await execFile(
+      FFPROBE_PATH,
+      [...FF_PROTOCOL_ARGS, '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_chapters', '-show_streams', absolutePath],
+      { timeout: FF_TIMEOUT_MS, maxBuffer: FF_MAX_BUFFER_BYTES },
+    );
 
     const data: FfprobeOutput = JSON.parse(stdout);
     const tags = normalizeTags(data.format?.tags ?? {});
@@ -140,7 +142,10 @@ export async function extractAudioMetadata(absolutePath: string): Promise<AudioE
 
 export async function parseAudioDuration(absolutePath: string): Promise<number | null> {
   try {
-    const { stdout } = await execFile(FFPROBE_PATH, ['-v', 'quiet', '-print_format', 'json', '-show_format', absolutePath]);
+    const { stdout } = await execFile(FFPROBE_PATH, [...FF_PROTOCOL_ARGS, '-v', 'quiet', '-print_format', 'json', '-show_format', absolutePath], {
+      timeout: FF_TIMEOUT_MS,
+      maxBuffer: FF_MAX_BUFFER_BYTES,
+    });
     const data: FfprobeOutput = JSON.parse(stdout);
     return parseDurationSeconds(data.format?.duration);
   } catch {
@@ -154,19 +159,32 @@ async function extractCoverBytes(absolutePath: string, streams: FfprobeStream[])
 
   return new Promise<Buffer | null>((resolve) => {
     const chunks: Buffer[] = [];
-    const proc = spawn(FFMPEG_PATH, ['-y', '-i', absolutePath, '-map', '0:v', '-frames:v', '1', '-f', 'image2pipe', '-vcodec', 'mjpeg', 'pipe:1'], {
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
+    let total = 0;
+    let settled = false;
+    const proc = spawn(
+      FFMPEG_PATH,
+      [...FF_PROTOCOL_ARGS, '-y', '-i', absolutePath, '-map', '0:v', '-frames:v', '1', '-f', 'image2pipe', '-vcodec', 'mjpeg', 'pipe:1'],
+      { stdio: ['ignore', 'pipe', 'ignore'], timeout: FF_TIMEOUT_MS },
+    );
 
-    proc.stdout.on('data', (chunk: Buffer) => chunks.push(chunk));
-    proc.on('close', (code) => {
-      if (code === 0 && chunks.length > 0) {
-        resolve(Buffer.concat(chunks));
-      } else {
-        resolve(null);
+    const finish = (value: Buffer | null) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+
+    proc.stdout.on('data', (chunk: Buffer) => {
+      total += chunk.length;
+      // A crafted stream could emit an unbounded frame; stop buffering and kill it.
+      if (total > FF_MAX_BUFFER_BYTES) {
+        proc.kill('SIGKILL');
+        finish(null);
+        return;
       }
+      chunks.push(chunk);
     });
-    proc.on('error', () => resolve(null));
+    proc.on('close', (code) => finish(code === 0 && chunks.length > 0 ? Buffer.concat(chunks) : null));
+    proc.on('error', () => finish(null));
   });
 }
 

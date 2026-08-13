@@ -8,7 +8,13 @@ vi.mock('zlib', async () => {
 import { createReadStream } from 'fs';
 import { open } from 'fs/promises';
 import { createInflateRaw, deflateRawSync } from 'zlib';
-import { createCbzZipEntryReadStream, extractCbzZipEntry, isSupportedCbzZipCompression, readCbzZipIndex } from './cbz-zip-reader';
+import {
+  createCbzZipEntryReadStream,
+  extractCbzZipEntry,
+  isSupportedCbzZipCompression,
+  MAX_CBZ_ENTRY_BYTES,
+  readCbzZipIndex,
+} from './cbz-zip-reader';
 
 const mockOpen = open as MockedFunction<typeof open>;
 const mockCreateReadStream = createReadStream as unknown as MockedFunction<typeof createReadStream>;
@@ -292,6 +298,20 @@ describe('extractCbzZipEntry', () => {
     expect(result).toBeNull();
     expect(mockOpen).not.toHaveBeenCalled();
   });
+
+  it('refuses a zip-bomb entry that declares more than the size cap without opening the file', async () => {
+    const entry = {
+      name: 'bomb.xml',
+      compression: 8,
+      compressedSize: 100,
+      uncompressedSize: MAX_CBZ_ENTRY_BYTES + 1,
+      localHeaderOffset: 0,
+      dataStart: 30,
+    };
+    const result = await extractCbzZipEntry('/books/bomb.cbz', entry);
+    expect(result).toBeNull();
+    expect(mockOpen).not.toHaveBeenCalled();
+  });
 });
 
 describe('createCbzZipEntryReadStream', () => {
@@ -335,5 +355,29 @@ describe('createCbzZipEntryReadStream', () => {
   it('throws for unsupported compression methods', () => {
     const entry = { name: 'p.jpg', compression: 99, compressedSize: 5, uncompressedSize: 5, localHeaderOffset: 0, dataStart: 30 };
     expect(() => createCbzZipEntryReadStream('/books/a.cbz', entry)).toThrow('Unsupported ZIP compression method: 99');
+  });
+
+  it('throws for an entry that declares more than the size cap', () => {
+    const entry = {
+      name: 'p.jpg',
+      compression: 8,
+      compressedSize: 5,
+      uncompressedSize: MAX_CBZ_ENTRY_BYTES + 1,
+      localHeaderOffset: 0,
+      dataStart: 30,
+    };
+    expect(() => createCbzZipEntryReadStream('/books/a.cbz', entry)).toThrow(/limit/);
+  });
+
+  it('caps the inflate output length for DEFLATE entries', () => {
+    const inflateStream = { kind: 'inflate-stream' };
+    const rawStream = { pipe: vi.fn().mockReturnValue(inflateStream) };
+    mockCreateReadStream.mockReturnValue(rawStream as any);
+    mockCreateInflateRaw.mockReturnValue(inflateStream as any);
+    const entry = { name: 'p.jpg', compression: 8, compressedSize: 5, uncompressedSize: 8, localHeaderOffset: 0, dataStart: 30 };
+
+    createCbzZipEntryReadStream('/books/a.cbz', entry);
+
+    expect(mockCreateInflateRaw).toHaveBeenCalledWith({ maxOutputLength: MAX_CBZ_ENTRY_BYTES });
   });
 });

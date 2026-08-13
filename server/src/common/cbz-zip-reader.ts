@@ -3,6 +3,10 @@ import { open } from 'fs/promises';
 import { Readable } from 'stream';
 import { createInflateRaw, inflateRawSync } from 'zlib';
 
+// Bounds a single decompressed entry so a zip bomb (tiny compressed, enormous inflated)
+// cannot exhaust memory. Comfortably above any real comic page or ComicInfo.xml.
+export const MAX_CBZ_ENTRY_BYTES = 64 * 1024 * 1024;
+
 const EOCD_SIG = 0x06054b50;
 const CDFH_SIG = 0x02014b50;
 const LFH_SIG = 0x04034b50;
@@ -262,23 +266,29 @@ export function createCbzZipEntryReadStream(filePath: string, entry: CbzZipEntry
     return Readable.from(Buffer.alloc(0));
   }
 
+  if (entry.uncompressedSize > MAX_CBZ_ENTRY_BYTES) {
+    throw new Error(`ZIP entry exceeds the ${MAX_CBZ_ENTRY_BYTES} byte limit`);
+  }
+
   const raw = createReadStream(filePath, {
     start: entry.dataStart,
     end: entry.dataStart + entry.compressedSize - 1,
   });
 
-  return entry.compression === 0 ? raw : raw.pipe(createInflateRaw());
+  // maxOutputLength also catches an entry that lies about its uncompressed size.
+  return entry.compression === 0 ? raw : raw.pipe(createInflateRaw({ maxOutputLength: MAX_CBZ_ENTRY_BYTES }));
 }
 
 export async function extractCbzZipEntry(filePath: string, entry: CbzZipEntry): Promise<Buffer | null> {
   if (!isSupportedCbzZipCompression(entry)) return null;
+  if (entry.uncompressedSize > MAX_CBZ_ENTRY_BYTES) return null;
 
   let fh: FileHandle | undefined;
   try {
     fh = await open(filePath, 'r');
     const payload = await readExactly(fh, entry.dataStart, entry.compressedSize);
     if (!payload) return null;
-    return entry.compression === 0 ? payload : inflateRawSync(payload);
+    return entry.compression === 0 ? payload : inflateRawSync(payload, { maxOutputLength: MAX_CBZ_ENTRY_BYTES });
   } finally {
     await fh?.close();
   }

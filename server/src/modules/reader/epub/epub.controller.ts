@@ -29,6 +29,12 @@ export class EpubController {
     reply.header('Content-Type', contentType);
     if (size > 0) reply.header('Content-Length', size);
     reply.header('Cache-Control', 'public, max-age=3600');
+    // EPUB entries are attacker-controlled XHTML/JS/SVG served from the app origin.
+    // The reader fetches them with fetch() (which ignores these headers), so this only
+    // affects a direct navigation to the URL, where the sandbox CSP renders the document
+    // with a unique opaque origin and scripts disabled, defeating same-origin XSS.
+    reply.header('Content-Security-Policy', "sandbox; default-src 'none'");
+    reply.header('X-Content-Type-Options', 'nosniff');
     reply.send(stream);
   }
 

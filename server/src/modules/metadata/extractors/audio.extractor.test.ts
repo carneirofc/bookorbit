@@ -36,15 +36,21 @@ function makeProbeOutput(overrides: FfprobeOutput = {}): string {
 
 type ExecFileCallback = (err: Error | null, result: { stdout: string; stderr: string } | string) => void;
 
+// promisify(execFile) may call execFile(bin, args, options, cb), so the callback is the
+// last argument, not always the third.
+function lastArgCallback(args: unknown[]): ExecFileCallback {
+  return args[args.length - 1] as ExecFileCallback;
+}
+
 function makeExecFileSuccess(stdout: string) {
-  mockExecFile.mockImplementation((_bin: string, _args: string[], callback: ExecFileCallback) => {
-    callback(null, { stdout, stderr: '' });
+  mockExecFile.mockImplementation((...args: unknown[]) => {
+    lastArgCallback(args)(null, { stdout, stderr: '' });
   });
 }
 
 function makeExecFileError(message: string) {
-  mockExecFile.mockImplementation((_bin: string, _args: string[], callback: ExecFileCallback) => {
-    callback(new Error(message), '');
+  mockExecFile.mockImplementation((...args: unknown[]) => {
+    lastArgCallback(args)(new Error(message), '');
   });
 }
 
@@ -408,8 +414,23 @@ describe('extractAudioMetadata — cover', () => {
 
     expect(mockSpawn).toHaveBeenCalledWith(
       'ffmpeg',
-      ['-y', '-i', '/books/test.m4b', '-map', '0:v', '-frames:v', '1', '-f', 'image2pipe', '-vcodec', 'mjpeg', 'pipe:1'],
-      expect.objectContaining({ stdio: ['ignore', 'pipe', 'ignore'] }),
+      [
+        '-protocol_whitelist',
+        'file,subfile',
+        '-y',
+        '-i',
+        '/books/test.m4b',
+        '-map',
+        '0:v',
+        '-frames:v',
+        '1',
+        '-f',
+        'image2pipe',
+        '-vcodec',
+        'mjpeg',
+        'pipe:1',
+      ],
+      expect.objectContaining({ stdio: ['ignore', 'pipe', 'ignore'], timeout: expect.any(Number) }),
     );
   });
 });
@@ -653,7 +674,19 @@ describe('extractAudioMetadata — failure tolerance', () => {
 
     expect(mockExecFile).toHaveBeenCalledWith(
       'ffprobe',
-      ['-v', 'quiet', '-print_format', 'json', '-show_format', '-show_chapters', '-show_streams', '/books/my-audiobook.m4b'],
+      [
+        '-protocol_whitelist',
+        'file,subfile',
+        '-v',
+        'quiet',
+        '-print_format',
+        'json',
+        '-show_format',
+        '-show_chapters',
+        '-show_streams',
+        '/books/my-audiobook.m4b',
+      ],
+      expect.objectContaining({ timeout: expect.any(Number), maxBuffer: expect.any(Number) }),
       expect.any(Function),
     );
   });
@@ -703,7 +736,8 @@ describe('parseAudioDuration', () => {
 
     expect(mockExecFile).toHaveBeenCalledWith(
       'ffprobe',
-      ['-v', 'quiet', '-print_format', 'json', '-show_format', '/books/test.mp3'],
+      ['-protocol_whitelist', 'file,subfile', '-v', 'quiet', '-print_format', 'json', '-show_format', '/books/test.mp3'],
+      expect.objectContaining({ timeout: expect.any(Number), maxBuffer: expect.any(Number) }),
       expect.any(Function),
     );
   });
@@ -886,7 +920,8 @@ describe('binary path env var override', () => {
     vi.resetModules();
 
     const { execFile: execFileMock, spawn: spawnMock } = await import('child_process');
-    (execFileMock as unknown as Mock).mockImplementation((_bin: string, _args: string[], cb: (err: null, r: { stdout: string }) => void) => {
+    (execFileMock as unknown as Mock).mockImplementation((...callArgs: unknown[]) => {
+      const cb = callArgs[callArgs.length - 1] as (err: null, r: { stdout: string }) => void;
       cb(null, { stdout: JSON.stringify({ format: { duration: '100', tags: {} }, streams: [], chapters: [] }) });
     });
     (spawnMock as unknown as Mock).mockReturnValue(makeSpawnProcess(null));
@@ -894,7 +929,7 @@ describe('binary path env var override', () => {
     const { extractAudioMetadata: extract } = await import('./audio.extractor');
     await extract('/path/test.m4b');
 
-    expect(execFileMock).toHaveBeenCalledWith('/opt/bin/ffprobe', expect.any(Array), expect.any(Function));
+    expect(execFileMock).toHaveBeenCalledWith('/opt/bin/ffprobe', expect.any(Array), expect.any(Object), expect.any(Function));
   });
 
   it('uses FFMPEG_PATH env var when set', async () => {
@@ -902,7 +937,8 @@ describe('binary path env var override', () => {
     vi.resetModules();
 
     const { execFile: execFileMock, spawn: spawnMock } = await import('child_process');
-    (execFileMock as unknown as Mock).mockImplementation((_bin: string, _args: string[], cb: (err: null, r: { stdout: string }) => void) => {
+    (execFileMock as unknown as Mock).mockImplementation((...callArgs: unknown[]) => {
+      const cb = callArgs[callArgs.length - 1] as (err: null, r: { stdout: string }) => void;
       cb(null, {
         stdout: JSON.stringify({
           format: { duration: '100', tags: {} },
@@ -920,7 +956,11 @@ describe('binary path env var override', () => {
     const { extractAudioMetadata: extract } = await import('./audio.extractor');
     await extract('/path/test.m4b');
 
-    expect(spawnMock).toHaveBeenCalledWith('/opt/bin/ffmpeg', expect.any(Array), expect.objectContaining({ stdio: ['ignore', 'pipe', 'ignore'] }));
+    expect(spawnMock).toHaveBeenCalledWith(
+      '/opt/bin/ffmpeg',
+      expect.any(Array),
+      expect.objectContaining({ stdio: ['ignore', 'pipe', 'ignore'], timeout: expect.any(Number) }),
+    );
   });
 
   it('falls back to bare ffprobe command when FFPROBE_PATH is not set', async () => {
@@ -928,7 +968,8 @@ describe('binary path env var override', () => {
     vi.resetModules();
 
     const { execFile: execFileMock, spawn: spawnMock } = await import('child_process');
-    (execFileMock as unknown as Mock).mockImplementation((_bin: string, _args: string[], cb: (err: null, r: { stdout: string }) => void) => {
+    (execFileMock as unknown as Mock).mockImplementation((...callArgs: unknown[]) => {
+      const cb = callArgs[callArgs.length - 1] as (err: null, r: { stdout: string }) => void;
       cb(null, { stdout: JSON.stringify({ format: { duration: '100', tags: {} }, streams: [], chapters: [] }) });
     });
     (spawnMock as unknown as Mock).mockReturnValue(makeSpawnProcess(null));
@@ -936,6 +977,6 @@ describe('binary path env var override', () => {
     const { extractAudioMetadata: extract } = await import('./audio.extractor');
     await extract('/path/test.m4b');
 
-    expect(execFileMock).toHaveBeenCalledWith('ffprobe', expect.any(Array), expect.any(Function));
+    expect(execFileMock).toHaveBeenCalledWith('ffprobe', expect.any(Array), expect.any(Object), expect.any(Function));
   });
 });
