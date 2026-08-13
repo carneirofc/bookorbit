@@ -137,12 +137,12 @@ async function handleUpload() {
   const pendingAtStart = files.value.filter((f) => f.status === 'pending').length
   if (pendingAtStart === 0) return
 
-  const uploadedBefore = new Set(files.value.filter((f) => f.status === 'done' && f.bookId !== undefined).map((f) => f.bookId!))
+  const uploadedBefore = new Set(files.value.filter((f) => f.status === 'done' && f.result !== undefined).map((f) => f.result!.bookId))
   const errorCountBefore = files.value.filter((f) => f.status === 'error').length
 
   await startUpload(libraryId, folderId)
 
-  const uploadedAfter = files.value.filter((f) => f.status === 'done' && f.bookId !== undefined).map((f) => f.bookId!)
+  const uploadedAfter = files.value.filter((f) => f.status === 'done' && f.result !== undefined).map((f) => f.result!.bookId)
   const newlyUploaded = uploadedAfter.filter((id) => !uploadedBefore.has(id))
   const errorCountAfter = files.value.filter((f) => f.status === 'error').length
 

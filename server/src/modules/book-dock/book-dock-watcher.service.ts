@@ -11,11 +11,13 @@ import { BookDockIngestService } from './book-dock-ingest.service';
 import { BookDockRepository } from './book-dock.repository';
 import { BookDockGateway } from './book-dock.gateway';
 import { BookDockProcessingStateService } from './book-dock-processing-state.service';
+import { UPLOADS_DIR } from '../upload/upload-session.service';
 
 type EventType = 'delete' | 'create';
 
 const DEBOUNCE_MS = 500;
 const COVERS_DIR = 'covers';
+const RESERVED_DIRS = [COVERS_DIR, UPLOADS_DIR];
 
 @Injectable()
 export class BookDockWatcherService implements OnApplicationBootstrap, OnModuleDestroy {
@@ -66,7 +68,7 @@ export class BookDockWatcherService implements OnApplicationBootstrap, OnModuleD
       this.subscription = watch(this.bookDockPath, { ignoreInitial: true });
       this.subscription.on('all', (eventName, eventPath) => {
         const type = normalizeWatchEvent(eventName);
-        if (!type || this.isInCoversDir(eventPath)) return;
+        if (!type || this.isInReservedDir(eventPath)) return;
         this.schedule(type, eventPath);
       });
       this.subscription.on('error', (err) => {
@@ -88,9 +90,13 @@ export class BookDockWatcherService implements OnApplicationBootstrap, OnModuleD
     }
   }
 
-  private isInCoversDir(path: string): boolean {
+  /**
+   * Covers are ours, and the uploads dir holds preallocated part files that are still
+   * being written to - ingesting either would create bogus dock rows.
+   */
+  private isInReservedDir(path: string): boolean {
     const rel = path.substring(this.bookDockPath.length + 1);
-    return rel.startsWith(COVERS_DIR + '/') || rel === COVERS_DIR;
+    return RESERVED_DIRS.some((dir) => rel === dir || rel.startsWith(dir + '/'));
   }
 
   private schedule(type: EventType, path: string): void {
@@ -138,7 +144,7 @@ export class BookDockWatcherService implements OnApplicationBootstrap, OnModuleD
       if (await this.processingState.isPaused()) return;
       const full = join(dir, entry.name);
       if (entry.isDirectory()) {
-        if (entry.name === COVERS_DIR && dir === this.bookDockPath) continue;
+        if (RESERVED_DIRS.includes(entry.name) && dir === this.bookDockPath) continue;
         await this.walkAndIngest(full);
       } else if (entry.isFile() && isPrimaryFormat(full)) {
         await this.ingestService.ingestFromWatchedFolder(full);

@@ -11,6 +11,7 @@ import { useWhatsNew } from '@/features/whats-new/composables/useWhatsNew'
 import { useAuth } from '@/features/auth/composables/useAuth'
 import { Toaster } from '@/components/ui/sonner'
 import { TooltipProvider } from '@/components/ui/tooltip'
+import UploadTray from '@/features/upload/components/UploadTray.vue'
 
 const { isOpen } = useChangePasswordDialog()
 const themeStore = useThemeStore()
@@ -52,6 +53,7 @@ provide(
     </router-view>
     <ChangePasswordDialog v-if="isOpen" />
     <WhatsNewDialog v-if="popupOpen" />
+    <UploadTray />
     <Toaster rich-colors position="bottom-right" :visible-toasts="5" :gap="8" />
   </TooltipProvider>
 </template>

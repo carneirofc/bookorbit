@@ -1,6 +1,6 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Readable } from 'stream';
-import { Permission } from '@bookorbit/types';
+import { MAX_CHUNK_BYTES, Permission } from '@bookorbit/types';
 
 import { FORBIDDEN_PERMISSION_KEY } from '../../common/decorators/forbid-permission.decorator';
 import { PERMISSION_KEY } from '../../common/decorators/require-permission.decorator';
@@ -39,7 +39,7 @@ function makeController() {
     pauseProcessing: vi.fn(),
     resumeProcessing: vi.fn(),
   };
-  const ingestService = { ingestUpload: vi.fn() };
+  const ingestService = { ingestUpload: vi.fn(), ingestChunk: vi.fn(), abortChunkedUpload: vi.fn() };
   const finalizeService = { previewNames: vi.fn(), previewFinalize: vi.fn(), discardDuplicateCandidates: vi.fn(), finalize: vi.fn() };
   const watcherService = { rescan: vi.fn() };
   const appSettings = { getMaxUploadSizeMb: vi.fn().mockResolvedValue(500) };
@@ -113,6 +113,7 @@ describe('BookDockController', () => {
   it('upload rejects requests with no multipart file', async () => {
     const { controller } = makeController();
     const req = {
+      headers: {},
       file: vi.fn().mockResolvedValue(null),
     } as any;
 
@@ -122,6 +123,7 @@ describe('BookDockController', () => {
   it('upload ingests file and returns hydrated row', async () => {
     const { controller, ingestService, service } = makeController();
     const req = {
+      headers: {},
       file: vi.fn().mockResolvedValue({
         filename: 'book.epub',
         file: Readable.from('book'),
@@ -133,6 +135,90 @@ describe('BookDockController', () => {
     await expect(controller.upload(MOCK_USER, req)).resolves.toEqual({ id: 44, fileName: 'book.epub' });
     expect(ingestService.ingestUpload).toHaveBeenCalledWith('book.epub', expect.any(Readable), MOCK_USER.id);
     expect(service.getFile).toHaveBeenCalledWith(44, MOCK_USER.id, false);
+  });
+
+  describe('chunked upload', () => {
+    function chunkRequest(overrides: Record<string, unknown> = {}) {
+      return {
+        headers: { 'x-upload-id': 'abc-123' },
+        file: vi.fn().mockResolvedValue({
+          filename: 'book.epub',
+          file: Readable.from('chunk'),
+          fields: {
+            uploadId: { value: 'abc-123' },
+            chunkIndex: { value: '1' },
+            totalChunks: { value: '3' },
+            chunkSize: { value: '16777216' },
+            totalSize: { value: '40000000' },
+            fileName: { value: 'dune.epub' },
+            ...(overrides.fields as object),
+          },
+        }),
+        ...overrides,
+      } as any;
+    }
+
+    it('caps a chunk request at the chunk size, not the whole-file limit', async () => {
+      const { controller, ingestService } = makeController();
+      const req = chunkRequest();
+      ingestService.ingestChunk.mockResolvedValue({ complete: false, fileId: null, receivedChunks: 1, totalChunks: 3, finalizing: false });
+
+      await controller.upload(MOCK_USER, req);
+
+      expect(req.file).toHaveBeenCalledWith(expect.objectContaining({ limits: expect.objectContaining({ fileSize: MAX_CHUNK_BYTES }) }));
+    });
+
+    it('caps a whole-file request at the configured upload limit', async () => {
+      const { controller, ingestService } = makeController();
+      const req = { headers: {}, file: vi.fn().mockResolvedValue({ filename: 'book.epub', file: Readable.from('book') }) } as any;
+      ingestService.ingestUpload.mockResolvedValue(1);
+
+      await controller.upload(MOCK_USER, req);
+
+      expect(req.file).toHaveBeenCalledWith(expect.objectContaining({ limits: expect.objectContaining({ fileSize: 500 * 1024 * 1024 }) }));
+    });
+
+    it('reports progress without hydrating a row while chunks are outstanding', async () => {
+      const { controller, ingestService, service } = makeController();
+      ingestService.ingestChunk.mockResolvedValue({ complete: false, fileId: null, receivedChunks: 2, totalChunks: 3, finalizing: false });
+
+      const result = await controller.upload(MOCK_USER, chunkRequest());
+
+      expect(result).toEqual({ chunked: true, complete: false, receivedChunks: 2, totalChunks: 3, finalizing: false });
+      expect(service.getFile).not.toHaveBeenCalled();
+    });
+
+    it('flags a request whose siblings are still assembling', async () => {
+      const { controller, ingestService } = makeController();
+      ingestService.ingestChunk.mockResolvedValue({ complete: false, fileId: null, receivedChunks: 3, totalChunks: 3, finalizing: true });
+
+      await expect(controller.upload(MOCK_USER, chunkRequest())).resolves.toMatchObject({ finalizing: true });
+    });
+
+    it('returns the hydrated row from the request that completed the upload', async () => {
+      const { controller, ingestService, service } = makeController();
+      ingestService.ingestChunk.mockResolvedValue({ complete: true, fileId: 88, receivedChunks: 3, totalChunks: 3, finalizing: false });
+      service.getFile.mockResolvedValue({ id: 88, fileName: 'dune.epub' });
+
+      await expect(controller.upload(MOCK_USER, chunkRequest())).resolves.toEqual({ id: 88, fileName: 'dune.epub' });
+    });
+
+    it('prefers the declared file name over the per-chunk multipart name', async () => {
+      const { controller, ingestService } = makeController();
+      ingestService.ingestChunk.mockResolvedValue({ complete: false, fileId: null, receivedChunks: 1, totalChunks: 3, finalizing: false });
+
+      await controller.upload(MOCK_USER, chunkRequest());
+
+      expect(ingestService.ingestChunk).toHaveBeenCalledWith(expect.objectContaining({ rawFilename: 'dune.epub', userId: MOCK_USER.id }));
+    });
+
+    it('cancels a session on behalf of its owner only', async () => {
+      const { controller, ingestService } = makeController();
+
+      await controller.cancelUpload(MOCK_USER, 'abc-123');
+
+      expect(ingestService.abortChunkedUpload).toHaveBeenCalledWith('abc-123', MOCK_USER.id);
+    });
   });
 
   it('bulk and finalize endpoints delegate payload fields as expected', async () => {

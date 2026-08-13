@@ -17,6 +17,7 @@ import { LibraryService } from '../library/library.service';
 import { UploadValidatorService } from './upload-validator.service';
 import { UploadStorageService } from './upload-storage.service';
 import { UploadProcessorService } from './upload-processor.service';
+import { UploadSessionService, type AssembledUpload } from './upload-session.service';
 import { FileRenameService } from '../file-write/file-rename.service';
 import { resolveDownloadFilename, resolveUploadPath } from '@bookorbit/types';
 import type { AddBookFileResult, UploadResult } from '@bookorbit/types';
@@ -30,6 +31,16 @@ type Db = NodePgDatabase<typeof schema>;
 
 type PrimaryFileCandidate = Pick<typeof bookFiles.$inferSelect, 'id' | 'format' | 'sizeBytes'>;
 
+/** Everything resolved and authorized before any bytes are accepted. */
+export interface UploadContext {
+  libraryId: number;
+  library: Awaited<ReturnType<UploadService['findLibraryOrFail']>>;
+  folder: Awaited<ReturnType<UploadService['resolveFolder']>>;
+  filename: string;
+  format: string;
+  startedAt: number;
+}
+
 @Injectable()
 export class UploadService {
   private readonly logger = new Logger(UploadService.name);
@@ -41,6 +52,7 @@ export class UploadService {
     private readonly validator: UploadValidatorService,
     private readonly storage: UploadStorageService,
     private readonly processor: UploadProcessorService,
+    private readonly uploadSessions: UploadSessionService,
     private readonly moduleRef: ModuleRef,
   ) {}
 
@@ -53,22 +65,55 @@ export class UploadService {
   }
 
   async upload(libraryId: number, folderId: number | undefined, rawFilename: string, fileStream: Readable, user: RequestUser): Promise<UploadResult> {
-    const event = 'upload.book';
+    // Resolved before a byte is written: an unauthorized or malformed request should
+    // never cost disk.
+    const context = await this.prepareUpload(libraryId, folderId, rawFilename, user);
+    const stored = await this.storage.streamToTemp(fileStream, this.uploadSessions.getUploadDir());
+
+    return this.completeUpload(context, stored, user);
+  }
+
+  /**
+   * Finishes a chunked upload whose bytes are already assembled on disk. Shares every
+   * step below with the streaming path; only the staging differs.
+   */
+  async uploadAssembled(libraryId: number, folderId: number | undefined, assembled: AssembledUpload, user: RequestUser): Promise<UploadResult> {
+    const context = await this.prepareUpload(libraryId, folderId, assembled.fileName, user);
+    return this.completeUpload(context, assembled, user);
+  }
+
+  /**
+   * Confirms the caller may upload here and that the name is acceptable. Callers use it
+   * on its own to gate a chunked upload before accepting any of its chunks.
+   */
+  async prepareUpload(libraryId: number, folderId: number | undefined, rawFilename: string, user: RequestUser): Promise<UploadContext> {
     const startedAt = Date.now();
     this.logger.log(
-      `[${event}] [start] libraryId=${libraryId} userId=${user.id} folderId=${folderId ?? 'auto'} rawFilename="${rawFilename}" - upload started`,
+      `[upload.book] [start] libraryId=${libraryId} userId=${user.id} folderId=${folderId ?? 'auto'} rawFilename="${sanitizeLogValue(rawFilename)}" - upload started`,
     );
-    const isSuperuser = user.isSuperuser;
 
     const library = await this.findLibraryOrFail(libraryId);
-    await this.libraryService.verifyUserAccess(user.id, libraryId, isSuperuser);
+    await this.libraryService.verifyUserAccess(user.id, libraryId, user.isSuperuser);
 
     const folder = await this.resolveFolder(libraryId, folderId);
 
     const filename = this.validator.sanitizeFilename(rawFilename);
     const format = this.validator.validateFormat(filename, library.allowedFormats);
 
-    const { tempPath, sizeBytes } = await this.storage.streamToTemp(fileStream);
+    return { libraryId, library, folder, filename, format, startedAt };
+  }
+
+  private async completeUpload(
+    context: UploadContext,
+    stored: { tempPath: string; sizeBytes: number; head: Buffer },
+    user: RequestUser,
+  ): Promise<UploadResult> {
+    const event = 'upload.book';
+    const { libraryId, library, folder, filename, format, startedAt } = context;
+
+    this.validator.assertHeadMatchesExtension(stored.head, format);
+
+    const { tempPath, sizeBytes } = stored;
     let destinationPath: string | null = null;
     let shouldCleanupDestination = false;
 

@@ -13,6 +13,7 @@ import { UploadProcessorService } from './upload-processor.service';
 import { UploadService } from './upload.service';
 import { UploadStorageService } from './upload-storage.service';
 import { UploadValidatorService } from './upload-validator.service';
+import { UploadSessionService } from './upload-session.service';
 import { FileWriteModule } from '../file-write/file-write.module';
 
 describe('UploadModule', () => {
@@ -23,12 +24,14 @@ describe('UploadModule', () => {
       UploadValidatorService,
       UploadStorageService,
       UploadProcessorService,
+      UploadSessionService,
     ]);
     expect(Reflect.getMetadata('exports', UploadModule)).toEqual([
       UploadValidatorService,
       UploadStorageService,
       UploadProcessorService,
       UploadService,
+      UploadSessionService,
     ]);
     expect(Reflect.getMetadata('imports', UploadModule)).toContain(FileWriteModule);
   });

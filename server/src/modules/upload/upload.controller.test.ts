@@ -10,14 +10,20 @@ describe('UploadController', () => {
     getMaxUploadSizeMb: () => Promise.resolve(500),
   };
 
-  const controller = new UploadController(uploadService as any, appSettings as any);
+  const uploadSessions = {
+    writeChunk: vi.fn(),
+    abort: vi.fn().mockResolvedValue(undefined),
+    getUploadDir: vi.fn().mockReturnValue('/data/.uploads'),
+  };
+
+  const controller = new UploadController(uploadService as any, uploadSessions as any, appSettings as any);
 
   beforeEach(() => {
     vi.resetAllMocks();
   });
 
   it('throws when no multipart file is provided', async () => {
-    const req = { file: vi.fn().mockResolvedValue(undefined) };
+    const req = { headers: {}, file: vi.fn().mockResolvedValue(undefined) };
 
     await expect(controller.uploadBook(1, undefined, { id: 1, isSuperuser: false, permissions: [] } as any, req as any)).rejects.toThrow(
       BadRequestException,
@@ -25,9 +31,7 @@ describe('UploadController', () => {
   });
 
   it.each(['abc', '12abc', '1.2', '-1'])('throws when folderId query value is not a strict positive integer: %s', async (folderId) => {
-    const req = {
-      file: vi.fn().mockResolvedValue({ filename: 'a.epub', file: {} }),
-    };
+    const req = { headers: {}, file: vi.fn().mockResolvedValue({ filename: 'a.epub', file: {} }) };
 
     await expect(controller.uploadBook(1, folderId, { id: 1, isSuperuser: false, permissions: [] } as any, req as any)).rejects.toThrow(
       new BadRequestException('Invalid folderId'),
@@ -36,9 +40,7 @@ describe('UploadController', () => {
 
   it('accepts folderId with surrounding whitespace', async () => {
     const stream = {};
-    const req = {
-      file: vi.fn().mockResolvedValue({ filename: 'book.epub', file: stream }),
-    };
+    const req = { headers: {}, file: vi.fn().mockResolvedValue({ filename: 'book.epub', file: stream }) };
     uploadService.upload.mockResolvedValue({ bookId: 9 });
 
     await controller.uploadBook(3, ' 12 ', { id: 5, isSuperuser: false, permissions: [] } as any, req as any);
@@ -48,22 +50,18 @@ describe('UploadController', () => {
 
   it('passes parsed arguments to upload service and overrides multipart size limit', async () => {
     const stream = {};
-    const req = {
-      file: vi.fn().mockResolvedValue({ filename: 'book.epub', file: stream }),
-    };
+    const req = { headers: {}, file: vi.fn().mockResolvedValue({ filename: 'book.epub', file: stream }) };
     uploadService.upload.mockResolvedValue({ bookId: 9 });
 
     await controller.uploadBook(3, '12', { id: 5, isSuperuser: false, permissions: [] } as any, req as any);
 
-    expect(req.file).toHaveBeenCalledWith({ limits: { fileSize: 500 * 1024 * 1024 } });
+    expect(req.file).toHaveBeenCalledWith(expect.objectContaining({ limits: expect.objectContaining({ fileSize: 500 * 1024 * 1024 }) }));
     expect(uploadService.upload).toHaveBeenCalledWith(3, 12, 'book.epub', stream, { id: 5, isSuperuser: false, permissions: [] });
   });
 
   it('returns the value from uploadService.upload directly', async () => {
     const stream = {};
-    const req = {
-      file: vi.fn().mockResolvedValue({ filename: 'Dune.epub', file: stream }),
-    };
+    const req = { headers: {}, file: vi.fn().mockResolvedValue({ filename: 'Dune.epub', file: stream }) };
     const user = { id: 1, isSuperuser: false, permissions: [] } as any;
     uploadService.upload.mockResolvedValue({ bookId: 42, filename: 'Dune.epub', format: 'epub', sizeBytes: 1234 });
 
@@ -74,9 +72,7 @@ describe('UploadController', () => {
 
   it('folderId=undefined passes undefined to service', async () => {
     const stream = {};
-    const req = {
-      file: vi.fn().mockResolvedValue({ filename: 'book.epub', file: stream }),
-    };
+    const req = { headers: {}, file: vi.fn().mockResolvedValue({ filename: 'book.epub', file: stream }) };
     const user = { id: 1, isSuperuser: false, permissions: [] } as any;
     uploadService.upload.mockResolvedValue({ bookId: 1 });
 
@@ -86,9 +82,7 @@ describe('UploadController', () => {
   });
 
   it('folderId="0" is rejected (0 is not a positive integer)', async () => {
-    const req = {
-      file: vi.fn().mockResolvedValue({ filename: 'book.epub', file: {} }),
-    };
+    const req = { headers: {}, file: vi.fn().mockResolvedValue({ filename: 'book.epub', file: {} }) };
     const user = { id: 1, isSuperuser: false, permissions: [] } as any;
 
     await expect(controller.uploadBook(1, '0', user, req as any)).rejects.toThrow(new BadRequestException('Invalid folderId'));
@@ -96,9 +90,7 @@ describe('UploadController', () => {
 
   it('folderId with leading zeros "007" is accepted, parsed as 7', async () => {
     const stream = {};
-    const req = {
-      file: vi.fn().mockResolvedValue({ filename: 'book.epub', file: stream }),
-    };
+    const req = { headers: {}, file: vi.fn().mockResolvedValue({ filename: 'book.epub', file: stream }) };
     const user = { id: 1, isSuperuser: false, permissions: [] } as any;
     uploadService.upload.mockResolvedValue({ bookId: 1 });
 

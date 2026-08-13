@@ -2,7 +2,7 @@ import { Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { join } from 'path';
 
-import type { AppInfoResponse } from '@bookorbit/types';
+import { DEFAULT_UPLOAD_CHUNK_BYTES, type AppInfoResponse } from '@bookorbit/types';
 
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { AppSettingsService } from '../app-settings/app-settings.service';
@@ -54,6 +54,7 @@ export class AppInfoService implements OnApplicationBootstrap {
       latestVersion: this.latestVersion,
       bookDockPath,
       maxUploadSizeMb,
+      uploadChunkSizeBytes: DEFAULT_UPLOAD_CHUNK_BYTES,
     };
   }
 

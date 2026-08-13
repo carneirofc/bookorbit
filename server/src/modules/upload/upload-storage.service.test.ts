@@ -8,13 +8,18 @@ vi.mock('fs/promises', () => ({
 
 vi.mock('fs', () => ({ createWriteStream: vi.fn() }));
 vi.mock('os', () => ({ tmpdir: () => '/tmp' }));
-vi.mock('crypto', () => ({ randomUUID: () => 'unit-test-id' }));
+vi.mock('crypto', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('crypto')>()),
+  randomUUID: () => 'unit-test-id',
+}));
 
 import { PassThrough } from 'stream';
 import { PayloadTooLargeException } from '@nestjs/common';
 import { copyFile, mkdir, rename, stat, unlink } from 'fs/promises';
 import { createWriteStream } from 'fs';
+import { createHash } from 'crypto';
 
+import { SIGNATURE_HEAD_BYTES } from '../../common/file-signature';
 import { UploadStorageService } from './upload-storage.service';
 
 const mockCopyFile = copyFile as MockedFunction<typeof copyFile>;
@@ -48,7 +53,37 @@ describe('UploadStorageService', () => {
     const p = service.streamToTemp(source);
     source.end(Buffer.from('abc'));
 
-    await expect(p).resolves.toEqual({ tempPath: '/tmp/bookorbit-upload-unit-test-id', sizeBytes: 123 });
+    await expect(p).resolves.toEqual({
+      tempPath: '/tmp/bookorbit-upload-unit-test-id',
+      sizeBytes: 123,
+      sha256: createHash('sha256').update('abc').digest('hex'),
+      head: Buffer.from('abc'),
+    });
+  });
+
+  it('stages into a caller-supplied directory so the later move can be a rename', async () => {
+    const source = new PassThrough();
+    const sink = new PassThrough();
+    mockCreateWriteStream.mockReturnValue(sink as unknown as ReturnType<typeof createWriteStream>);
+
+    const p = service.streamToTemp(source, '/data/book-dock/.uploads');
+    source.end(Buffer.from('abc'));
+
+    await expect(p).resolves.toMatchObject({ tempPath: '/data/book-dock/.uploads/bookorbit-upload-unit-test-id' });
+  });
+
+  it('captures only the leading bytes as the signature head', async () => {
+    const source = new PassThrough();
+    const sink = new PassThrough();
+    mockCreateWriteStream.mockReturnValue(sink as unknown as ReturnType<typeof createWriteStream>);
+    const body = Buffer.alloc(SIGNATURE_HEAD_BYTES * 2, 0x41);
+
+    const p = service.streamToTemp(source);
+    source.end(body);
+
+    const result = await p;
+    expect(result.head).toHaveLength(SIGNATURE_HEAD_BYTES);
+    expect(result.sha256).toBe(createHash('sha256').update(body).digest('hex'));
   });
 
   it('throws PayloadTooLargeException and cleans up when busboy truncates stream', async () => {

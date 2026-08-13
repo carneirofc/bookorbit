@@ -2,7 +2,11 @@ import { BadRequestException, Logger } from '@nestjs/common';
 import { Readable } from 'stream';
 import { mkdir, realpath, stat } from 'fs/promises';
 
+import { UploadValidatorService } from '../upload/upload-validator.service';
 import { BookDockIngestService } from './book-dock-ingest.service';
+
+/** A real ZIP signature, so the assembled-file content check passes. */
+const EPUB_HEAD = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
 
 vi.mock('fs/promises', () => ({
   mkdir: vi.fn().mockResolvedValue(undefined),
@@ -29,8 +33,13 @@ function makeService(bookDockPath = '/books/book-dock') {
     countsByStatus: vi.fn().mockResolvedValue({}),
   };
 
+  // Format and signature checks are real; only filename sanitizing is stubbed, since
+  // these tests drive the destination path through it.
+  const realValidator = new UploadValidatorService();
   const validator = {
     sanitizeFilename: vi.fn(),
+    validateBookFormat: vi.fn((name: string) => realValidator.validateBookFormat(name)),
+    assertHeadMatchesExtension: vi.fn((head: Buffer, ext: string) => realValidator.assertHeadMatchesExtension(head, ext)),
   };
 
   const storage = {
@@ -49,6 +58,7 @@ function makeService(bookDockPath = '/books/book-dock') {
 
   const appSettings = {
     isBookDockAutoFetchEnabled: vi.fn().mockResolvedValue(false),
+    getMaxUploadSizeMb: vi.fn().mockResolvedValue(500),
   };
 
   const metadataFetchPipeline = {};
@@ -62,6 +72,12 @@ function makeService(bookDockPath = '/books/book-dock') {
     emitChanged: vi.fn(),
   };
 
+  const uploadSessions = {
+    getUploadDir: vi.fn().mockReturnValue('/books/book-dock/.uploads'),
+    writeChunk: vi.fn(),
+    abort: vi.fn().mockResolvedValue(undefined),
+  };
+
   const service = new BookDockIngestService(
     config as never,
     repo as never,
@@ -73,9 +89,10 @@ function makeService(bookDockPath = '/books/book-dock') {
     metadataFetchPipeline as never,
     processingState as never,
     gateway as never,
+    uploadSessions as never,
   );
 
-  return { service, repo, validator, storage, metadataService, events, appSettings, metadataFetchPipeline, processingState, gateway };
+  return { service, repo, validator, storage, metadataService, events, appSettings, metadataFetchPipeline, processingState, gateway, uploadSessions };
 }
 
 describe('BookDockIngestService', () => {
@@ -124,7 +141,7 @@ describe('BookDockIngestService', () => {
 
       validator.sanitizeFilename.mockReturnValue('book.epub');
       mockedStat.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
-      storage.streamToTemp.mockResolvedValue({ tempPath: '/tmp/upload.bin', sizeBytes: 1024 });
+      storage.streamToTemp.mockResolvedValue({ tempPath: '/tmp/upload.bin', sizeBytes: 1024, sha256: 'abc123', head: EPUB_HEAD });
       storage.moveToPath.mockResolvedValue(undefined);
       repo.create.mockResolvedValue({ id: 42 });
 
@@ -136,6 +153,7 @@ describe('BookDockIngestService', () => {
         fileName: 'book.epub',
         absolutePath: '/books/book-dock/book.epub',
         fileSize: 1024,
+        sha256: 'abc123',
         format: 'epub',
         status: 'pending',
         uploadedBy: null,
@@ -159,7 +177,7 @@ describe('BookDockIngestService', () => {
 
       validator.sanitizeFilename.mockReturnValue('book.epub');
       mockedStat.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
-      storage.streamToTemp.mockResolvedValue({ tempPath: '/tmp/upload.bin', sizeBytes: 1024 });
+      storage.streamToTemp.mockResolvedValue({ tempPath: '/tmp/upload.bin', sizeBytes: 1024, sha256: 'abc123', head: EPUB_HEAD });
       storage.moveToPath.mockResolvedValue(undefined);
       repo.create.mockRejectedValue(new Error('insert failed'));
 
@@ -175,7 +193,7 @@ describe('BookDockIngestService', () => {
 
       validator.sanitizeFilename.mockReturnValue('book.epub');
       mockedStat.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
-      storage.streamToTemp.mockResolvedValue({ tempPath: '/tmp/upload.bin', sizeBytes: 1024 });
+      storage.streamToTemp.mockResolvedValue({ tempPath: '/tmp/upload.bin', sizeBytes: 1024, sha256: 'abc123', head: EPUB_HEAD });
       storage.moveToPath.mockRejectedValue(new Error('move failed'));
 
       await expect(service.ingestUpload('raw.epub', new Readable({ read() {} }))).rejects.toThrow('move failed');
@@ -190,7 +208,7 @@ describe('BookDockIngestService', () => {
 
       validator.sanitizeFilename.mockReturnValue('book.epub');
       mockedStat.mockResolvedValue({ size: 100 } as never);
-      storage.streamToTemp.mockResolvedValue({ tempPath: '/tmp/upload.bin', sizeBytes: 1024 });
+      storage.streamToTemp.mockResolvedValue({ tempPath: '/tmp/upload.bin', sizeBytes: 1024, sha256: 'abc123', head: EPUB_HEAD });
       storage.moveToPath.mockResolvedValue(undefined);
       repo.create.mockResolvedValue({ id: 7 });
 
@@ -199,6 +217,171 @@ describe('BookDockIngestService', () => {
       expect(result).toBe(7);
       const destArg = storage.moveToPath.mock.calls[0][1] as string;
       expect(destArg).toMatch(/\/books\/book-dock\/book-\d+-[a-z0-9]+\.epub$/);
+    });
+  });
+
+  describe('ingestAssembledFile', () => {
+    function assembled(overrides: Record<string, unknown> = {}) {
+      return {
+        tempPath: '/books/book-dock/.uploads/abc.part',
+        fileName: 'dune.epub',
+        ext: 'epub',
+        sizeBytes: 4096,
+        sha256: 'f'.repeat(64),
+        head: EPUB_HEAD,
+        uploadId: 'abc-123',
+        startedAt: Date.now(),
+        release: vi.fn().mockResolvedValue(undefined),
+        ...overrides,
+      };
+    }
+
+    it('moves the assembled file into place without re-streaming it', async () => {
+      const { service, storage, repo } = makeService();
+      mockedStat.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+      storage.moveToPath.mockResolvedValue(undefined);
+      repo.create.mockResolvedValue({ id: 91 });
+
+      const result = await service.ingestAssembledFile(assembled() as never, 5);
+
+      expect(result).toBe(91);
+      // The whole point of the assembled path: one write during chunking, then a move.
+      expect(storage.streamToTemp).not.toHaveBeenCalled();
+      expect(storage.moveToPath).toHaveBeenCalledWith('/books/book-dock/.uploads/abc.part', '/books/book-dock/dune.epub');
+    });
+
+    it('records the content hash and uploader', async () => {
+      const { service, storage, repo } = makeService();
+      mockedStat.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+      storage.moveToPath.mockResolvedValue(undefined);
+      repo.create.mockResolvedValue({ id: 92 });
+
+      await service.ingestAssembledFile(assembled() as never, 5);
+
+      expect(repo.create).toHaveBeenCalledWith(expect.objectContaining({ sha256: 'f'.repeat(64), fileSize: 4096, uploadedBy: 5 }));
+    });
+
+    it('rejects a file whose bytes contradict its extension, before it reaches the dock', async () => {
+      const { service, storage, repo } = makeService();
+      const pdfHead = Buffer.from('%PDF-1.7');
+
+      await expect(service.ingestAssembledFile(assembled({ head: pdfHead }) as never, 5)).rejects.toMatchObject({ status: 422 });
+
+      expect(storage.moveToPath).not.toHaveBeenCalled();
+      expect(repo.create).not.toHaveBeenCalled();
+      expect(storage.cleanup).toHaveBeenCalledWith('/books/book-dock/.uploads/abc.part');
+    });
+  });
+
+  describe('ingestChunk', () => {
+    it('reports progress while chunks are outstanding', async () => {
+      const { service, uploadSessions, storage } = makeService();
+      uploadSessions.writeChunk.mockResolvedValue({ status: 'partial', receivedChunks: 2, totalChunks: 5, finalizing: false });
+
+      const result = await service.ingestChunk({
+        uploadId: 'abc-123',
+        userId: 5,
+        rawFilename: 'dune.epub',
+        chunkIndex: 1,
+        totalChunks: 5,
+        chunkSize: 1024,
+        totalSize: 5000,
+        chunkStream: new Readable({ read() {} }),
+      });
+
+      expect(result).toEqual({ complete: false, fileId: null, receivedChunks: 2, totalChunks: 5, finalizing: false });
+      expect(storage.moveToPath).not.toHaveBeenCalled();
+    });
+
+    it('passes the configured limit down as the ceiling on the declared file size', async () => {
+      const { service, uploadSessions, appSettings } = makeService();
+      appSettings.getMaxUploadSizeMb = vi.fn().mockResolvedValue(250);
+      uploadSessions.writeChunk.mockResolvedValue({ status: 'partial', receivedChunks: 1, totalChunks: 5, finalizing: false });
+
+      await service.ingestChunk({
+        uploadId: 'abc-123',
+        userId: 5,
+        rawFilename: 'dune.epub',
+        chunkIndex: 0,
+        totalChunks: 5,
+        chunkSize: 1024,
+        totalSize: 5000,
+        chunkStream: new Readable({ read() {} }),
+      });
+
+      expect(uploadSessions.writeChunk).toHaveBeenCalledWith(expect.objectContaining({ maxTotalBytes: 250 * 1024 * 1024 }));
+    });
+
+    it('releases the temp file once the assembled upload has been ingested', async () => {
+      const { service, uploadSessions, storage, repo } = makeService();
+      const release = vi.fn().mockResolvedValue(undefined);
+      mockedStat.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+      storage.moveToPath.mockResolvedValue(undefined);
+      repo.create.mockResolvedValue({ id: 77 });
+      uploadSessions.writeChunk.mockResolvedValue({
+        status: 'assembled',
+        assembled: {
+          tempPath: '/books/book-dock/.uploads/abc.part',
+          fileName: 'dune.epub',
+          ext: 'epub',
+          sizeBytes: 4096,
+          sha256: 'f'.repeat(64),
+          head: EPUB_HEAD,
+          uploadId: 'abc-123',
+          startedAt: Date.now(),
+          release,
+        },
+      });
+
+      const result = await service.ingestChunk({
+        uploadId: 'abc-123',
+        userId: 5,
+        rawFilename: 'dune.epub',
+        chunkIndex: 4,
+        totalChunks: 5,
+        chunkSize: 1024,
+        totalSize: 5000,
+        chunkStream: new Readable({ read() {} }),
+      });
+
+      expect(result).toMatchObject({ complete: true, fileId: 77 });
+      expect(release).toHaveBeenCalledTimes(1);
+    });
+
+    it('still releases the temp file when ingesting the assembled upload fails', async () => {
+      const { service, uploadSessions, storage } = makeService();
+      const release = vi.fn().mockResolvedValue(undefined);
+      mockedStat.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+      storage.moveToPath.mockRejectedValue(new Error('move failed'));
+      uploadSessions.writeChunk.mockResolvedValue({
+        status: 'assembled',
+        assembled: {
+          tempPath: '/books/book-dock/.uploads/abc.part',
+          fileName: 'dune.epub',
+          ext: 'epub',
+          sizeBytes: 4096,
+          sha256: 'f'.repeat(64),
+          head: EPUB_HEAD,
+          uploadId: 'abc-123',
+          startedAt: Date.now(),
+          release,
+        },
+      });
+
+      await expect(
+        service.ingestChunk({
+          uploadId: 'abc-123',
+          userId: 5,
+          rawFilename: 'dune.epub',
+          chunkIndex: 4,
+          totalChunks: 5,
+          chunkSize: 1024,
+          totalSize: 5000,
+          chunkStream: new Readable({ read() {} }),
+        }),
+      ).rejects.toThrow('move failed');
+
+      expect(release).toHaveBeenCalledTimes(1);
     });
   });
 

@@ -19,8 +19,8 @@ import { createReadStream } from 'fs';
 import { access } from 'fs/promises';
 import { Readable } from 'stream';
 import type { FastifyReply } from 'fastify';
-import { Permission } from '@bookorbit/types';
-import type { BookDockMetadata } from '@bookorbit/types';
+import { CHUNK_UPLOAD_HEADER, MAX_CHUNK_BYTES, Permission } from '@bookorbit/types';
+import type { BookDockMetadata, ChunkUploadProgressResponse } from '@bookorbit/types';
 
 import { AuditAction, AuditResource } from '@bookorbit/types';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -47,6 +47,7 @@ import {
   SelectionSummaryDto,
 } from './dto/index';
 import { AppSettingsService } from '../app-settings/app-settings.service';
+import { parseChunkUploadFields } from '../upload/upload-chunk.fields';
 
 @Controller('book-dock')
 @RequirePermission(Permission.BookDockAccess)
@@ -123,29 +124,53 @@ export class BookDockController {
   @HttpCode(HttpStatus.CREATED)
   async upload(@CurrentUser() user: RequestUser, @Req() req: MultipartRequest) {
     const limitMb = await this.appSettings.getMaxUploadSizeMb();
-    const data = await req.file({ limits: { fileSize: limitMb * 1024 * 1024 } });
+
+    // The multipart limit has to be picked before the body is parsed, so chunking is
+    // signalled by a header rather than a form field. Without this a single "chunk"
+    // could legally be as large as an entire allowed file.
+    const isChunk = typeof req.headers[CHUNK_UPLOAD_HEADER] === 'string';
+    const data = await req.file({
+      limits: { fileSize: isChunk ? MAX_CHUNK_BYTES : limitMb * 1024 * 1024, files: 1, fields: 12, fieldSize: 1024, parts: 20 },
+    });
     if (!data) throw new BadRequestException('No file provided');
 
-    const uploadId = readMultipartField(data.fields?.uploadId);
-    const chunkIndex = readMultipartField(data.fields?.chunkIndex);
-    const totalChunks = readMultipartField(data.fields?.totalChunks);
+    const chunk = parseChunkUploadFields(data.fields);
 
-    if (uploadId && chunkIndex !== undefined && totalChunks !== undefined) {
+    if (chunk) {
       const result = await this.ingestService.ingestChunk({
-        uploadId,
-        chunkIndex: Number(chunkIndex),
-        totalChunks: Number(totalChunks),
-        rawFilename: readMultipartField(data.fields?.fileName) ?? data.filename,
+        uploadId: chunk.uploadId,
+        userId: user.id,
+        rawFilename: chunk.fileName ?? data.filename,
+        chunkIndex: chunk.chunkIndex,
+        totalChunks: chunk.totalChunks,
+        chunkSize: chunk.chunkSize,
+        totalSize: chunk.totalSize,
+        chunkSha256: chunk.chunkSha256,
         chunkStream: data.file as unknown as Readable,
-        uploadedBy: user.id,
       });
 
-      if (!result.complete || result.fileId === null) return { chunked: true, complete: false };
-      return this.service.getFile(result.fileId, user.id, this.canManageAll(user));
+      if (result.complete && result.fileId !== null) {
+        return this.service.getFile(result.fileId, user.id, this.canManageAll(user));
+      }
+
+      const progress: ChunkUploadProgressResponse = {
+        chunked: true,
+        complete: false,
+        receivedChunks: result.receivedChunks,
+        totalChunks: result.totalChunks,
+        finalizing: result.finalizing,
+      };
+      return progress;
     }
 
     const fileId = await this.ingestService.ingestUpload(data.filename, data.file as unknown as Readable, user.id);
     return this.service.getFile(fileId, user.id, this.canManageAll(user));
+  }
+
+  @Delete('upload/:uploadId')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  cancelUpload(@CurrentUser() user: RequestUser, @Param('uploadId') uploadId: string) {
+    return this.ingestService.abortChunkedUpload(uploadId, user.id);
   }
 
   @Patch('files/:id')
@@ -345,10 +370,4 @@ export class BookDockController {
   private canManageAll(user: RequestUser): boolean {
     return user.isSuperuser || user.permissions.includes(Permission.ManageBookDock);
   }
-}
-
-function readMultipartField(field: unknown): string | undefined {
-  const candidate = Array.isArray(field) ? field[0] : field;
-  const value = (candidate as { value?: unknown } | undefined)?.value;
-  return typeof value === 'string' ? value : undefined;
 }

@@ -7236,5 +7236,30 @@
     },
     "smartScopes": "Smart Scopes",
     "collections": "Collections"
+  },
+  "upload": {
+    "tray": {
+      "uploadingCount": "Uploading {active} of {total}",
+      "queuedCount": "{count} file queued | {count} files queued",
+      "failedCount": "{count} upload failed | {count} uploads failed",
+      "doneCount": "{count} file uploaded | {count} files uploaded",
+      "andMore": "and {count} more",
+      "transferred": "{loaded} of {total}",
+      "remaining": "{eta} left",
+      "queued": "Waiting",
+      "processing": "Processing on the server",
+      "failed": "Upload failed",
+      "canceled": "Canceled",
+      "retry": "Retry",
+      "cancel": "Cancel",
+      "remove": "Remove",
+      "dismiss": "Dismiss",
+      "collapse": "Collapse",
+      "expand": "Expand"
+    },
+    "rejected": {
+      "unsupported": "{name} is not a supported file type",
+      "summary": "{count} file was skipped | {count} files were skipped"
+    }
   }
 }

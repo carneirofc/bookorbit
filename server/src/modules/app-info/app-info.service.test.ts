@@ -1,6 +1,8 @@
 import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
+import { DEFAULT_UPLOAD_CHUNK_BYTES } from '@bookorbit/types';
+
 import { AppSettingsService } from '../app-settings/app-settings.service';
 import { GITHUB_RELEASES_API } from './app-info.constants';
 import { AppInfoService } from './app-info.service';
@@ -82,6 +84,7 @@ describe('AppInfoService', () => {
         latestVersion: null,
         bookDockPath: '/app/data/book-dock',
         maxUploadSizeMb: 500,
+        uploadChunkSizeBytes: DEFAULT_UPLOAD_CHUNK_BYTES,
       });
     });
 

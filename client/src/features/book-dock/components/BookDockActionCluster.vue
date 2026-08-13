@@ -19,7 +19,7 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
-const { isUploading, addFiles, clearCompleted } = useBookDockUpload()
+const { isUploading, addFiles, clearFinished } = useBookDockUpload()
 const { hasPermission } = usePermissions()
 
 const fileInput = ref<HTMLInputElement | null>(null)
@@ -29,7 +29,7 @@ const processingStateChanging = ref(false)
 const canManageBookDock = computed(() => hasPermission(Permission.ManageBookDock))
 
 function openFilePicker() {
-  clearCompleted()
+  clearFinished()
   fileInput.value?.click()
 }
 

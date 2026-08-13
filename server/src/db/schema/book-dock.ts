@@ -12,6 +12,8 @@ export const bookDockFiles = pgTable(
     fileName: varchar('file_name', { length: 500 }).notNull(),
     absolutePath: text('absolute_path').notNull().unique(),
     fileSize: bigint('file_size', { mode: 'number' }),
+    // Null for rows that predate hashing and for watched-folder ingests, which never stream through upload.
+    sha256: varchar('sha256', { length: 64 }),
     format: varchar('format', { length: 20 }),
     status: varchar('status', { length: 20 }).notNull().default('pending'),
     embeddedMetadata: jsonb('embedded_metadata').$type<BookDockMetadata>(),
@@ -35,6 +37,7 @@ export const bookDockFiles = pgTable(
     index('book_dock_files_status_idx').on(t.status),
     index('book_dock_files_target_library_id_idx').on(t.targetLibraryId),
     index('book_dock_files_uploaded_by_idx').on(t.uploadedBy),
+    index('book_dock_files_sha256_idx').on(t.sha256),
     check('book_dock_files_status_chk', sql`${t.status} in ('pending', 'extracting', 'fetching', 'ready', 'error')`),
     check('book_dock_files_confidence_range_chk', sql`${t.confidence} is null or (${t.confidence} >= 0 and ${t.confidence} <= 100)`),
   ],

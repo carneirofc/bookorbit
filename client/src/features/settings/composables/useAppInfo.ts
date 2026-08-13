@@ -1,6 +1,6 @@
 import { ref } from 'vue'
 
-import type { AppInfoResponse } from '@bookorbit/types'
+import { DEFAULT_UPLOAD_CHUNK_BYTES, type AppInfoResponse } from '@bookorbit/types'
 
 import { api } from '@/lib/api'
 
@@ -9,6 +9,7 @@ const updateAvailable = ref<boolean | null>(null)
 const latestVersion = ref<string | null>(null)
 const bookDockPath = ref('')
 const maxUploadSizeMb = ref(500)
+const uploadChunkSizeBytes = ref(DEFAULT_UPLOAD_CHUNK_BYTES)
 const isLoading = ref(false)
 const error = ref<string | null>(null)
 
@@ -26,6 +27,7 @@ export function useAppInfo() {
       latestVersion.value = data.latestVersion
       bookDockPath.value = data.bookDockPath ?? ''
       maxUploadSizeMb.value = data.maxUploadSizeMb ?? 500
+      uploadChunkSizeBytes.value = data.uploadChunkSizeBytes ?? DEFAULT_UPLOAD_CHUNK_BYTES
     } catch (e) {
       error.value = e instanceof Error ? e.message : 'Failed to load app info'
     } finally {
@@ -33,5 +35,5 @@ export function useAppInfo() {
     }
   }
 
-  return { version, updateAvailable, latestVersion, bookDockPath, maxUploadSizeMb, isLoading, error, loadAppInfo }
+  return { version, updateAvailable, latestVersion, bookDockPath, maxUploadSizeMb, uploadChunkSizeBytes, isLoading, error, loadAppInfo }
 }

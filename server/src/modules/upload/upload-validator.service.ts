@@ -1,5 +1,9 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, UnprocessableEntityException } from '@nestjs/common';
 import { extname } from 'path';
+
+import { ChunkUploadErrorCode } from '@bookorbit/types';
+
+import { classifySignature, readSignatureHead } from '../../common/file-signature';
 
 export const SUPPORTED_BOOK_FORMATS = new Set([
   'epub',
@@ -39,6 +43,40 @@ export class UploadValidatorService {
     }
 
     return ext;
+  }
+
+  /**
+   * Returns the normalized extension if it is a supported book format; throws otherwise.
+   * The library-scoped variant is `validateFormat`.
+   */
+  validateBookFormat(filename: string): string {
+    const ext = extname(filename).toLowerCase().slice(1);
+
+    if (!SUPPORTED_BOOK_FORMATS.has(ext)) {
+      throw new BadRequestException(`Unsupported file type .${ext}. Allowed types: ${[...SUPPORTED_BOOK_FORMATS].join(', ')}`);
+    }
+
+    return ext;
+  }
+
+  /**
+   * Rejects a file whose leading bytes contradict its extension.
+   *
+   * Only an outright contradiction is fatal: an unrecognized container passes,
+   * because the signature table cannot cover every valid book.
+   */
+  assertHeadMatchesExtension(head: Buffer, ext: string): void {
+    if (classifySignature(head, ext) !== 'mismatch') return;
+
+    throw new UnprocessableEntityException({
+      message: `File contents do not match the .${ext} extension`,
+      errorCode: ChunkUploadErrorCode.CONTENT_TYPE_MISMATCH,
+    });
+  }
+
+  /** `assertHeadMatchesExtension` for callers that have a path rather than a head buffer. */
+  async assertContentMatchesExtension(absolutePath: string, ext: string): Promise<void> {
+    this.assertHeadMatchesExtension(await readSignatureHead(absolutePath), ext);
   }
 
   /**

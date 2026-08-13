@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { toast } from 'vue-sonner'
 import { PackageOpen, CheckCircle2, AlertCircle } from '@lucide/vue'
 import type { BookDockFile } from '@bookorbit/types'
 import { api } from '@/lib/api'
@@ -55,7 +56,7 @@ const {
 
 const { summary, fetchSummary, subscribe, onBookDockChange, socketConnected } = useBookDockSummary()
 const { statistics, fetchStatistics } = useBookDockStatistics()
-const { addFiles, isUploading } = useBookDockUpload()
+const { addFiles, isUploading } = useBookDockUpload(() => scheduleUploadRefresh())
 const { isDemoRestrictedAccount, hasPermission } = usePermissions()
 const { conflicts, scheduleConflicts, cancelConflicts } = useBookDockConflicts()
 
@@ -402,10 +403,24 @@ function onDrop(e: DragEvent) {
       const ext = f.name.split('.').pop()?.toLowerCase() ?? ''
       return SUPPORTED_FORMATS.includes(ext)
     })
+    const skipped = files.length - valid.length
+    if (skipped > 0) toast.warning(t('upload.rejected.summary', skipped, { named: { count: skipped } }))
     if (valid.length) {
       addFiles(valid)
     }
   }
+}
+
+let uploadRefreshTimer: ReturnType<typeof setTimeout> | undefined
+
+// Files land in the dock one at a time; refresh as they arrive rather than making the
+// user wait for a whole batch, but coalesce bursts into a single request.
+function scheduleUploadRefresh() {
+  if (uploadRefreshTimer) clearTimeout(uploadRefreshTimer)
+  uploadRefreshTimer = setTimeout(() => {
+    uploadRefreshTimer = undefined
+    void refresh()
+  }, 750)
 }
 
 watch(isUploading, (uploading, was) => {

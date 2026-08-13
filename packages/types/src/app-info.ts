@@ -4,4 +4,5 @@ export interface AppInfoResponse {
   latestVersion: string | null;
   bookDockPath: string;
   maxUploadSizeMb: number;
+  uploadChunkSizeBytes: number;
 }

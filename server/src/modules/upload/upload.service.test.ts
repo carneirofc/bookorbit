@@ -87,7 +87,17 @@ describe('UploadService', () => {
   const validator = {
     sanitizeFilename: vi.fn(),
     validateFormat: vi.fn(),
+    assertHeadMatchesExtension: vi.fn(),
   };
+  /** A real ZIP signature, so the content check accepts the staged file as an epub. */
+  const EPUB_HEAD = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
+
+  const uploadSessions = {
+    getUploadDir: vi.fn().mockReturnValue('/data/.uploads'),
+    writeChunk: vi.fn(),
+    abort: vi.fn().mockResolvedValue(undefined),
+  };
+
   const storage = {
     streamToTemp: vi.fn(),
     moveToPath: vi.fn(),
@@ -119,12 +129,13 @@ describe('UploadService', () => {
       validator as any,
       storage as any,
       processor as any,
+      uploadSessions as any,
       moduleRef as any,
     );
 
     validator.sanitizeFilename.mockReturnValue('book.epub');
     validator.validateFormat.mockReturnValue('epub');
-    storage.streamToTemp.mockResolvedValue({ tempPath: '/tmp/upload.bin', sizeBytes: 456 });
+    storage.streamToTemp.mockResolvedValue({ tempPath: '/tmp/upload.bin', sizeBytes: 456, sha256: 'abc123', head: EPUB_HEAD });
     storage.moveToPath.mockResolvedValue(undefined);
     storage.cleanup.mockResolvedValue(undefined);
     processor.createBookRecord.mockResolvedValue({ bookId: 99, created: true });

@@ -1,11 +1,8 @@
-import { BadRequestException, Injectable, Logger, OnApplicationBootstrap, OnModuleDestroy, PayloadTooLargeException } from '@nestjs/common';
+import { Injectable, Logger, OnApplicationBootstrap, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { basename, extname, join } from 'path';
-import { mkdir, realpath, stat, unlink } from 'fs/promises';
-import { createReadStream, createWriteStream } from 'fs';
-import { tmpdir } from 'os';
+import { mkdir, realpath, stat } from 'fs/promises';
 import { Readable } from 'stream';
-import { pipeline } from 'stream/promises';
 
 import { isAudioFormat, MetadataProviderKey, resolveBookDockSearchTitle, type BookDockMetadata } from '@bookorbit/types';
 import type { BookDockFileRow } from '../../db/schema';
@@ -21,6 +18,15 @@ import { BookDockGateway } from './book-dock.gateway';
 import { normalizeBookDockMetadata, normalizeBookDockMetadataSources } from './book-dock-metadata.utils';
 import { BookDockProcessingStateService } from './book-dock-processing-state.service';
 import { BookDockWorkQueue, type BookDockWorkPriority } from './book-dock-work-queue';
+import { UploadSessionService, type AssembledUpload } from '../upload/upload-session.service';
+
+export interface ChunkIngestResult {
+  complete: boolean;
+  fileId: number | null;
+  receivedChunks: number;
+  totalChunks: number;
+  finalizing: boolean;
+}
 
 const METADATA_QUEUE_CONCURRENCY = 1;
 const METADATA_QUEUE_DRAIN_DELAY_MS = 250;
@@ -28,7 +34,6 @@ const METADATA_QUEUE_INTER_BOOK_DELAY_MIN_MS = 500;
 const METADATA_QUEUE_INTER_BOOK_DELAY_MAX_MS = 1_000;
 const REQUEUE_BATCH_SIZE = 500;
 const PROCESSABLE_METADATA_STATUSES = new Set(['pending', 'extracting', 'fetching']);
-const CHUNK_UPLOAD_ID_PATTERN = /^[a-zA-Z0-9-]{1,64}$/;
 
 @Injectable()
 export class BookDockIngestService implements OnApplicationBootstrap, OnModuleDestroy {
@@ -47,6 +52,7 @@ export class BookDockIngestService implements OnApplicationBootstrap, OnModuleDe
     private readonly metadataFetchPipeline: MetadataFetchPipeline,
     private readonly processingState: BookDockProcessingStateService,
     private readonly gateway: BookDockGateway,
+    private readonly uploadSessions: UploadSessionService,
   ) {
     const appDataPath = this.config.get<string>('storage.appDataPath') ?? '/data';
     this.bookDockPath = this.config.get<string>('storage.bookDockPath') ?? join(appDataPath, 'book-dock');
@@ -75,18 +81,58 @@ export class BookDockIngestService implements OnApplicationBootstrap, OnModuleDe
   }
 
   async ingestUpload(rawFilename: string, fileStream: Readable, uploadedBy?: number): Promise<number> {
-    const filename = this.validator.sanitizeFilename(rawFilename);
-    const ext = extname(filename).toLowerCase().slice(1);
+    const fileName = this.validator.sanitizeFilename(rawFilename);
+    const ext = this.validator.validateBookFormat(fileName);
 
-    if (!SUPPORTED_BOOK_FORMATS.has(ext)) {
-      throw new BadRequestException(`Unsupported file type .${ext}. Allowed types: ${[...SUPPORTED_BOOK_FORMATS].join(', ')}`);
-    }
+    // Staged inside the upload dir rather than the OS temp dir so the move below is a
+    // rename on the same filesystem instead of a full copy across devices.
+    const stored = await this.storage.streamToTemp(fileStream, this.uploadSessions.getUploadDir());
 
-    const { tempPath, sizeBytes } = await this.storage.streamToTemp(fileStream);
+    return this.finishIngest({ ...stored, fileName, ext, uploadedBy });
+  }
+
+  /**
+   * Ingests a file that is already complete on disk, as produced by the chunked upload
+   * path. Nothing is re-streamed: the assembled file is moved into place directly.
+   */
+  async ingestAssembledFile(assembled: AssembledUpload, uploadedBy?: number): Promise<number> {
+    const fileId = await this.finishIngest({
+      tempPath: assembled.tempPath,
+      fileName: assembled.fileName,
+      ext: assembled.ext,
+      sizeBytes: assembled.sizeBytes,
+      sha256: assembled.sha256,
+      head: assembled.head,
+      uploadedBy,
+    });
+
+    this.logger.log(
+      `[book_dock.chunk_upload] [end] uploadId="${sanitizeLogValue(assembled.uploadId)}" userId=${uploadedBy ?? 0} fileId=${fileId} sizeBytes=${assembled.sizeBytes} sha256=${assembled.sha256} durationMs=${Date.now() - assembled.startedAt} - chunked upload assembled`,
+    );
+
+    return fileId;
+  }
+
+  /**
+   * Shared tail of both upload paths: validate the bytes, move the staged file into the
+   * dock, record it, and queue metadata extraction.
+   */
+  private async finishIngest(input: {
+    tempPath: string;
+    fileName: string;
+    ext: string;
+    sizeBytes: number;
+    sha256: string;
+    head: Buffer;
+    uploadedBy?: number;
+  }): Promise<number> {
+    const { tempPath, fileName, ext, sizeBytes, sha256, head, uploadedBy } = input;
     let destPath: string | null = null;
 
     try {
-      destPath = await this.resolveUniquePath(join(this.bookDockPath, filename));
+      this.validator.assertHeadMatchesExtension(head, ext);
+
+      destPath = await this.resolveUniquePath(join(this.bookDockPath, fileName));
 
       await this.storage.moveToPath(tempPath, destPath);
 
@@ -94,6 +140,7 @@ export class BookDockIngestService implements OnApplicationBootstrap, OnModuleDe
         fileName: basename(destPath),
         absolutePath: destPath,
         fileSize: sizeBytes,
+        sha256,
         format: ext,
         status: 'pending',
         uploadedBy: uploadedBy ?? null,
@@ -109,57 +156,56 @@ export class BookDockIngestService implements OnApplicationBootstrap, OnModuleDe
   }
 
   /**
-   * Assembles a large upload sent as sequential chunks (each its own multipart request,
-   * chunkIndex 0..totalChunks-1) into a single temp file, then ingests it once complete.
-   * Chunks for a given uploadId must arrive in order — the caller (single-file XHR loop)
-   * awaits each request before sending the next.
+   * Stores one chunk of a large upload and, once the final outstanding chunk lands,
+   * ingests the assembled file. Chunks may arrive concurrently and in any order; the
+   * session service owns reassembly and integrity checking.
    */
   async ingestChunk(params: {
     uploadId: string;
+    userId: number;
+    rawFilename: string;
     chunkIndex: number;
     totalChunks: number;
-    rawFilename: string;
+    chunkSize: number;
+    totalSize: number;
+    chunkSha256?: string;
     chunkStream: Readable;
-    uploadedBy?: number;
-  }): Promise<{ complete: boolean; fileId: number | null }> {
-    const { uploadId, chunkIndex, totalChunks, rawFilename, chunkStream, uploadedBy } = params;
-
-    if (!CHUNK_UPLOAD_ID_PATTERN.test(uploadId)) throw new BadRequestException('Invalid upload id');
-    if (!Number.isInteger(totalChunks) || totalChunks < 1 || !Number.isInteger(chunkIndex) || chunkIndex < 0 || chunkIndex >= totalChunks) {
-      throw new BadRequestException('Invalid chunk index');
-    }
-
-    const chunkPath = join(tmpdir(), `bookorbit-chunk-upload-${uploadId}`);
-
-    try {
-      await pipeline(chunkStream, createWriteStream(chunkPath, { flags: chunkIndex === 0 ? 'w' : 'a' }));
-    } catch (err) {
-      await unlink(chunkPath).catch(() => undefined);
-      const errorClass = err instanceof Error ? err.name : 'Error';
-      const errorMessage = sanitizeLogValue(err instanceof Error ? err.message : String(err));
-      this.logger.warn(
-        `[book_dock.chunk_upload] [fail] uploadId=${sanitizeLogValue(uploadId)} chunkIndex=${chunkIndex} errorClass=${errorClass} error="${errorMessage}" - chunk write failed`,
-      );
-      throw err;
-    }
-
-    if (chunkIndex < totalChunks - 1) {
-      return { complete: false, fileId: null };
-    }
-
+  }): Promise<ChunkIngestResult> {
     const limitMb = await this.appSettings.getMaxUploadSizeMb();
-    const { size } = await stat(chunkPath);
-    if (size > limitMb * 1024 * 1024) {
-      await unlink(chunkPath).catch(() => undefined);
-      throw new PayloadTooLargeException(`File exceeds the ${limitMb} MB upload limit`);
+
+    const result = await this.uploadSessions.writeChunk({
+      uploadId: params.uploadId,
+      userId: params.userId,
+      rawFileName: params.rawFilename,
+      chunkIndex: params.chunkIndex,
+      totalChunks: params.totalChunks,
+      chunkSize: params.chunkSize,
+      totalSize: params.totalSize,
+      chunkSha256: params.chunkSha256,
+      chunkStream: params.chunkStream,
+      maxTotalBytes: limitMb * 1024 * 1024,
+    });
+
+    if (result.status === 'partial') {
+      return {
+        complete: false,
+        fileId: null,
+        receivedChunks: result.receivedChunks,
+        totalChunks: result.totalChunks,
+        finalizing: result.finalizing,
+      };
     }
 
     try {
-      const fileId = await this.ingestUpload(rawFilename, createReadStream(chunkPath), uploadedBy);
-      return { complete: true, fileId };
+      const fileId = await this.ingestAssembledFile(result.assembled, params.userId);
+      return { complete: true, fileId, receivedChunks: params.totalChunks, totalChunks: params.totalChunks, finalizing: false };
     } finally {
-      await unlink(chunkPath).catch(() => undefined);
+      await result.assembled.release();
     }
+  }
+
+  abortChunkedUpload(uploadId: string, userId: number): Promise<void> {
+    return this.uploadSessions.abort(uploadId, userId);
   }
 
   async retryFetch(fileId: number): Promise<void> {

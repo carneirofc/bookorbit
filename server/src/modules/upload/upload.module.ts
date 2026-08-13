@@ -11,11 +11,12 @@ import { UploadProcessorService } from './upload-processor.service';
 import { UploadService } from './upload.service';
 import { UploadStorageService } from './upload-storage.service';
 import { UploadValidatorService } from './upload-validator.service';
+import { UploadSessionService } from './upload-session.service';
 
 @Module({
   imports: [AppSettingsModule, LibraryModule, MetadataModule, BookMetadataFetchModule, FileWriteModule],
   controllers: [UploadController, BookFileUploadController],
-  providers: [UploadService, UploadValidatorService, UploadStorageService, UploadProcessorService],
-  exports: [UploadValidatorService, UploadStorageService, UploadProcessorService, UploadService],
+  providers: [UploadService, UploadValidatorService, UploadStorageService, UploadProcessorService, UploadSessionService],
+  exports: [UploadValidatorService, UploadStorageService, UploadProcessorService, UploadService, UploadSessionService],
 })
 export class UploadModule {}
