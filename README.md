@@ -115,6 +115,8 @@ The download is pre-configured with your server URL and credentials, so there is
 
 Full documentation is at **[bookorbit.app](https://bookorbit.app/what-is-bookorbit)**, covering libraries, metadata, readers, Kobo sync, OPDS, users and permissions, OIDC setup, and more.
 
+For backups, restores and migrating to a new Kubernetes installation, see [docs/BACKUP_AND_RESTORE.md](docs/BACKUP_AND_RESTORE.md).
+
 For local development, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). To contribute, see [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) for the full workflow: branch naming, test expectations, PR checklist, and commit format.
 
 ## Repository Activity

@@ -1,0 +1,28 @@
+# Short-lived pod for ad hoc restic commands (list snapshots, check, browse files).
+#   kubectl apply -f restic-toolbox-pod.yaml
+#   kubectl -n bookorbit exec -it bookorbit-restic-toolbox -- restic snapshots
+#   kubectl -n bookorbit delete pod bookorbit-restic-toolbox
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bookorbit-restic-toolbox
+  namespace: bookorbit
+spec:
+  restartPolicy: Never
+  activeDeadlineSeconds: 14400
+  containers:
+    - name: restic
+      image: restic/restic:0.18.0
+      command: ["/bin/sh", "-c", "sleep 14400"]
+      envFrom:
+        - secretRef:
+            name: bookorbit-backup
+      env:
+        - name: RESTIC_CACHE_DIR
+          value: /cache
+      volumeMounts:
+        - name: cache
+          mountPath: /cache
+  volumes:
+    - name: cache
+      emptyDir: {}

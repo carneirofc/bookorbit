@@ -1,0 +1,106 @@
+# Nightly backup of the BookOrbit database, books PVC and app data PVC to restic on S3.
+#
+# Placeholders to adjust: namespace, PVC claim names, the podAffinity label selector
+# (it must match the BookOrbit app pod), schedule and retention.
+#
+# The PVCs are mounted read-only. podAffinity schedules the job on the node that runs
+# the app, so ReadWriteOnce volumes can be shared. ReadWriteOncePod volumes cannot be
+# shared at all: scale the app to 0 before running the job in that case.
+#
+# Trigger a manual run with:
+#   kubectl -n bookorbit create job --from=cronjob/bookorbit-backup bookorbit-backup-manual-$(date +%s)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: bookorbit-backup
+  namespace: bookorbit
+spec:
+  schedule: "30 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          affinity:
+            podAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels:
+                      app.kubernetes.io/name: bookorbit
+                  topologyKey: kubernetes.io/hostname
+          initContainers:
+            # Postgres client major version must be >= the server major version.
+            - name: pg-dump
+              image: postgres:18-alpine
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  started=$(date +%s)
+                  pg_dump --format=custom --no-owner --no-acl --dbname="$DATABASE_URL" --file=/work/bookorbit.dump.tmp
+                  mv /work/bookorbit.dump.tmp /work/bookorbit.dump
+                  echo "[backup.db_dump] [end] durationMs=$(( ($(date +%s) - started) * 1000 )) sizeBytes=$(stat -c %s /work/bookorbit.dump) - database dump completed"
+              env:
+                - name: DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: bookorbit-backup
+                      key: DATABASE_URL
+              volumeMounts:
+                - name: work
+                  mountPath: /work
+              resources:
+                requests: { cpu: 100m, memory: 256Mi }
+                limits: { memory: 1Gi }
+          containers:
+            - name: restic
+              image: restic/restic:0.18.0
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  # A fixed --host keeps every snapshot in one group regardless of pod name.
+                  restic backup --host bookorbit --tag db /work/bookorbit.dump
+                  restic backup --host bookorbit --tag books /books
+                  restic backup --host bookorbit --tag data --exclude /data/.uploads /data
+                  restic forget --host bookorbit --group-by host,tags \
+                    --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune
+                  restic snapshots --host bookorbit --latest 1 --group-by tags
+              envFrom:
+                - secretRef:
+                    name: bookorbit-backup
+              env:
+                - name: RESTIC_CACHE_DIR
+                  value: /cache
+              volumeMounts:
+                - name: work
+                  mountPath: /work
+                  readOnly: true
+                - name: cache
+                  mountPath: /cache
+                - name: books
+                  mountPath: /books
+                  readOnly: true
+                - name: data
+                  mountPath: /data
+                  readOnly: true
+              resources:
+                requests: { cpu: 200m, memory: 512Mi }
+                limits: { memory: 2Gi }
+          volumes:
+            - name: work
+              emptyDir: {}
+            - name: cache
+              emptyDir: {}
+            - name: books
+              persistentVolumeClaim:
+                claimName: bookorbit-books
+                readOnly: true
+            - name: data
+              persistentVolumeClaim:
+                claimName: bookorbit-data
+                readOnly: true

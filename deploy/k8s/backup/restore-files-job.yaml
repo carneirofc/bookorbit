@@ -1,0 +1,65 @@
+# Restores the books PVC and the app data PVC from restic snapshots.
+#
+# Preconditions (see docs/BACKUP_AND_RESTORE.md):
+#   - the BookOrbit app is scaled to 0 (the PVCs are mounted read-write here)
+#   - the PVCs exist and are at least as large as the source volumes
+#
+# The mount paths MUST stay /books and /data: the database stores absolute file paths.
+# Set BOOKS_SNAPSHOT / DATA_SNAPSHOT to snapshot IDs to restore older snapshots.
+# Set RESTORE_DELETE=true on an in-place restore to remove files that are not in the
+# snapshot (for example books added after the backup). Leave it false on a fresh volume.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: bookorbit-restore-files
+  namespace: bookorbit
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: restic
+          image: restic/restic:0.18.0
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              delete_flag=""
+              if [ "$RESTORE_DELETE" = "true" ]; then delete_flag="--delete"; fi
+              restic restore "$BOOKS_SNAPSHOT" --host bookorbit --tag books --target / $delete_flag
+              restic restore "$DATA_SNAPSHOT" --host bookorbit --tag data --target / $delete_flag
+              echo "books files: $(find /books -type f | wc -l)"
+              echo "data files:  $(find /data -type f | wc -l)"
+          envFrom:
+            - secretRef:
+                name: bookorbit-backup
+          env:
+            - name: BOOKS_SNAPSHOT
+              value: latest
+            - name: DATA_SNAPSHOT
+              value: latest
+            - name: RESTORE_DELETE
+              value: "false"
+            - name: RESTIC_CACHE_DIR
+              value: /cache
+          volumeMounts:
+            - name: cache
+              mountPath: /cache
+            - name: books
+              mountPath: /books
+            - name: data
+              mountPath: /data
+          resources:
+            requests: { cpu: 200m, memory: 512Mi }
+            limits: { memory: 2Gi }
+      volumes:
+        - name: cache
+          emptyDir: {}
+        - name: books
+          persistentVolumeClaim:
+            claimName: bookorbit-books
+        - name: data
+          persistentVolumeClaim:
+            claimName: bookorbit-data

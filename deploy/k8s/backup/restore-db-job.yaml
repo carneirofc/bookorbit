@@ -1,0 +1,72 @@
+# Restores the BookOrbit database from a restic snapshot.
+#
+# Preconditions (see docs/BACKUP_AND_RESTORE.md):
+#   - the BookOrbit app is scaled to 0
+#   - the target database exists and is EMPTY (drop and recreate it for an in-place restore)
+#   - the uuid-ossp, pg_trgm and vector extensions are installed on the server; if the
+#     app role is not a superuser, create them in the target database beforehand
+#
+# Set SNAPSHOT to a snapshot ID from `restic snapshots --tag db` to restore an older one.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: bookorbit-restore-db
+  namespace: bookorbit
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: fetch-dump
+          image: restic/restic:0.18.0
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              restic dump --host bookorbit --tag db "$SNAPSHOT" /work/bookorbit.dump > /restore/bookorbit.dump
+              ls -l /restore/bookorbit.dump
+          envFrom:
+            - secretRef:
+                name: bookorbit-backup
+          env:
+            - name: SNAPSHOT
+              value: latest
+            - name: RESTIC_CACHE_DIR
+              value: /cache
+          volumeMounts:
+            - name: restore
+              mountPath: /restore
+            - name: cache
+              mountPath: /cache
+      containers:
+        - name: pg-restore
+          image: postgres:18-alpine
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              # Skip extension comments: only the extension owner (usually a superuser) may set them.
+              pg_restore --list /restore/bookorbit.dump | grep -v 'COMMENT - EXTENSION' > /restore/restore.list
+              pg_restore --no-owner --no-acl --exit-on-error --single-transaction \
+                --use-list=/restore/restore.list --dbname="$DATABASE_URL" /restore/bookorbit.dump
+              psql "$DATABASE_URL" -Atc "select 'books=' || count(*) from books"
+              psql "$DATABASE_URL" -Atc "select 'users=' || count(*) from users"
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: bookorbit-backup
+                  key: DATABASE_URL
+          volumeMounts:
+            - name: restore
+              mountPath: /restore
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { memory: 1Gi }
+      volumes:
+        - name: restore
+          emptyDir: {}
+        - name: cache
+          emptyDir: {}
