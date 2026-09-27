@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { computed } from 'vue'
 
 vi.mock('@/lib/api', () => ({ getValidToken: vi.fn<() => Promise<string>>().mockResolvedValue('token') }))
 
@@ -192,6 +193,50 @@ describe('useUploadQueue', () => {
 
       expect(queue.items.value).toHaveLength(1)
       expect(queue.items.value[0].status).toBe('error')
+    })
+  })
+
+  describe('reactivity', () => {
+    it('propagates progress and completion to computed views after the upload starts', async () => {
+      let reportProgress: (loaded: number) => void = () => {}
+      let finish: (value: unknown) => void = () => {}
+      uploadFileInChunks.mockImplementation((opts) => {
+        const { onProgress } = opts as { onProgress: (p: { loadedBytes: number; totalBytes: number }) => void }
+        reportProgress = (loaded) => onProgress({ loadedBytes: loaded, totalBytes: 1000 })
+        return new Promise((resolve) => {
+          finish = resolve
+        })
+      })
+
+      const queue = useUploadQueue(makeTarget())
+      const view = computed(() => queue.items.value.map((i) => `${i.status}:${i.progress}`).join(','))
+
+      queue.addFiles([fileOf('a.epub')])
+      await flush()
+      expect(view.value).toBe('uploading:0')
+
+      reportProgress(400)
+      expect(view.value).toBe('uploading:40')
+      expect(queue.overallProgress.value).toBe(40)
+
+      finish({ id: 1 })
+      await flush()
+      expect(view.value).toBe('done:100')
+      expect(queue.isUploading.value).toBe(false)
+    })
+  })
+
+  describe('tray visibility', () => {
+    it('reopens and expands a dismissed tray on demand', () => {
+      const queue = useUploadQueue(makeTarget())
+      queue.trayDismissed.value = true
+      queue.trayCollapsed.value = true
+
+      queue.showTray()
+
+      expect(queue.trayDismissed.value).toBe(false)
+      expect(queue.trayCollapsed.value).toBe(false)
+      expect(queue.trayOpen.value).toBe(true)
     })
   })
 })
