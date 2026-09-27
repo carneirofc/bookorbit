@@ -12,6 +12,7 @@ import { useAuth } from '@/features/auth/composables/useAuth'
 import { Toaster } from '@/components/ui/sonner'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import UploadTray from '@/features/upload/components/UploadTray.vue'
+import { useUploadQueue } from '@/features/upload/composables/useUploadQueue'
 
 const { isOpen } = useChangePasswordDialog()
 const themeStore = useThemeStore()
@@ -37,6 +38,11 @@ watch(
 
 initChartThemes()
 
+// The upload tray and toasts share the bottom-right corner; lift toasts above the tray
+// so neither hides the other. 16px is the tray's own inset, 8px the stacking gap.
+const { trayHeight } = useUploadQueue()
+const toasterOffset = computed(() => (trayHeight.value > 0 ? { bottom: trayHeight.value + 24 } : undefined))
+
 provide(INIT_OPTIONS_KEY, { renderer: 'svg' })
 provide(
   THEME_KEY,
@@ -54,6 +60,6 @@ provide(
     <ChangePasswordDialog v-if="isOpen" />
     <WhatsNewDialog v-if="popupOpen" />
     <UploadTray />
-    <Toaster rich-colors position="bottom-right" :visible-toasts="5" :gap="8" />
+    <Toaster rich-colors position="bottom-right" :visible-toasts="5" :gap="8" :offset="toasterOffset" :mobile-offset="toasterOffset" />
   </TooltipProvider>
 </template>

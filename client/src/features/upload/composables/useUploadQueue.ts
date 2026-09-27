@@ -1,4 +1,4 @@
-import { computed, ref, type ComputedRef, type Ref } from 'vue'
+import { computed, reactive, ref, type ComputedRef, type Ref } from 'vue'
 
 import { cancelChunkedUpload, newUploadId, uploadFileInChunks, UploadCanceledError, type ChunkUploadFailure } from './useChunkedUploader'
 
@@ -71,6 +71,9 @@ const items = ref<UploadItem[]>([])
 const entries = new Map<string, QueueEntry>()
 const trayOpen = ref(false)
 const trayDismissed = ref(false)
+const trayCollapsed = ref(false)
+/** Rendered tray height in px, so toasts can stack above it instead of covering it. */
+const trayHeight = ref(0)
 
 let draining = false
 
@@ -79,6 +82,8 @@ export interface UploadQueue<TResult> {
   files: ComputedRef<UploadItem<TResult>[]>
   trayOpen: Ref<boolean>
   trayDismissed: Ref<boolean>
+  trayCollapsed: Ref<boolean>
+  trayHeight: Ref<number>
   activeCount: ComputedRef<number>
   pendingCount: ComputedRef<number>
   doneCount: ComputedRef<number>
@@ -92,6 +97,7 @@ export interface UploadQueue<TResult> {
   remove: (id: string) => void
   clearFinished: () => void
   clearAll: () => void
+  showTray: () => void
 }
 
 export function useUploadQueue<TResult = unknown>(target?: UploadTarget<TResult>): UploadQueue<TResult> {
@@ -120,7 +126,9 @@ export function useUploadQueue<TResult = unknown>(target?: UploadTarget<TResult>
       const error = active.validate(file) ?? undefined
       const id = `${file.name}-${file.size}-${file.lastModified}-${newUploadId().slice(0, 8)}`
 
-      const item: UploadItem = {
+      // Reactive up front: the queue mutates this object for its whole lifetime, and
+      // writes through a raw reference would never reach the tray.
+      const item = reactive<UploadItem>({
         id,
         uploadId: newUploadId(),
         file,
@@ -131,7 +139,7 @@ export function useUploadQueue<TResult = unknown>(target?: UploadTarget<TResult>
         etaSeconds: null,
         error,
         validationError: error !== undefined,
-      }
+      })
 
       let markSettled = () => {}
       const settled = new Promise<void>((resolve) => {
@@ -244,11 +252,19 @@ export function useUploadQueue<TResult = unknown>(target?: UploadTarget<TResult>
     entries.clear()
   }
 
+  function showTray(): void {
+    trayDismissed.value = false
+    trayCollapsed.value = false
+    trayOpen.value = true
+  }
+
   return {
     items,
     files,
     trayOpen,
     trayDismissed,
+    trayCollapsed,
+    trayHeight,
     activeCount,
     pendingCount,
     doneCount,
@@ -262,6 +278,7 @@ export function useUploadQueue<TResult = unknown>(target?: UploadTarget<TResult>
     remove,
     clearFinished,
     clearAll,
+    showTray,
   }
 }
 

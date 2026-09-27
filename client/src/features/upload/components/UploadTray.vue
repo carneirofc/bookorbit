@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
+import { useElementSize } from '@vueuse/core'
 import { useI18n } from 'vue-i18n'
 import { ChevronDown, ChevronUp, X } from '@lucide/vue'
 
@@ -13,10 +14,25 @@ import UploadTrayRow from './UploadTrayRow.vue'
 const MAX_VISIBLE_ROWS = 8
 
 const { t } = useI18n()
-const { items, trayOpen, trayDismissed, activeCount, pendingCount, doneCount, errorCount, overallProgress, cancel, retry, remove, clearFinished } =
-  useUploadQueue()
+const {
+  items,
+  trayOpen,
+  trayDismissed,
+  trayCollapsed: collapsed,
+  trayHeight,
+  activeCount,
+  pendingCount,
+  doneCount,
+  errorCount,
+  overallProgress,
+  cancel,
+  retry,
+  remove,
+  clearFinished,
+} = useUploadQueue()
 
-const collapsed = ref(false)
+const trayEl = ref<HTMLElement | null>(null)
+const { height } = useElementSize(trayEl, undefined, { box: 'border-box' })
 
 const isVisible = computed(() => items.value.length > 0 && trayOpen.value && !trayDismissed.value)
 
@@ -27,12 +43,20 @@ const hiddenCount = computed(() => Math.max(0, ordered.value.length - MAX_VISIBL
 
 const heading = computed(() => {
   if (activeCount.value > 0) {
-    return t('upload.tray.uploadingCount', { active: activeCount.value, total: items.value.length })
+    return t('upload.tray.uploadingCount', { done: doneCount.value, total: items.value.length })
   }
   if (pendingCount.value > 0) return t('upload.tray.queuedCount', { count: pendingCount.value })
   if (errorCount.value > 0) return t('upload.tray.failedCount', { count: errorCount.value })
   return t('upload.tray.doneCount', { count: doneCount.value })
 })
+
+watch(
+  [isVisible, height],
+  ([visible, h]) => {
+    trayHeight.value = visible ? Math.round(h) : 0
+  },
+  { immediate: true },
+)
 
 function toggleCollapsed() {
   collapsed.value = !collapsed.value
@@ -59,6 +83,7 @@ function handleRemove(id: string) {
 <template>
   <div
     v-if="isVisible"
+    ref="trayEl"
     class="fixed bottom-4 right-4 z-50 w-[min(24rem,calc(100vw-2rem))] overflow-hidden rounded-lg border border-border bg-card shadow-lg"
     role="status"
     aria-live="polite"

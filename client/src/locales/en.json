@@ -7239,7 +7239,7 @@
   },
   "upload": {
     "tray": {
-      "uploadingCount": "Uploading {active} of {total}",
+      "uploadingCount": "{done} of {total} uploaded",
       "queuedCount": "{count, plural, one {# file queued} other {# files queued}}",
       "failedCount": "{count, plural, one {# upload failed} other {# uploads failed}}",
       "doneCount": "{count, plural, one {# file uploaded} other {# files uploaded}}",
@@ -7255,7 +7255,8 @@
       "remove": "Remove",
       "dismiss": "Dismiss",
       "collapse": "Collapse",
-      "expand": "Expand"
+      "expand": "Expand",
+      "show": "Show upload progress"
     },
     "rejected": {
       "unsupported": "{name} is not a supported file type",
