@@ -12,6 +12,8 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     pool: 'threads',
+    unstubEnvs: true,
+    unstubGlobals: true,
     include: ['src/**/*.test.ts', 'test/**/*.test.ts'],
     passWithNoTests: true,
     reporters: process.env.CI ? ['default', 'github-actions'] : ['default'],

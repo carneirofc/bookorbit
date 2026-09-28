@@ -342,6 +342,7 @@ export const routes: RouteRecordRaw[] = [
           if (to.query.tab === 'achievements') {
             return { name: 'achievements' }
           }
+          return true
         },
       },
       {
@@ -460,6 +461,7 @@ export const routes: RouteRecordRaw[] = [
           if (!to.query.tab) {
             return { ...to, query: { ...to.query, tab: 'details' } }
           }
+          return true
         },
       },
       {
