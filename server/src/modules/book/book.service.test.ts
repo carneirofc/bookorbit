@@ -812,6 +812,32 @@ describe('BookService', () => {
     });
   });
 
+  describe('resolveAccessibleExportBookIds', () => {
+    it('drops books deleted since selection while keeping the requested order', async () => {
+      const { service, bookRepo, libraryService } = makeService();
+      const user = makeUser();
+      bookRepo.findLibraryIdsByBookIds.mockResolvedValue([
+        { id: 3, libraryId: 10 },
+        { id: 1, libraryId: 20 },
+      ]);
+
+      await expect(service.resolveAccessibleExportBookIds([3, 2, 1, 3], user)).resolves.toEqual([3, 1, 3]);
+
+      expect(bookRepo.findLibraryIdsByBookIds).toHaveBeenCalledWith([3, 2, 1]);
+      expect(libraryService.verifyUserAccess).toHaveBeenCalledTimes(2);
+      expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(user.id, 10, false);
+      expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(user.id, 20, false);
+    });
+
+    it('fails when the user lost access to any library in the part', async () => {
+      const { service, bookRepo, libraryService } = makeService();
+      bookRepo.findLibraryIdsByBookIds.mockResolvedValue([{ id: 1, libraryId: 10 }]);
+      libraryService.verifyUserAccess.mockRejectedValueOnce(new ForbiddenException('no access'));
+
+      await expect(service.resolveAccessibleExportBookIds([1], makeUser())).rejects.toThrow(ForbiddenException);
+    });
+  });
+
   describe('access + file/cover helpers', () => {
     it('throws NotFoundException when verifying file access for missing file', async () => {
       const { service, bookRepo } = makeService();

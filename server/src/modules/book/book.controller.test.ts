@@ -168,11 +168,17 @@ function makeController() {
   const fileWriteService = {
     findWriteLog: vi.fn(),
   };
+  const bookExportService = {
+    createSession: vi.fn(),
+    streamPart: vi.fn(),
+    getSessionStatus: vi.fn(),
+  };
 
   return {
-    controller: new BookController(bookService as never, fileWriteService as never),
+    controller: new BookController(bookService as never, fileWriteService as never, bookExportService as never),
     bookService,
     fileWriteService,
+    bookExportService,
   };
 }
 
@@ -978,6 +984,50 @@ describe('BookController', () => {
     }
 
     expect(Reflect.getMetadata(FORBIDDEN_PERMISSION_KEY, BookController.prototype.refreshMetadata)).toBeUndefined();
+  });
+
+  it('delegates export session creation to the export service', async () => {
+    const { controller, bookExportService } = makeController();
+    const user = makeUser();
+    const dto = { query: { libraryId: 4 }, scope: 'all' as const, partSizeMb: 500 as const };
+    const response = { token: 'tok', parts: [] };
+    bookExportService.createSession.mockResolvedValue(response);
+
+    await expect(controller.createExportSession(dto, user)).resolves.toBe(response);
+    expect(bookExportService.createSession).toHaveBeenCalledWith(dto, user);
+  });
+
+  it('streams an export part straight to the raw response', async () => {
+    const { controller, bookExportService } = makeController();
+    const { reply, raw } = makeReply();
+    const user = makeUser();
+    const token = '5f0c7c9e-6d1f-4b8e-9a4e-2f1c3b7d9a10';
+
+    await controller.downloadExportPart(token, 2, user, reply);
+
+    expect(bookExportService.streamPart).toHaveBeenCalledWith(token, 2, user, raw);
+  });
+
+  it('returns export session status from the export service', () => {
+    const { controller, bookExportService } = makeController();
+    const user = makeUser();
+    const status = { activeParts: [1], activeExports: 1 };
+    bookExportService.getSessionStatus.mockReturnValue(status);
+
+    expect(controller.getExportSessionStatus('tok', user)).toBe(status);
+    expect(bookExportService.getSessionStatus).toHaveBeenCalledWith('tok', user);
+  });
+
+  it('gates export session endpoints behind the download permission', () => {
+    const message = 'Demo-restricted account cannot perform bulk downloads';
+    for (const method of [
+      BookController.prototype.createExportSession,
+      BookController.prototype.getExportSessionStatus,
+      BookController.prototype.downloadExportPart,
+    ]) {
+      expect(Reflect.getMetadata(PERMISSION_KEY, method)).toBe(Permission.LibraryDownload);
+      expect(Reflect.getMetadata(FORBIDDEN_PERMISSION_KEY, method)).toEqual({ permission: Permission.DemoRestricted, message });
+    }
   });
 
   it('marks bulk-download endpoints as demo-restricted', () => {

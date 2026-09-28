@@ -545,6 +545,10 @@ export class BookService {
     throw new BadRequestException('Either bookIds or query must be provided');
   }
 
+  getExportCapacity(userId: number): { active: number; max: number } {
+    return { active: this.activeExportCounts.get(userId) ?? 0, max: EXPORT_LIMITS.MAX_CONCURRENT_PER_USER };
+  }
+
   acquireExportSlot(userId: number): () => void {
     const current = this.activeExportCounts.get(userId) ?? 0;
     if (current >= EXPORT_LIMITS.MAX_CONCURRENT_PER_USER) {
@@ -1335,6 +1339,37 @@ export class BookService {
     }
     used.add(candidate);
     return candidate;
+  }
+
+  buildExportZipPath(
+    file: { absolutePath: string; format: string | null },
+    meta: Awaited<ReturnType<BookRepository['findPatternMetadataByBookIds']>>[number] | undefined,
+    pattern: string,
+    usedPaths: Set<string>,
+  ): string {
+    const tokens = this.buildDownloadPatternTokens(file.absolutePath, file.format, meta);
+    const resolvedPath = resolveUploadPath(pattern || DEFAULT_DOWNLOAD_PATTERN, tokens, tokens.extension);
+    const fallbackFilename = basename(file.absolutePath);
+    const safeZipPath = this.sanitizeZipPath(resolvedPath ?? fallbackFilename, fallbackFilename);
+    return this.makeUniqueZipPath(safeZipPath, usedPaths);
+  }
+
+  sanitizeExportArchiveName(raw: string, fallback: string): string {
+    return this.sanitizeFilenameSegment(raw, fallback);
+  }
+
+  /**
+   * Returns the subset of bookIds that still exist, after verifying the user can
+   * access every library they belong to. Books deleted since the selection was
+   * made are dropped instead of failing the export.
+   */
+  async resolveAccessibleExportBookIds(bookIds: number[], user: RequestUser): Promise<number[]> {
+    const rows = await this.bookRepo.findLibraryIdsByBookIds([...new Set(bookIds)]);
+    const uniqueLibraryIds = [...new Set(rows.map((row) => row.libraryId))];
+    const isSuperuser = this.isSuperuser(user);
+    await Promise.all(uniqueLibraryIds.map((libraryId) => this.libraryService.verifyUserAccess(user.id, libraryId, isSuperuser)));
+    const existing = new Set(rows.map((row) => row.id));
+    return bookIds.filter((id) => existing.has(id));
   }
 
   private resolveExportArchiveFilename(
@@ -2997,12 +3032,7 @@ export class BookService {
           throw new BadRequestException(`Export exceeds projected size limit of ${EXPORT_LIMITS.MAX_PROJECTED_BYTES} bytes.`);
         }
 
-        const tokens = this.buildDownloadPatternTokens(file.absolutePath, file.format, metadataByBookId.get(file.bookId));
-        const resolvedPath = resolveUploadPath(pattern || DEFAULT_DOWNLOAD_PATTERN, tokens, tokens.extension);
-        const fallbackFilename = basename(file.absolutePath);
-        const rawZipPath = resolvedPath ?? fallbackFilename;
-        const safeZipPath = this.sanitizeZipPath(rawZipPath, fallbackFilename);
-        const zipPath = this.makeUniqueZipPath(safeZipPath, usedPaths);
+        const zipPath = this.buildExportZipPath(file, metadataByBookId.get(file.bookId), pattern, usedPaths);
         result.push({ absolutePath: file.absolutePath, zipPath, sizeBytes });
       }
 

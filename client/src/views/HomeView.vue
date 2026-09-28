@@ -9,6 +9,7 @@ import {
   BookmarkCheck,
   BookOpen,
   CheckSquare,
+  Download,
   FileSpreadsheet,
   Filter,
   Layers,
@@ -62,6 +63,7 @@ import { usePageTitle } from '@/composables/usePageTitle'
 import { COVER_ASPECT_RATIO_KEY, DEFAULT_COVER_ASPECT_RATIO } from '@/features/book/lib/cover-aspect-ratio'
 import { useDisplaySettings } from '@/composables/useDisplaySettings'
 import { usePermissions } from '@/features/auth/composables/usePermissions'
+import { useBulkDownload } from '@/features/book/composables/useBulkDownload'
 import { useBookViewContext } from '@/features/book/composables/useBookViewContext'
 import { useBookTableShell } from '@/features/book/composables/useBookTableShell'
 import { useInfiniteScrollSentinel } from '@/features/book/composables/useInfiniteScrollSentinel'
@@ -79,6 +81,13 @@ const { hasPermission, isDemoRestrictedAccount } = usePermissions()
 
 const libraryId = shallowRef<number | null>(route.params.id ? Number(route.params.id) : null)
 const currentLibrary = computed(() => libraries.value.find((l) => l.id === libraryId.value))
+const { startBulkDownload } = useBulkDownload()
+const canDownloadLibrary = computed(() => libraryId.value !== null && hasPermission('library_download') && !isDemoRestrictedAccount.value)
+
+function handleDownloadLibrary() {
+  if (libraryId.value === null) return
+  void startBulkDownload({ query: { libraryId: libraryId.value } }, 'primary', true)
+}
 const currentCoverAspectRatio = computed(() => currentLibrary.value?.coverAspectRatio ?? DEFAULT_COVER_ASPECT_RATIO)
 const { coverSize, gridGap } = useViewDisplaySettings('library', libraryId, currentCoverAspectRatio)
 const { tableDensity, showJumpRails } = useDisplaySettings()
@@ -677,6 +686,20 @@ defineOptions({ name: 'HomeView' })
             </TooltipTrigger>
             <TooltipContent>{{ t('views.bookView.exportMetadata') }}</TooltipContent>
           </Tooltip>
+          <Tooltip>
+            <TooltipTrigger as-child>
+              <button
+                v-if="canDownloadLibrary"
+                class="hidden sm:flex h-8 w-8 items-center justify-center rounded-md border border-input text-muted-foreground bg-background transition-colors hover:text-foreground hover:bg-muted"
+                :aria-label="t('views.library.downloadLibrary')"
+                data-testid="download-library"
+                @click="handleDownloadLibrary"
+              >
+                <Download :size="14" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>{{ t('views.library.downloadLibrary') }}</TooltipContent>
+          </Tooltip>
           <button
             @click="toggleFilterPanel"
             class="hidden sm:flex items-center gap-1.5 h-8 px-3 rounded-md border text-sm transition-colors"
@@ -827,6 +850,15 @@ defineOptions({ name: 'HomeView' })
           >
             <FileSpreadsheet :size="13" />
             <span>{{ t('views.bookView.export') }}</span>
+          </button>
+
+          <button
+            v-if="canDownloadLibrary"
+            class="flex h-8 items-center gap-1.5 rounded-md border border-input px-2.5 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            @click="handleDownloadLibrary"
+          >
+            <Download :size="13" />
+            <span>{{ t('views.library.downloadLibrary') }}</span>
           </button>
 
           <button

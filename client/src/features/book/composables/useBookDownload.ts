@@ -1,17 +1,8 @@
 import { ref } from 'vue'
 import { toast } from 'vue-sonner'
+import { triggerBrowserDownload } from '@/lib/browserDownload'
 
 type ExportScope = 'primary' | 'all' | 'audio'
-
-function triggerBrowserDownload(url: string, filename?: string): void {
-  const anchor = document.createElement('a')
-  anchor.href = url
-  if (filename) anchor.download = filename
-  anchor.rel = 'noopener'
-  document.body.append(anchor)
-  anchor.click()
-  anchor.remove()
-}
 
 export function useBookDownload() {
   const isDownloading = ref(false)

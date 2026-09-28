@@ -11,6 +11,7 @@ import {
   NotFoundException,
   Param,
   ParseIntPipe,
+  ParseUUIDPipe,
   Patch,
   Post,
   Query,
@@ -30,6 +31,8 @@ import { imageContentTypeFromPath } from '../../common/image-content-type';
 import type { RequestUser } from '../../common/types/request-user';
 import { FileWriteService } from '../file-write/file-write.service';
 import { BookService } from './book.service';
+import { BookExportService } from './book-export.service';
+import { CreateExportSessionDto } from './dto/create-export-session.dto';
 import { BookQueryPipe } from './pipes/book-query.pipe';
 import { BulkBookIdsDto } from './dto/bulk-book-ids.dto';
 import { BulkSetStatusDto } from './dto/bulk-set-status.dto';
@@ -96,6 +99,7 @@ export class BookController {
   constructor(
     private readonly bookService: BookService,
     private readonly fileWriteService: FileWriteService,
+    private readonly bookExportService: BookExportService,
   ) {}
 
   @Post('embed-all')
@@ -235,6 +239,32 @@ export class BookController {
     const bookIds = this.parseBookIdsQuery(bookIdsQuery);
     const scope = this.parseExportScopeQuery(scopeQuery);
     await this.streamBookExport(bookIds, scope, user, reply);
+  }
+
+  @Post('export/sessions')
+  @RequirePermission(Permission.LibraryDownload)
+  @ForbidPermission(Permission.DemoRestricted, 'Demo-restricted account cannot perform bulk downloads')
+  createExportSession(@Body() dto: CreateExportSessionDto, @CurrentUser() user: RequestUser) {
+    return this.bookExportService.createSession(dto, user);
+  }
+
+  @Get('export/sessions/:token')
+  @RequirePermission(Permission.LibraryDownload)
+  @ForbidPermission(Permission.DemoRestricted, 'Demo-restricted account cannot perform bulk downloads')
+  getExportSessionStatus(@Param('token', ParseUUIDPipe) token: string, @CurrentUser() user: RequestUser) {
+    return this.bookExportService.getSessionStatus(token, user);
+  }
+
+  @Get('export/sessions/:token/parts/:index')
+  @RequirePermission(Permission.LibraryDownload)
+  @ForbidPermission(Permission.DemoRestricted, 'Demo-restricted account cannot perform bulk downloads')
+  async downloadExportPart(
+    @Param('token', ParseUUIDPipe) token: string,
+    @Param('index', ParseIntPipe) index: number,
+    @CurrentUser() user: RequestUser,
+    @Res() reply: FastifyReply,
+  ) {
+    await this.bookExportService.streamPart(token, index, user, reply.raw);
   }
 
   @Post('metadata-export/preflight')

@@ -14,7 +14,7 @@ import { api } from '@/lib/api'
 import { toast } from 'vue-sonner'
 import { useCoverVersions } from './useCoverVersions'
 import { useRefreshingBooks } from './useRefreshingBooks'
-import { useBookDownload } from './useBookDownload'
+import { useBulkDownload } from './useBulkDownload'
 import { useBookRefreshFeedback } from './useBookRefreshFeedback'
 import { detectChangedColumns, mergeBookCardWithDetail } from '@/features/book/lib/book-card-mapper'
 
@@ -80,7 +80,7 @@ export function useBookBulkActions(
   const { bumpVersion } = useCoverVersions()
   const { markRefreshing, clearRefreshing } = useRefreshingBooks()
   const refreshFeedback = useBookRefreshFeedback()
-  const { exportBooks } = useBookDownload()
+  const { startBulkDownload } = useBulkDownload()
 
   const inFlight = ref<InFlightOp | null>(null)
 
@@ -259,8 +259,8 @@ export function useBookBulkActions(
   }
 
   async function handleDownloadFiles(scope: ExportScope) {
-    const ids = [...selectedIds.value]
-    await exportBooks(ids, scope === 'all', scope === 'audio' ? 'audio' : undefined)
+    if (!hasSelection()) return
+    await startBulkDownload(getSelectionPayload(), scope)
   }
 
   async function handleBulkSetStatus(status: ReadStatus) {
