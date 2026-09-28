@@ -3523,6 +3523,30 @@
       "exportStarted": "Metadata export started: {fileName}",
       "exportFailed": "Metadata export failed"
     },
+    "bulkDownload": {
+      "title": "Download books",
+      "filesLabel": "Files",
+      "scopePrimary": "Primary file per book",
+      "scopeAll": "All formats",
+      "scopeAudio": "Audio files only",
+      "partSizeLabel": "Part size",
+      "partSizeHint": "Large downloads are split into ZIP parts so each one finishes reliably, including through proxies like Cloudflare Tunnel. A single book larger than the part size gets its own part.",
+      "preparing": "Preparing download...",
+      "prepareFailed": "Failed to prepare download",
+      "summary": "{books, plural, one {# book} other {{booksLabel} books}} in {parts, plural, one {# part} other {# parts}}, {size} total",
+      "skipped": "{count, plural, one {# book has} other {# books have}} no matching files and will be skipped",
+      "clickEachPart": "Your browser downloads each part separately, up to {count} at a time. Start each part when you are ready.",
+      "partLabel": "Part {index} of {total}",
+      "partDetails": "{count, plural, one {# book} other {# books}} - {size}",
+      "oversized": "Larger than the part size",
+      "download": "Download",
+      "downloadAgain": "Download again",
+      "downloading": "Downloading...",
+      "downloadNext": "Download {part}",
+      "allStarted": "All parts started",
+      "atCapacity": "{count, plural, one {# part is} other {# parts are}} already downloading. The next part unlocks when one finishes.",
+      "done": "Done"
+    },
     "columnPanel": {
       "columnsHeading": "Columns",
       "reset": "Reset",
@@ -7084,7 +7108,8 @@
       "querySelection": {
         "loadedSelected": "{selected} of {total} loaded books selected.",
         "selectAllMatching": "Select all {total} matching books"
-      }
+      },
+      "downloadLibrary": "Download library"
     },
     "smartScope": {
       "title": "SmartScope",

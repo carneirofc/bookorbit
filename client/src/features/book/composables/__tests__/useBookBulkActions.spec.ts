@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => ({
   bumpVersion: vi.fn<(bookId: number) => void>(),
   markRefreshing: vi.fn<(bookIds: number[]) => void>(),
   clearRefreshing: vi.fn<(bookIds: number[]) => void>(),
-  exportBooks: vi.fn<(bookIds: number[], includeAll?: boolean, formatGroup?: string) => Promise<void>>(),
+  startBulkDownload: vi.fn<(selection: unknown, scope?: string) => Promise<void>>(),
 }))
 
 function makeSseStream(lines: string[]): { ok: true; body: { getReader: () => { read: () => Promise<{ done: boolean; value?: Uint8Array }> } } } {
@@ -55,9 +55,9 @@ vi.mock('../useRefreshingBooks', () => ({
   }),
 }))
 
-vi.mock('../useBookDownload', () => ({
-  useBookDownload: () => ({
-    exportBooks: mocks.exportBooks,
+vi.mock('../useBulkDownload', () => ({
+  useBulkDownload: () => ({
+    startBulkDownload: mocks.startBulkDownload,
   }),
 }))
 
@@ -125,6 +125,7 @@ describe('useBookBulkActions', () => {
     mocks.api.mockReset()
     mocks.toastSuccess.mockReset()
     mocks.toastError.mockReset()
+    mocks.startBulkDownload.mockReset()
   })
 
   afterEach(() => {
@@ -149,6 +150,34 @@ describe('useBookBulkActions', () => {
         sort: [{ field: 'title', dir: 'asc' }],
       },
     })
+  })
+
+  it('downloads the whole query selection instead of only the loaded ids', async () => {
+    const querySelection = ref<QuerySelectionState | null>(makeQuerySelection())
+    const { handleDownloadFiles } = useBookBulkActions(ref(new Set([1])), vi.fn(), undefined, undefined, querySelection)
+
+    await handleDownloadFiles('all')
+
+    expect(mocks.startBulkDownload).toHaveBeenCalledWith(
+      { query: { libraryId: 5, filter: { type: 'group', join: 'AND', rules: [] }, q: 'space opera', sort: undefined } },
+      'all',
+    )
+  })
+
+  it('does not start a download when nothing is selected', async () => {
+    const { handleDownloadFiles } = useBookBulkActions(ref(new Set<number>()), vi.fn())
+
+    await handleDownloadFiles('primary')
+
+    expect(mocks.startBulkDownload).not.toHaveBeenCalled()
+  })
+
+  it('downloads explicitly selected ids when there is no query selection', async () => {
+    const { handleDownloadFiles } = useBookBulkActions(ref(new Set([4, 2])), vi.fn())
+
+    await handleDownloadFiles('audio')
+
+    expect(mocks.startBulkDownload).toHaveBeenCalledWith({ bookIds: [4, 2] }, 'audio')
   })
 
   it('patches selected books with the new manual read status after a successful bulk update', async () => {

@@ -18,6 +18,8 @@ import { BookController } from './book.controller';
 import { BookModule } from './book.module';
 import { BookRepository } from './book.repository';
 import { BookService } from './book.service';
+import { BookExportService } from './book-export.service';
+import { BookExportSessionStore } from './book-export-session.store';
 import { BookAuthorSortKeyBackfillService } from './book-author-sort-key-backfill.service';
 import { ReadingAttemptController } from './reading-attempt.controller';
 
@@ -26,6 +28,8 @@ describe('BookModule', () => {
     expect(Reflect.getMetadata('controllers', BookModule)).toEqual([BookController, ReadingAttemptController]);
     expect(Reflect.getMetadata('providers', BookModule)).toEqual([
       BookService,
+      BookExportService,
+      BookExportSessionStore,
       BookRepository,
       BookReadService,
       BookSortBuilder,
