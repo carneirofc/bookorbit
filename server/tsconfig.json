@@ -15,12 +15,12 @@
     "outDir": "./dist",
     "incremental": true,
     "skipLibCheck": true,
-    "strictNullChecks": true,
+    "strict": true,
     "strictPropertyInitialization": false,
     "forceConsistentCasingInFileNames": true,
     "noImplicitAny": false,
-    "strictBindCallApply": false,
-    "noFallthroughCasesInSwitch": false,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
     "types": ["vitest/globals"]
   }
 }

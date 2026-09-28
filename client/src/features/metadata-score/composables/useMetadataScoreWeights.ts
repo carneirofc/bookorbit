@@ -11,10 +11,10 @@ export function useMetadataScoreWeights() {
     if (fetchPromise) return fetchPromise
     fetchPromise = api('/api/v1/metadata-score/weights')
       .then((res) => {
-        if (res.ok)
-          return res.json().then((data: MetadataScoreWeights) => {
-            weights.value = data
-          })
+        if (!res.ok) return undefined
+        return res.json().then((data: MetadataScoreWeights) => {
+          weights.value = data
+        })
       })
       .catch(() => undefined)
     return fetchPromise

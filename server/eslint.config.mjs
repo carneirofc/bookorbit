@@ -47,6 +47,8 @@ export default tseslint.config(
       '@typescript-eslint/no-unsafe-argument': 'off',
       '@typescript-eslint/no-unsafe-return': 'off',
       '@typescript-eslint/unbound-method': 'off',
+      // Drizzle query-builder mocks spread thenable helpers on purpose.
+      '@typescript-eslint/no-misused-promises': ['error', { checksSpreads: false }],
     },
   },
 );

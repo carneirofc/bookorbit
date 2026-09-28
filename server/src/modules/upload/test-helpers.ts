@@ -1,3 +1,4 @@
+import { vi } from 'vitest';
 import { EMPTY_CONTENT_FILTER_RULES } from '@bookorbit/types';
 import type { RequestUser } from '../../common/types/request-user';
 

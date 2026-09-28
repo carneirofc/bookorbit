@@ -1,4 +1,7 @@
 {
   "extends": "./tsconfig.json",
-  "exclude": ["node_modules", "test", "dist", "src/metadata.ts", "**/*.test.ts"]
+  "compilerOptions": {
+    "types": ["node"]
+  },
+  "exclude": ["node_modules", "test", "dist", "src/metadata.ts", "**/*.test.ts", "src/**/test-helpers.ts", "src/**/*-test-fixtures.ts"]
 }
