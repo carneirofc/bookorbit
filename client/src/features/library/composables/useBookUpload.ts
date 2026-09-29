@@ -1,6 +1,6 @@
 import { computed, ref } from 'vue'
-import { getValidToken } from '@/lib/api'
-import type { UploadResult } from '@bookorbit/types'
+import type { UploadTarget } from '@bookorbit/types'
+import { uploadViaSession } from '@/features/upload/uploadSession'
 import { useAppInfo } from '@/features/settings/composables/useAppInfo'
 
 export const SUPPORTED_FORMATS = ['epub', 'kepub', 'pdf', 'mobi', 'azw3', 'cbz', 'cbr', 'cb7', 'fb2', 'm4b', 'm4a', 'mp3', 'opus', 'ogg', 'flac']
@@ -34,50 +34,24 @@ function validateFile(file: File): string | null {
   return null
 }
 
-async function uploadSingle(item: FileUploadItem, url: string): Promise<void> {
-  const token = await getValidToken()
-  return new Promise((resolve) => {
-    const formData = new FormData()
-    formData.append('file', item.file)
-
-    const xhr = new XMLHttpRequest()
-    xhr.open('POST', url)
-
-    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`)
-
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) {
-        item.progress = Math.round((e.loaded / e.total) * 100)
-      }
-    }
-
-    xhr.onload = () => {
-      if (xhr.status === 201) {
-        const result: UploadResult = JSON.parse(xhr.responseText)
-        item.status = 'done'
-        item.progress = 100
-        item.bookId = result.bookId
-      } else {
-        item.status = 'error'
-        try {
-          const body = JSON.parse(xhr.responseText)
-          item.error = body.message ?? 'Upload failed'
-        } catch {
-          item.error = `Upload failed (${xhr.status})`
-        }
-      }
-      resolve()
-    }
-
-    xhr.onerror = () => {
-      item.status = 'error'
-      item.error = 'Network error'
-      resolve()
-    }
-
-    item.status = 'uploading'
-    xhr.send(formData)
-  })
+async function uploadSingle(item: FileUploadItem, target: UploadTarget): Promise<void> {
+  item.status = 'uploading'
+  item.progress = 0
+  try {
+    const session = await uploadViaSession({
+      file: item.file,
+      target,
+      onProgress: (percent) => {
+        item.progress = percent
+      },
+    })
+    item.status = 'done'
+    item.progress = 100
+    item.bookId = session.bookId ?? undefined
+  } catch (err) {
+    item.status = 'error'
+    item.error = err instanceof Error ? err.message : 'Upload failed'
+  }
 }
 
 export function useBookUpload() {
@@ -126,15 +100,14 @@ export function useBookUpload() {
     const pending = files.value.filter((f) => f.status === 'pending')
     if (pending.length === 0) return
 
-    const baseUrl = `/api/v1/libraries/${libraryId}/upload`
-    const url = folderId !== undefined ? `${baseUrl}?folderId=${folderId}` : baseUrl
+    const target: UploadTarget = { kind: 'library', libraryId, ...(folderId !== undefined ? { folderId } : {}) }
 
     // Process pending items with a concurrency limit of UPLOAD_CONCURRENCY
     let index = 0
     async function runNext(): Promise<void> {
       const item = pending[index++]
       if (!item) return
-      await uploadSingle(item, url)
+      await uploadSingle(item, target)
       await runNext()
     }
 

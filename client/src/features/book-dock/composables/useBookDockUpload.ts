@@ -1,6 +1,5 @@
 import { ref } from 'vue'
-import { getValidToken } from '@/lib/api'
-import type { BookDockFile } from '@bookorbit/types'
+import { uploadViaSession } from '@/features/upload/uploadSession'
 
 import { useAppInfo } from '@/features/settings/composables/useAppInfo'
 
@@ -15,7 +14,6 @@ export interface UploadItem {
   status: FileUploadStatus
   progress: number
   error?: string
-  bookDockFile?: BookDockFile
 }
 
 const CONCURRENCY = 3
@@ -30,49 +28,22 @@ function validateFile(file: File): string | null {
 }
 
 async function uploadSingle(item: UploadItem): Promise<void> {
-  const token = await getValidToken()
-  return new Promise((resolve) => {
-    const formData = new FormData()
-    formData.append('file', item.file)
-
-    const xhr = new XMLHttpRequest()
-    xhr.open('POST', '/api/v1/book-dock/upload')
-
-    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`)
-
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) item.progress = Math.round((e.loaded / e.total) * 100)
-    }
-
-    xhr.onload = () => {
-      if (xhr.status === 201) {
-        item.status = 'done'
-        item.progress = 100
-        try {
-          item.bookDockFile = JSON.parse(xhr.responseText) as BookDockFile
-        } catch {
-          // response parsing optional
-        }
-      } else {
-        item.status = 'error'
-        try {
-          item.error = (JSON.parse(xhr.responseText) as { message?: string }).message ?? 'Upload failed'
-        } catch {
-          item.error = `Upload failed (${xhr.status})`
-        }
-      }
-      resolve()
-    }
-
-    xhr.onerror = () => {
-      item.status = 'error'
-      item.error = 'Network error'
-      resolve()
-    }
-
-    item.status = 'uploading'
-    xhr.send(formData)
-  })
+  item.status = 'uploading'
+  item.progress = 0
+  try {
+    await uploadViaSession({
+      file: item.file,
+      target: { kind: 'book_dock' },
+      onProgress: (percent) => {
+        item.progress = percent
+      },
+    })
+    item.status = 'done'
+    item.progress = 100
+  } catch (err) {
+    item.status = 'error'
+    item.error = err instanceof Error ? err.message : 'Upload failed'
+  }
 }
 
 const files = ref<UploadItem[]>([])

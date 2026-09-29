@@ -217,9 +217,49 @@ describe('UploadSessionService', () => {
 
     const result = await service.complete(response.id, user);
 
+    expect(result.status).toBe('processing');
+    await vi.waitFor(() => expect(rows.get(response.id).status).toBe('completed'));
     expect(upload.addFileToBook).toHaveBeenCalledWith(9, 'book.pdf', expect.anything(), user);
-    expect(result.status).toBe('completed');
-    expect(result.bookId).toBe(9);
+    expect((await service.get(response.id, user)).bookId).toBe(9);
+  });
+
+  it('answers complete before a slow import finishes, and a repeated complete does not start a second import', async () => {
+    const response = await completableSession();
+    let finishImport!: () => void;
+    upload.addFileToBook.mockReturnValue(
+      new Promise((resolve) => {
+        finishImport = () => resolve({ id: 22 });
+      }),
+    );
+
+    await expect(service.complete(response.id, user)).resolves.toMatchObject({ status: 'processing' });
+    await expect(service.complete(response.id, user)).resolves.toMatchObject({ status: 'processing' });
+    await vi.waitFor(() => expect(upload.addFileToBook).toHaveBeenCalledTimes(1));
+
+    finishImport();
+    await vi.waitFor(() => expect(rows.get(response.id).status).toBe('completed'));
+    expect(upload.addFileToBook).toHaveBeenCalledTimes(1);
+  });
+
+  it('records a whole-file checksum mismatch on the session with its error code', async () => {
+    const response = await completableSession({ sha256: '0'.repeat(64) });
+
+    await service.complete(response.id, user);
+
+    await vi.waitFor(() => expect(rows.get(response.id).status).toBe('failed'));
+    expect(rows.get(response.id).errorCode).toBe(UploadErrorCode.ChecksumMismatch);
+    expect(upload.addFileToBook).not.toHaveBeenCalled();
+  });
+
+  it('keeps an uncoded import error message, which can name server paths, out of the session', async () => {
+    const response = await completableSession();
+    upload.addFileToBook.mockRejectedValue(new Error("ENOENT: no such file or directory, open '/books/secret/path.pdf'"));
+
+    await service.complete(response.id, user);
+
+    await vi.waitFor(() => expect(rows.get(response.id).status).toBe('failed'));
+    expect(rows.get(response.id).errorCode).toBe(UploadErrorCode.ImportFailed);
+    expect(rows.get(response.id).errorMessage).not.toContain('/books/secret');
   });
 
   it('hides sessions owned by another account and refuses cancellation during processing', async () => {
@@ -250,6 +290,15 @@ describe('UploadSessionService', () => {
       idempotencyKey: 'upload-key-123',
       target: { kind: 'library', libraryId: 1, folderId: 2 },
     } as any;
+  }
+
+  /** A fully received session targeting book 9, ready for `complete`. */
+  async function completableSession(overrides: { sha256?: string } = {}) {
+    const response = await service.create({ ...createDto(), sizeBytes: 9, target: { kind: 'existing_book', bookId: 9 }, ...overrides } as any, user);
+    const row = rows.get(response.id);
+    await writeFile(row.stagingPath, '%PDF-1234');
+    rows.set(response.id, { ...row, receivedBytes: 9 });
+    return response;
   }
 
   function makeRow(values: any) {

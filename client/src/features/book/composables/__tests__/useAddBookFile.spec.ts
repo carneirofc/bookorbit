@@ -10,53 +10,8 @@ vi.mock('@/features/settings/composables/useAppInfo', () => ({
   }),
 }))
 
-interface MockXhrInstance {
-  open: ReturnType<typeof vi.fn>
-  setRequestHeader: ReturnType<typeof vi.fn>
-  send: ReturnType<typeof vi.fn>
-  upload: { onprogress: ((e: ProgressEvent) => void) | null }
-  onload: (() => void) | null
-  onerror: (() => void) | null
-  status: number
-  responseText: string
-}
-
-const mockXhrInstances: MockXhrInstance[] = []
-
-/** The upload resolves a valid token before opening the request, so the XHR appears a tick later. */
-async function nextXhr(): Promise<MockXhrInstance> {
-  await vi.waitFor(() => expect(mockXhrInstances[0]).toBeDefined())
-  return mockXhrInstances[0]!
-}
-
-const defaultResponseText = JSON.stringify({
-  id: 55,
-  format: 'epub',
-  role: 'content',
-  sizeBytes: 1024,
-  absolutePath: '/library/Book/file.epub',
-  createdAt: '2025-01-01T00:00:00.000Z',
-  filename: 'file.epub',
-  durationSeconds: null,
-  bookStatus: 'present',
-})
-
-class MockXMLHttpRequest implements MockXhrInstance {
-  open = vi.fn<(method: string, url: string) => void>()
-  setRequestHeader = vi.fn<(name: string, value: string) => void>()
-  send = vi.fn<() => void>()
-  upload: { onprogress: ((e: ProgressEvent) => void) | null } = { onprogress: null }
-  onload: (() => void) | null = null
-  onerror: (() => void) | null = null
-  status = 201
-  responseText = defaultResponseText
-
-  constructor() {
-    mockXhrInstances.push(this)
-  }
-}
-
-vi.stubGlobal('XMLHttpRequest', MockXMLHttpRequest)
+const uploadViaSession = vi.hoisted(() => vi.fn())
+vi.mock('@/features/upload/uploadSession', () => ({ uploadViaSession }))
 
 import { useAddBookFile, SUPPORTED_FORMATS, MAX_FILE_BYTES } from '../useAddBookFile'
 
@@ -72,7 +27,7 @@ describe('useAddBookFile', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
-    mockXhrInstances.length = 0
+    uploadViaSession.mockReset().mockResolvedValue({ status: 'completed', bookId: 42 })
     mockFetch = vi.fn<() => Promise<{ ok: boolean }>>().mockResolvedValue({ ok: true })
     vi.stubGlobal('fetch', mockFetch)
   })
@@ -158,10 +113,8 @@ describe('useAddBookFile', () => {
       const { files, addFiles, retryFile, startUpload } = useAddBookFile()
       addFiles([makeFile('book.epub')])
 
-      const uploadPromise = startUpload(7)
-      const xhr = await nextXhr()
-      xhr.onerror?.()
-      await uploadPromise
+      uploadViaSession.mockRejectedValue(new Error('Network error'))
+      await startUpload(7)
 
       expect(files.value[0].status).toBe('error')
       retryFile(files.value[0].id)
@@ -216,134 +169,70 @@ describe('useAddBookFile', () => {
   })
 
   describe('startUpload', () => {
-    it('sends XHR POST to /api/v1/books/:bookId/files', async () => {
+    it('uploads each pending file through an upload session targeting the book', async () => {
       const { addFiles, startUpload } = useAddBookFile()
-      addFiles([makeFile('book.epub')])
+      const file = makeFile('book.epub')
+      addFiles([file])
 
-      const uploadPromise = startUpload(42)
-      const xhr = await nextXhr()
-      xhr.onload?.()
-      await uploadPromise
+      await startUpload(42)
 
-      expect(xhr.open).toHaveBeenCalledWith('POST', '/api/v1/books/42/files')
+      expect(uploadViaSession).toHaveBeenCalledWith(expect.objectContaining({ file, target: { kind: 'existing_book', bookId: 42 } }))
     })
 
-    it('sets Authorization header with token', async () => {
-      const { addFiles, startUpload } = useAddBookFile()
-      addFiles([makeFile('book.epub')])
-
-      const uploadPromise = startUpload(42)
-      const xhr = await nextXhr()
-      xhr.onload?.()
-      await uploadPromise
-
-      expect(xhr.setRequestHeader).toHaveBeenCalledWith('Authorization', 'Bearer test-token')
-    })
-
-    it('marks file as done on 201 and stores result', async () => {
+    it('marks file as done once the session completes', async () => {
       const { files, addFiles, startUpload } = useAddBookFile()
       addFiles([makeFile('book.epub')])
 
-      const uploadPromise = startUpload(7)
-      const xhr = await nextXhr()
-      xhr.status = 201
-      xhr.onload?.()
-      await uploadPromise
+      await startUpload(7)
 
       expect(files.value[0].status).toBe('done')
-      expect(files.value[0].result?.bookStatus).toBe('present')
+      expect(files.value[0].progress).toBe(100)
     })
 
-    it('marks file as error on non-201 response', async () => {
+    it('marks file as error with the server message when the session fails', async () => {
+      uploadViaSession.mockRejectedValue(new Error('File already attached'))
       const { files, addFiles, startUpload } = useAddBookFile()
       addFiles([makeFile('book.epub')])
 
-      const uploadPromise = startUpload(7)
-      const xhr = await nextXhr()
-      xhr.status = 409
-      xhr.responseText = JSON.stringify({ message: 'File already attached' })
-      xhr.onload?.()
-      await uploadPromise
+      await startUpload(7)
 
       expect(files.value[0].status).toBe('error')
       expect(files.value[0].error).toBe('File already attached')
     })
 
-    it('marks file as error on network failure', async () => {
-      const { files, addFiles, startUpload } = useAddBookFile()
-      addFiles([makeFile('book.epub')])
-
-      const uploadPromise = startUpload(7)
-      const xhr = await nextXhr()
-      xhr.onerror?.()
-      await uploadPromise
-
-      expect(files.value[0].status).toBe('error')
-      expect(files.value[0].error).toBe('Network error')
-    })
-
-    it('skips already-done or error files on startUpload', async () => {
+    it('skips files that failed validation', async () => {
       const { files, addFiles, startUpload } = useAddBookFile()
       addFiles([makeFile('bad.xyz'), makeFile('book.epub')])
 
-      const uploadPromise = startUpload(7)
-      const xhr = await nextXhr()
-      xhr.onload?.()
-      await uploadPromise
+      await startUpload(7)
 
-      expect(files.value[0].status).toBe('error') // was already error, not re-uploaded
-      expect(mockXhrInstances).toHaveLength(1) // only 1 XHR created
+      expect(files.value[0].status).toBe('error')
+      expect(uploadViaSession).toHaveBeenCalledTimes(1)
     })
 
-    it('updates progress during upload', async () => {
+    it('reports progress while the session uploads', async () => {
+      let finish!: () => void
+      uploadViaSession.mockImplementation(({ onProgress }: { onProgress: (percent: number) => void }) => {
+        onProgress(50)
+        return new Promise<void>((resolve) => {
+          finish = resolve
+        })
+      })
       const { files, addFiles, startUpload } = useAddBookFile()
       addFiles([makeFile('book.epub')])
 
       const uploadPromise = startUpload(7)
-      const xhr = await nextXhr()
-      xhr.upload.onprogress?.({ lengthComputable: true, loaded: 50, total: 100 } as ProgressEvent)
-
-      expect(files.value[0].progress).toBe(50)
+      await vi.waitFor(() => expect(files.value[0].progress).toBe(50))
       expect(files.value[0].status).toBe('uploading')
 
-      xhr.onload?.()
+      finish()
       await uploadPromise
     })
 
     it('is a no-op when there are no pending files', async () => {
       const { startUpload } = useAddBookFile()
       await startUpload(7)
-      expect(mockXhrInstances).toHaveLength(0)
-    })
-
-    it('falls back gracefully when response body is not valid JSON', async () => {
-      const { files, addFiles, startUpload } = useAddBookFile()
-      addFiles([makeFile('book.epub')])
-
-      const uploadPromise = startUpload(7)
-      const xhr = await nextXhr()
-      xhr.status = 201
-      xhr.responseText = 'not-json'
-      xhr.onload?.()
-      await uploadPromise
-
-      expect(files.value[0].status).toBe('done')
-      expect(files.value[0].result).toBeUndefined()
-    })
-
-    it('shows fallback error message when error response is not JSON', async () => {
-      const { files, addFiles, startUpload } = useAddBookFile()
-      addFiles([makeFile('book.epub')])
-
-      const uploadPromise = startUpload(7)
-      const xhr = await nextXhr()
-      xhr.status = 500
-      xhr.responseText = 'Internal Server Error'
-      xhr.onload?.()
-      await uploadPromise
-
-      expect(files.value[0].status).toBe('error')
-      expect(files.value[0].error).toBe('Upload failed (500)')
+      expect(uploadViaSession).not.toHaveBeenCalled()
     })
   })
 
@@ -352,11 +241,7 @@ describe('useAddBookFile', () => {
       const { addFiles, startUpload } = useAddBookFile()
       addFiles([makeFile('book.epub')])
 
-      const uploadPromise = startUpload(42, { renameAfter: true })
-      const xhr = await nextXhr()
-      xhr.status = 201
-      xhr.onload?.()
-      await uploadPromise
+      await startUpload(42, { renameAfter: true })
 
       expect(mockFetch).toHaveBeenCalledWith('/api/v1/books/42/rename-files', expect.objectContaining({ method: 'POST' }))
     })
@@ -365,10 +250,7 @@ describe('useAddBookFile', () => {
       const { addFiles, startUpload } = useAddBookFile()
       addFiles([makeFile('book.epub')])
 
-      const uploadPromise = startUpload(42, { renameAfter: false })
-      const xhr = await nextXhr()
-      xhr.onload?.()
-      await uploadPromise
+      await startUpload(42, { renameAfter: false })
 
       expect(mockFetch).not.toHaveBeenCalled()
     })
@@ -377,10 +259,7 @@ describe('useAddBookFile', () => {
       const { addFiles, startUpload } = useAddBookFile()
       addFiles([makeFile('book.epub')])
 
-      const uploadPromise = startUpload(42)
-      const xhr = await nextXhr()
-      xhr.onload?.()
-      await uploadPromise
+      await startUpload(42)
 
       expect(mockFetch).not.toHaveBeenCalled()
     })
@@ -389,12 +268,8 @@ describe('useAddBookFile', () => {
       const { addFiles, startUpload } = useAddBookFile()
       addFiles([makeFile('book.epub')])
 
-      const uploadPromise = startUpload(42, { renameAfter: true })
-      const xhr = await nextXhr()
-      xhr.status = 409
-      xhr.responseText = JSON.stringify({ message: 'Already exists' })
-      xhr.onload?.()
-      await uploadPromise
+      uploadViaSession.mockRejectedValue(new Error('Already exists'))
+      await startUpload(42, { renameAfter: true })
 
       expect(mockFetch).not.toHaveBeenCalled()
     })
@@ -405,12 +280,7 @@ describe('useAddBookFile', () => {
       const { addFiles, startUpload } = useAddBookFile()
       addFiles([makeFile('book.epub')])
 
-      const uploadPromise = startUpload(42, { renameAfter: true })
-      const xhr = await nextXhr()
-      xhr.status = 201
-      xhr.onload?.()
-
-      await expect(uploadPromise).resolves.toBeUndefined()
+      await expect(startUpload(42, { renameAfter: true })).resolves.toBeUndefined()
     })
   })
 })

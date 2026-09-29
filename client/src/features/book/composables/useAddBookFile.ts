@@ -1,6 +1,6 @@
 import { computed, ref } from 'vue'
 import { getValidToken } from '@/lib/api'
-import type { AddBookFileResult } from '@bookorbit/types'
+import { uploadViaSession } from '@/features/upload/uploadSession'
 import { useAppInfo } from '@/features/settings/composables/useAppInfo'
 
 export const SUPPORTED_FORMATS = ['epub', 'kepub', 'pdf', 'mobi', 'azw3', 'cbz', 'cbr', 'cb7', 'fb2', 'm4b', 'm4a', 'mp3', 'opus', 'ogg', 'flac']
@@ -15,7 +15,6 @@ export interface BookFileUploadItem {
   status: FileUploadStatus
   progress: number
   error?: string
-  result?: AddBookFileResult
   validationError?: boolean
 }
 
@@ -35,52 +34,22 @@ function validateFile(file: File): string | null {
 }
 
 async function uploadSingle(item: BookFileUploadItem, bookId: number): Promise<void> {
-  const token = await getValidToken()
-  return new Promise((resolve) => {
-    const formData = new FormData()
-    formData.append('file', item.file)
-
-    const xhr = new XMLHttpRequest()
-    xhr.open('POST', `/api/v1/books/${bookId}/files`)
-
-    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`)
-
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) {
-        item.progress = Math.round((e.loaded / e.total) * 100)
-      }
-    }
-
-    xhr.onload = () => {
-      if (xhr.status === 201) {
-        item.status = 'done'
-        item.progress = 100
-        try {
-          item.result = JSON.parse(xhr.responseText) as AddBookFileResult
-        } catch {
-          // result is optional — upload still counts as done
-        }
-      } else {
-        item.status = 'error'
-        try {
-          const body = JSON.parse(xhr.responseText)
-          item.error = body.message ?? 'Upload failed'
-        } catch {
-          item.error = `Upload failed (${xhr.status})`
-        }
-      }
-      resolve()
-    }
-
-    xhr.onerror = () => {
-      item.status = 'error'
-      item.error = 'Network error'
-      resolve()
-    }
-
-    item.status = 'uploading'
-    xhr.send(formData)
-  })
+  item.status = 'uploading'
+  item.progress = 0
+  try {
+    await uploadViaSession({
+      file: item.file,
+      target: { kind: 'existing_book', bookId },
+      onProgress: (percent) => {
+        item.progress = percent
+      },
+    })
+    item.status = 'done'
+    item.progress = 100
+  } catch (err) {
+    item.status = 'error'
+    item.error = err instanceof Error ? err.message : 'Upload failed'
+  }
 }
 
 async function triggerRename(bookId: number): Promise<void> {

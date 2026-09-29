@@ -1,4 +1,4 @@
-import { ConflictException, ForbiddenException, HttpException, Injectable, NotFoundException, OnApplicationBootstrap } from '@nestjs/common';
+import { ConflictException, ForbiddenException, HttpException, Injectable, Logger, NotFoundException, OnApplicationBootstrap } from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
 import { Interval } from '@nestjs/schedule';
 import { Permission, UploadErrorCode, UPLOAD_SUPPORTED_FORMATS } from '@bookorbit/types';
@@ -14,6 +14,7 @@ import { Inject } from '@nestjs/common';
 
 import type { UploadSessionRow } from '../../db/schema';
 import type { RequestUser } from '../../common/types/request-user';
+import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { storageConfig } from '../../config/config';
 import {
   HARD_MAX_UPLOAD_BYTES,
@@ -34,6 +35,7 @@ import { uploadError } from './upload-errors';
 
 @Injectable()
 export class UploadSessionService implements OnApplicationBootstrap {
+  private readonly logger = new Logger(UploadSessionService.name);
   private readonly stagingDirectory: string;
   private readonly locks = new Map<string, Promise<void>>();
 
@@ -194,54 +196,61 @@ export class UploadSessionService implements OnApplicationBootstrap {
       if (row.receivedBytes !== row.sizeBytes) {
         throw uploadError.invalidSessionState(`Upload is incomplete: ${row.receivedBytes} of ${row.sizeBytes} bytes received`);
       }
+
+      row = (await this.repo.update(row.id, { status: 'processing', errorCode: null, errorMessage: null }))!;
+      // Hashing, validating and importing a multi-gigabyte file outlasts the ~100 s a reverse proxy
+      // such as a Cloudflare Tunnel waits for a response, so the request only starts the work and
+      // clients follow it by polling the session.
+      void this.processCompletedUpload(row, user);
+      return this.toResponse(row);
+    });
+  }
+
+  private async processCompletedUpload(row: UploadSessionRow, user: RequestUser): Promise<void> {
+    const startedAt = Date.now();
+    this.logger.log(
+      `[upload.complete_session] [start] sessionId=${row.id} userId=${user.id} target=${row.targetKind} sizeBytes=${row.sizeBytes} - upload import started`,
+    );
+    try {
       if (row.expectedSha256) {
         const actual = await sha256File(row.stagingPath);
         if (actual !== row.expectedSha256) throw uploadError.checksumMismatch('File checksum does not match');
       }
-
       await this.validator.validateContent(row.stagingPath, this.validator.validateFormat(row.filename, await this.allowedFormats(row)));
-      row = (await this.repo.update(row.id, { status: 'processing', errorCode: null, errorMessage: null }))!;
 
-      try {
-        if (row.targetKind === 'library') {
-          if (!row.targetLibraryId) throw uploadError.invalidTarget('Target library no longer exists');
-          const stored = await this.uploadService.uploadForSession(
-            row.targetLibraryId,
-            row.targetFolderId ?? undefined,
-            row.filename,
-            createReadStream(row.stagingPath),
-            user,
-            row.id,
-          );
-          row = (await this.repo.update(row.id, { resultBookId: stored.bookId }))!;
-          void this.finishStoredBook(row, stored);
-        } else if (row.targetKind === 'existing_book') {
-          if (!row.targetBookId) throw uploadError.invalidTarget('Target book no longer exists');
-          const result = await this.uploadService.addFileToBook(row.targetBookId, row.filename, createReadStream(row.stagingPath), user);
-          row = (await this.repo.update(row.id, {
-            status: 'completed',
-            resultBookId: row.targetBookId,
-            completedAt: new Date(),
-          }))!;
-          await this.storageService.cleanup(row.stagingPath);
-          void result;
-        } else {
-          const ingest = this.moduleRef.get(BookDockIngestService, { strict: false });
-          const fileId = await ingest.ingestUpload(row.filename, createReadStream(row.stagingPath), user.id);
-          row = (await this.repo.update(row.id, {
-            status: 'completed',
-            resultBookDockFileId: fileId,
-            completedAt: new Date(),
-          }))!;
-          await this.storageService.cleanup(row.stagingPath);
-        }
-        return this.toResponse(row);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        await this.fail(row.id, UploadErrorCode.ImportFailed, message);
-        throw error;
+      if (row.targetKind === 'library') {
+        if (!row.targetLibraryId) throw uploadError.invalidTarget('Target library no longer exists');
+        const stored = await this.uploadService.uploadForSession(
+          row.targetLibraryId,
+          row.targetFolderId ?? undefined,
+          row.filename,
+          createReadStream(row.stagingPath),
+          user,
+          row.id,
+        );
+        row = (await this.repo.update(row.id, { resultBookId: stored.bookId }))!;
+        await this.finishStoredBook(row, stored);
+      } else if (row.targetKind === 'existing_book') {
+        if (!row.targetBookId) throw uploadError.invalidTarget('Target book no longer exists');
+        await this.uploadService.addFileToBook(row.targetBookId, row.filename, createReadStream(row.stagingPath), user);
+        await this.repo.update(row.id, { status: 'completed', resultBookId: row.targetBookId, completedAt: new Date() });
+        await this.storageService.cleanup(row.stagingPath);
+      } else {
+        const ingest = this.moduleRef.get(BookDockIngestService, { strict: false });
+        const fileId = await ingest.ingestUpload(row.filename, createReadStream(row.stagingPath), user.id);
+        await this.repo.update(row.id, { status: 'completed', resultBookDockFileId: fileId, completedAt: new Date() });
+        await this.storageService.cleanup(row.stagingPath);
       }
-    });
+      this.logger.log(
+        `[upload.complete_session] [end] sessionId=${row.id} userId=${user.id} target=${row.targetKind} durationMs=${Date.now() - startedAt} bookId=${row.resultBookId ?? 'none'} - upload import completed`,
+      );
+    } catch (error) {
+      const { errorCode, message } = describeFailure(error);
+      this.logger.warn(
+        `[upload.complete_session] [fail] sessionId=${row.id} userId=${user.id} target=${row.targetKind} durationMs=${Date.now() - startedAt} errorClass=${error instanceof Error ? error.constructor.name : typeof error} error="${sanitizeLogValue(error instanceof Error ? error.message : String(error))}" - upload import failed`,
+      );
+      await this.fail(row.id, errorCode, message).catch(() => undefined);
+    }
   }
 
   async cancel(id: string, user: RequestUser): Promise<UploadSessionResponse> {
@@ -455,6 +464,22 @@ function normalizeChecksum(value: string): string {
     .replace(/^sha-?256[=: ]+/, '');
   if (!/^[a-f0-9]{64}$/.test(normalized)) throw uploadError.checksumMismatch('Checksum must be a SHA-256 hex value');
   return normalized;
+}
+
+/**
+ * Coded upload errors keep their code and message for the client. Anything else can carry an
+ * absolute server path, so the client gets a generic message and the detail stays in the log.
+ */
+function describeFailure(error: unknown): { errorCode: string; message: string } {
+  if (error instanceof HttpException) {
+    const response = error.getResponse();
+    if (typeof response === 'object' && response !== null && 'errorCode' in response) {
+      const { errorCode, message } = response as { errorCode: string; message?: unknown };
+      return { errorCode, message: typeof message === 'string' ? message : error.message };
+    }
+    return { errorCode: UploadErrorCode.ImportFailed, message: error.message };
+  }
+  return { errorCode: UploadErrorCode.ImportFailed, message: 'The uploaded file could not be imported' };
 }
 
 async function sha256File(path: string): Promise<string> {
