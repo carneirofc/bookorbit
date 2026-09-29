@@ -76,11 +76,11 @@ describe('secret input policy', () => {
 
     expect(converted).toEqual(
       expect.arrayContaining([
-        'features/settings/metadata-preferences/components/ProviderConfigPanel.vue',
+        'features/settings/metadata-preferences/components/ProviderRow.vue',
         'features/hardcover/components/HardcoverConnectionCard.vue',
         'features/readwise/components/ReadwiseSettings.vue',
         'features/storygraph/components/StorygraphConnectionCard.vue',
-        'features/settings/MigrationSettings.vue',
+        'features/migration/components/MigrationSourceFields.vue',
         'features/settings/OpdsSettings.vue',
         'features/settings/KoreaderSettings.vue',
         'features/settings/OidcSettings.vue',

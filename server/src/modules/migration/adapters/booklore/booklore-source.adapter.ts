@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { parseSeriesIndex, type SeriesIndex } from '@bookorbit/types';
 import { constants as fsConstants } from 'fs';
 import { access, stat } from 'fs/promises';
 import type mysql from 'mysql2/promise';
@@ -408,6 +409,8 @@ export class BookloreSourceAdapter implements SourceAdapter<BookloreConnectionCo
     const currentHashCol = fileColumns ? firstColumn(fileColumns, ['current_hash', 'hash', 'file_hash', 'sha256']) : null;
     const initialHashCol = fileColumns ? firstColumn(fileColumns, ['initial_hash']) : null;
     const fileDurationSecondsCol = fileColumns ? firstColumn(fileColumns, ['duration_seconds', 'duration']) : null;
+    const fileFormatCol = fileColumns ? firstColumn(fileColumns, ['format', 'file_format', 'file_type', 'ebook_format']) : null;
+    const fileSortOrderCol = fileColumns ? firstColumn(fileColumns, ['sort_order', 'track_index', 'file_index', 'position']) : null;
     const fileIsBookCol = fileColumns ? firstColumn(fileColumns, ['is_book']) : null;
 
     const presentFields: string[] = (
@@ -469,6 +472,8 @@ export class BookloreSourceAdapter implements SourceAdapter<BookloreConnectionCo
       sqlString('f', currentHashCol, 'currentHash'),
       sqlString('f', initialHashCol, 'initialHash'),
       sqlNumber('f', fileDurationSecondsCol, 'fileDurationSeconds'),
+      sqlString('f', fileFormatCol, 'fileFormat'),
+      sqlNumber('f', fileSortOrderCol, 'fileSortOrder'),
       libraryPathValueCol ? `CAST(lp.\`${libraryPathValueCol}\` AS CHAR) AS libraryRootPath` : 'NULL AS libraryRootPath',
     ];
 
@@ -490,6 +495,7 @@ export class BookloreSourceAdapter implements SourceAdapter<BookloreConnectionCo
     }
     const whereSql = whereParts.length > 0 ? `WHERE ${whereParts.join(' AND ')}` : '';
     const orderParts = [`b.\`${bookIdCol}\``];
+    if (fileSortOrderCol) orderParts.push(`f.\`${fileSortOrderCol}\``);
     if (fileIdCol) orderParts.push(`f.\`${fileIdCol}\``);
 
     const sqlText = `
@@ -521,7 +527,7 @@ export class BookloreSourceAdapter implements SourceAdapter<BookloreConnectionCo
         language: asString(row.language),
         pageCount: asInteger(row.pageCount),
         seriesName: asString(row.seriesName),
-        seriesIndex: asNumber(row.seriesIndex),
+        seriesIndex: parseBookloreSeriesIndex(row.seriesIndex),
         rating: asInteger(row.rating),
         googleBooksId: asString(row.googleBooksId),
         goodreadsId: asString(row.goodreadsId),
@@ -562,6 +568,8 @@ export class BookloreSourceAdapter implements SourceAdapter<BookloreConnectionCo
           fileName,
           fileSubPath,
           durationSeconds: fileDurationSeconds,
+          format: normalizeSourceFileFormat(asString(row.fileFormat), fileName, filePath),
+          sortOrder: asInteger(row.fileSortOrder) ?? next.files?.length ?? 0,
         });
       }
 
@@ -1206,6 +1214,18 @@ function sqlString(alias: string, column: string | null, outName: string): strin
   return `CAST(${alias}.\`${column}\` AS CHAR) AS ${outName}`;
 }
 
+/**
+ * Booklore stores the series index in a `DECIMAL(10,2)` column, which the driver hands back at its
+ * full scale: 2.5 arrives as "2.50". The scale is storage formatting, not a label anyone authored,
+ * and keeping it sorts the book wrong, because the series sort index reads the fractional part as
+ * its own number and ranks 50 above 9. Trim it before the value becomes a series index.
+ */
+export function parseBookloreSeriesIndex(value: unknown): SeriesIndex | null {
+  const candidate = typeof value === 'string' ? value.trim() : value;
+  if (typeof candidate !== 'string' || !/^\d+\.\d+$/.test(candidate)) return parseSeriesIndex(candidate);
+  return parseSeriesIndex(candidate.replace(/0+$/, '').replace(/\.$/, ''));
+}
+
 function sqlNumber(alias: string, column: string | null, outName: string): string {
   if (!column) return `NULL AS ${outName}`;
   return `${alias}.\`${column}\` AS ${outName}`;
@@ -1237,6 +1257,17 @@ function normalizeJoinedPath(value: string): string {
   const trimmed = value.trim();
   if (!trimmed) return trimmed;
   return trimmed.replace(/\/{2,}/g, '/');
+}
+
+function normalizeSourceFileFormat(format: string | null, fileName: string | null, filePath: string | null): string | null {
+  const declared = format?.trim().toLowerCase().replace(/^\./, '');
+  if (declared) return declared;
+
+  for (const candidate of [fileName, filePath]) {
+    const match = candidate?.match(/\.([A-Za-z0-9]+)$/);
+    if (match) return match[1].toLowerCase();
+  }
+  return null;
 }
 
 function parseContributorNames(value: string | null): SourceContributor[] {

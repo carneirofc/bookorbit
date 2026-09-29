@@ -474,8 +474,8 @@ describe('Migration Booklore API to DB (e2e)', { timeout: 240_000 }, () => {
       unresolved: 1,
     });
     expect(metricByKey.get('user_state:reading_progress')).toMatchObject({
-      processed: 4,
-      imported: 3,
+      processed: 3,
+      imported: 2,
       unresolved: 1,
     });
     expect(metricByKey.get('user_state:audiobook_progress')).toMatchObject({
@@ -527,7 +527,7 @@ describe('Migration Booklore API to DB (e2e)', { timeout: 240_000 }, () => {
       language: 'en',
       pageCount: 321,
       seriesName: 'Series Prime',
-      seriesIndex: 2.5,
+      seriesIndex: '2.5',
       rating: 5,
       googleBooksId: 'google-101',
       goodreadsId: 'gr-101',
@@ -610,15 +610,9 @@ describe('Migration Booklore API to DB (e2e)', { timeout: 240_000 }, () => {
           percentage: 22.4,
           pageNumber: 10,
         }),
-        expect.objectContaining({
-          userId: scenario.targetUsers.bob.id,
-          bookFileId: scenario.books.audio.fileIds[1],
-          percentage: 66,
-          positionSeconds: 12.5,
-        }),
       ]),
     );
-    expect(progressRows).toHaveLength(3);
+    expect(progressRows).toHaveLength(2);
 
     const audioProgressRows = await ctx.db.select().from(schema.audiobookProgress);
     expect(audioProgressRows).toEqual([
@@ -764,12 +758,12 @@ describe('Migration Booklore API to DB (e2e)', { timeout: 240_000 }, () => {
 
     const isbnCoverDir = coverDirectoryForBook(ctx, scenario.books.isbn.bookId);
     const audioCoverDir = coverDirectoryForBook(ctx, scenario.books.audio.bookId);
-    await access(join(isbnCoverDir, 'cover_custom.jpg'));
-    await access(join(isbnCoverDir, 'thumbnail.jpg'));
-    await access(join(audioCoverDir, 'cover_custom.png'));
-    await access(join(audioCoverDir, 'thumbnail.jpg'));
+    await access(join(isbnCoverDir, 'ebook', 'cover_custom.jpg'));
+    await access(join(isbnCoverDir, 'ebook', 'thumbnail.jpg'));
+    await access(join(audioCoverDir, 'audio', 'cover_custom.png'));
+    await access(join(audioCoverDir, 'audio', 'thumbnail.jpg'));
 
-    const audioCoverBytes = await readFile(join(audioCoverDir, 'cover_custom.png'));
+    const audioCoverBytes = await readFile(join(audioCoverDir, 'audio', 'cover_custom.png'));
     expect(audioCoverBytes[0]).toBe(0x89);
     expect(audioCoverBytes[1]).toBe(0x50);
 
@@ -883,10 +877,7 @@ describe('Migration Booklore API to DB (e2e)', { timeout: 240_000 }, () => {
     });
     expect(
       progressRows.find((row) => row.userId === scenario.targetUsers.bob.id && row.bookFileId === scenario.books.audio.fileIds[1]),
-    ).toMatchObject({
-      percentage: 77,
-      positionSeconds: 45,
-    });
+    ).toBeUndefined();
 
     const audioProgressRows = await ctx.db.select().from(schema.audiobookProgress);
     expect(audioProgressRows.find((row) => row.userId === scenario.targetUsers.bob.id && row.bookId === scenario.books.audio.bookId)).toMatchObject({
@@ -980,7 +971,7 @@ describe('Migration Booklore API to DB (e2e)', { timeout: 240_000 }, () => {
       language: 'en',
       pageCount: 222,
       seriesName: 'Variant Series',
-      seriesIndex: 1.25,
+      seriesIndex: '1.25',
       rating: 4,
       googleBooksId: 'variant-google-id',
       durationSeconds: 987,

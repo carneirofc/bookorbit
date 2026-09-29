@@ -1,6 +1,6 @@
 import { ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { MetadataCandidate, MetadataProviderKey } from '@bookorbit/types';
-import { from, merge, Observable, switchMap } from 'rxjs';
+import { CoverMedia, MetadataCandidate, MetadataProviderKey, MetadataProviderSearchOutcome, MetadataProviderSearchStatus } from '@bookorbit/types';
+import { filter, from, map, merge, Observable, switchMap } from 'rxjs';
 
 import type { RequestUser } from '../../common/types/request-user';
 import { filterAndRank } from './candidate-relevance';
@@ -18,11 +18,26 @@ interface TimedProviderResult {
   timedOut: boolean;
 }
 
+interface ProviderSearchResult {
+  candidates: MetadataCandidate[];
+  /** Null when the provider ran to completion, whether or not it found anything. */
+  outcome: MetadataProviderSearchOutcome | null;
+}
+
+/**
+ * A search reports two different things: the records it found, and whether a provider was cut off
+ * before it could finish. Without the second, an interrupted search is indistinguishable from a
+ * genuinely empty one.
+ */
+export type MetadataSearchEvent = { kind: 'candidate'; candidate: MetadataCandidate } | { kind: 'status'; status: MetadataProviderSearchStatus };
+
 export interface StoredProviderContext {
   libraryId: number;
+  title: string | null;
   seriesName: string | null;
-  seriesIndex: number | null;
+  seriesIndex: string | null;
   providerIds: Partial<Record<MetadataProviderKey, string>>;
+  coverMedia: CoverMedia;
 }
 
 @Injectable()
@@ -36,19 +51,28 @@ export class MetadataFetchService {
     private readonly metadataFetchRepository: MetadataFetchRepository,
   ) {}
 
-  search(params: MetadataSearchParams, keys?: MetadataProviderKey[]): Observable<MetadataCandidate> {
+  search(params: MetadataSearchParams, keys?: MetadataProviderKey[]): Observable<MetadataSearchEvent> {
     const providers = this.registry.select(keys);
     return merge(
       ...providers.map((provider) =>
-        from(this.fetchFromProviderWithThrottleHandling(provider, params)).pipe(switchMap((providerResults) => from(providerResults))),
+        from(this.fetchFromProviderWithThrottleHandling(provider, params)).pipe(switchMap((result) => from(toSearchEvents(provider.key, result)))),
       ),
+    );
+  }
+
+  /** Candidate-only view of `search`, for callers that have no use for provider status. */
+  searchCandidates(params: MetadataSearchParams, keys?: MetadataProviderKey[]): Observable<MetadataCandidate> {
+    return this.search(params, keys).pipe(
+      filter((event): event is Extract<MetadataSearchEvent, { kind: 'candidate' }> => event.kind === 'candidate'),
+      map((event) => event.candidate),
     );
   }
 
   async lookupById(key: MetadataProviderKey, providerId: string): Promise<MetadataCandidate | null> {
     const provider = this.registry.find(key);
     if (!provider || !isIdentifiable(provider)) return null;
-    return provider.lookupById(providerId);
+    const candidate = await provider.lookupById(providerId);
+    return candidate ? withCoverShape(provider, candidate) : null;
   }
 
   async getStoredProviderIds(bookId: number, user: RequestUser): Promise<Partial<Record<MetadataProviderKey, string>>> {
@@ -60,15 +84,12 @@ export class MetadataFetchService {
     const row = await this.getAccessibleStoredProviderIdsRow(bookId, user);
     return {
       libraryId: row.libraryId,
+      title: row.title,
       seriesName: row.seriesName,
       seriesIndex: row.seriesIndex,
       providerIds: this.mapStoredProviderIds(row),
+      coverMedia: row.coverMedia,
     };
-  }
-
-  async getAccessibleBookLibraryId(bookId: number, user: RequestUser): Promise<number> {
-    const row = await this.getAccessibleStoredProviderIdsRow(bookId, user);
-    return row.libraryId;
   }
 
   private async getAccessibleStoredProviderIdsRow(bookId: number, user: RequestUser): Promise<StoredProviderIdsRow> {
@@ -105,7 +126,7 @@ export class MetadataFetchService {
     };
   }
 
-  private async fetchFromProviderWithThrottleHandling(provider: MetadataProvider, params: MetadataSearchParams): Promise<MetadataCandidate[]> {
+  private async fetchFromProviderWithThrottleHandling(provider: MetadataProvider, params: MetadataSearchParams): Promise<ProviderSearchResult> {
     const startedAt = Date.now();
     this.logger.log(`[metadata_fetch.provider_search] [start] provider=${provider.key} - provider fetch started`);
 
@@ -116,28 +137,32 @@ export class MetadataFetchService {
         this.logger.warn(
           `[metadata_fetch.provider_search] [fail] provider=${provider.key} durationMs=${Date.now() - startedAt} errorClass=TimeoutError error="provider search timed out" - provider fetch failed`,
         );
-        return [];
+        return { candidates: [], outcome: 'timeout' };
       }
 
       this.throttleTracker.clearOnSuccess(provider.key);
       this.logger.log(
         `[metadata_fetch.provider_search] [end] provider=${provider.key} durationMs=${Date.now() - startedAt} resultCount=${results.length} - provider fetch completed`,
       );
-      return results;
+      return { candidates: results.map((candidate) => withCoverShape(provider, candidate)), outcome: null };
     } catch (error) {
       if (error instanceof ProviderThrottleError) {
         this.throttleTracker.record(provider.key, error.retryAfterSeconds);
+        // A provider throttled part-way through hands back what it had already assembled. The
+        // cooldown covers the requests it can no longer make; it is not a reason to drop finished
+        // candidates, and the status event still tells the client the provider was cut short.
+        const salvaged = filterAndRank([...error.partialCandidates], params).map((candidate) => withCoverShape(provider, candidate));
         this.logger.warn(
-          `[metadata_fetch.provider_search] [fail] provider=${provider.key} durationMs=${Date.now() - startedAt} errorClass=ProviderThrottleError error="provider throttled" - provider fetch failed`,
+          `[metadata_fetch.provider_search] [fail] provider=${provider.key} durationMs=${Date.now() - startedAt} resultCount=${salvaged.length} errorClass=ProviderThrottleError error="provider throttled" - provider fetch failed`,
         );
-        return [];
+        return { candidates: salvaged, outcome: 'throttled' };
       }
 
       const errorClass = error instanceof Error ? error.name : 'UnknownError';
       this.logger.warn(
         `[metadata_fetch.provider_search] [fail] provider=${provider.key} durationMs=${Date.now() - startedAt} errorClass=${errorClass} error="${sanitizeLogError(error)}" - provider fetch failed`,
       );
-      return [];
+      return { candidates: [], outcome: 'failed' };
     }
   }
 
@@ -149,6 +174,12 @@ export class MetadataFetchService {
         const rankedLookup = filterAndRank([lookupResult], params, 1);
         if (rankedLookup.length > 0) return rankedLookup;
       }
+      if (params.existingProviderIdsOnly) return [];
+    }
+
+    if (params.existingProviderIdsOnly) {
+      if (provider.key !== MetadataProviderKey.AUDNEXUS || !params.existingProviderIds?.[MetadataProviderKey.AUDIBLE]) return [];
+      return filterAndRank(await provider.search(params), params, 1);
     }
 
     return this.searchAndRankProvider(provider, params);
@@ -204,6 +235,18 @@ export class MetadataFetchService {
       controller.abort();
     });
   }
+}
+
+/** Every candidate with a cover states its shape, so neither the pipeline nor a client has to guess. */
+function withCoverShape(provider: MetadataProvider, candidate: MetadataCandidate): MetadataCandidate {
+  if (!candidate.coverUrl || candidate.coverShape) return candidate;
+  return { ...candidate, coverShape: provider.coverShape ?? 'unknown' };
+}
+
+function toSearchEvents(provider: MetadataProviderKey, result: ProviderSearchResult): MetadataSearchEvent[] {
+  const events: MetadataSearchEvent[] = result.candidates.map((candidate) => ({ kind: 'candidate', candidate }));
+  if (result.outcome) events.push({ kind: 'status', status: { provider, outcome: result.outcome } });
+  return events;
 }
 
 function hasText(v: string | undefined): boolean {

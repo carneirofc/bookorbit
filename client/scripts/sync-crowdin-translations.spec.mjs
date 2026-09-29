@@ -3,6 +3,9 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { assertCrowdinTargetConfiguration, validateCrowdinTargetConfiguration } from './locale-configuration.mjs'
+import { flattenCatalog, validateCatalogs } from './locale-catalog-validation.mjs'
+import { collectSourceMessageKeys } from './locale-source-keys.mjs'
+import { findProtectedTermDrift } from './locale-protected-terms.mjs'
 import {
   TARGET_CATALOGS,
   assertSafeDownloadUrl,
@@ -11,7 +14,9 @@ import {
   findTranslationLosses,
   normalizeCrowdinCatalog,
   parseAllowedTranslationLosses,
+  retentionLossLimit,
   sourceDrift,
+  syncCrowdinSource,
   syncCrowdinTranslations,
 } from './sync-crowdin-translations.mjs'
 
@@ -26,11 +31,11 @@ afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })))
 })
 
-async function createCatalogFixture(targetCatalogs, currentCatalogs = new Map()) {
+async function createCatalogFixture(targetCatalogs, currentCatalogs = new Map(), referenceCatalog = { common: { save: 'Save' } }) {
   const directory = await mkdtemp(path.join(tmpdir(), 'bookorbit-crowdin-sync-'))
   temporaryDirectories.push(directory)
   await mkdir(directory, { recursive: true })
-  await writeFile(path.join(directory, 'en.json'), `${JSON.stringify({ common: { save: 'Save' } }, null, 2)}\n`)
+  await writeFile(path.join(directory, 'en.json'), `${JSON.stringify(referenceCatalog, null, 2)}\n`)
   await Promise.all(
     targetCatalogs.map(({ locale }) =>
       writeFile(path.join(directory, `${locale}.json`), `${JSON.stringify(currentCatalogs.get(locale) ?? {}, null, 2)}\n`),
@@ -39,20 +44,38 @@ async function createCatalogFixture(targetCatalogs, currentCatalogs = new Map())
   return directory
 }
 
-function createSynchronizationFetch({ identifiers = ['common.save'], catalogs = new Map(), onDownload = async () => {} } = {}) {
+function createSynchronizationFetch({
+  sourceCatalog = { common: { save: 'Save' } },
+  catalogs = new Map(),
+  applySourceUpdate = true,
+  onDownload = async () => {},
+} = {}) {
+  let currentSourceCatalog = sourceCatalog
+  let uploadedSourceCatalog
+
   return vi.fn(async (input, init = {}) => {
     const url = new URL(input)
-    if (url.hostname === 'api.crowdin.com' && url.pathname.endsWith('/files')) {
+    const method = init.method ?? 'GET'
+    if (url.hostname === 'api.crowdin.com' && url.pathname.endsWith('/files') && method === 'GET') {
       return new Response(JSON.stringify({ data: [{ data: { id: 7, path: '/client/src/locales/en.json' } }] }))
     }
-    if (url.hostname === 'api.crowdin.com' && url.pathname.endsWith('/strings')) {
-      return new Response(JSON.stringify({ data: identifiers.map((identifier) => ({ data: { identifier } })) }))
+    if (url.hostname === 'api.crowdin.com' && url.pathname.endsWith('/files/7/download')) {
+      return new Response(JSON.stringify({ data: { url: 'https://downloads.example.test/source.json' } }))
+    }
+    if (url.hostname === 'api.crowdin.com' && url.pathname === '/api/v2/storages' && method === 'POST') {
+      uploadedSourceCatalog = JSON.parse(init.body)
+      return new Response(JSON.stringify({ data: { id: 9 } }))
+    }
+    if (url.hostname === 'api.crowdin.com' && url.pathname.endsWith('/files/7') && method === 'PUT') {
+      if (applySourceUpdate) currentSourceCatalog = uploadedSourceCatalog
+      return new Response(JSON.stringify({ data: { id: 7 } }))
     }
     if (url.hostname === 'api.crowdin.com' && url.pathname.includes('/translations/builds/files/')) {
       const { targetLanguageId } = JSON.parse(init.body)
       return new Response(JSON.stringify({ data: { url: `https://downloads.example.test/${encodeURIComponent(targetLanguageId)}.json` } }))
     }
     if (url.hostname === 'downloads.example.test') {
+      if (url.pathname === '/source.json') return new Response(JSON.stringify(currentSourceCatalog))
       const languageId = decodeURIComponent(path.basename(url.pathname, '.json'))
       await onDownload(languageId)
       return new Response(JSON.stringify(catalogs.get(languageId) ?? { common: { save: `Translated ${languageId}` } }))
@@ -78,13 +101,22 @@ describe('Crowdin translation synchronization', () => {
   })
 
   it('detects when Crowdin has not synchronized the current English keys', () => {
-    expect(sourceDrift(new Map([['common.save', 'Save']]), new Set(['common.cancel']))).toEqual({
+    expect(sourceDrift(new Map([['common.save', 'Save']]), new Map([['common.cancel', 'Cancel']]))).toEqual({
       missing: ['common.save'],
       unexpected: ['common.cancel'],
+      changed: [],
     })
   })
 
-  it('protects real translations in complete legacy catalogs without treating English fallbacks as translations', () => {
+  it('detects changed English source text under an existing key', () => {
+    expect(sourceDrift(new Map([['common.save', 'Save now']]), new Map([['common.save', 'Save']]))).toEqual({
+      missing: [],
+      unexpected: [],
+      changed: ['common.save'],
+    })
+  })
+
+  it('protects a complete catalog as strictly as a sparse one', () => {
     const referenceMessages = new Map([
       ['common.save', 'Save'],
       ['common.cancel', 'Cancel'],
@@ -96,7 +128,8 @@ describe('Crowdin translation synchronization', () => {
     const exported = new Map()
 
     expect(findTranslationLosses({ locale: 'cs', reference: referenceMessages, current, exported })).toEqual([
-      { locale: 'cs', key: 'common.save', reason: 'missing from Crowdin export' },
+      { locale: 'cs', key: 'common.save' },
+      { locale: 'cs', key: 'common.cancel' },
     ])
   })
 
@@ -108,45 +141,97 @@ describe('Crowdin translation synchronization', () => {
     const current = new Map([['common.save', 'Save']])
 
     expect(findTranslationLosses({ locale: 'cs', reference: referenceMessages, current, exported: new Map() })).toEqual([
-      { locale: 'cs', key: 'common.save', reason: 'missing from Crowdin export' },
+      { locale: 'cs', key: 'common.save' },
     ])
   })
 
-  it('rejects translations that Crowdin replaces with English source text', () => {
-    const referenceMessages = new Map([['common.save', 'Save']])
-    const current = new Map([['common.save', 'Uložit']])
-    const exported = new Map([['common.save', 'Save']])
-
-    expect(findTranslationLosses({ locale: 'cs', reference: referenceMessages, current, exported })).toEqual([
-      { locale: 'cs', key: 'common.save', reason: 'replaced by English source text' },
-    ])
+  it.each([
+    ['es', 'bookDock.tab.error', 'Error', 'error'],
+    ['es', 'book.detail.readingLog.months.feb', 'Feb', 'febrero'],
+    ['es', 'settings.metadata.providers.fields.cookie', 'Cookie', 'galleta'],
+    ['fr', 'settings.metadata.fields.description', 'Description', 'Descriptif'],
+    ['pt', 'settings.integrations.tabs.readwise', 'Readwise', 'Leitura'],
+  ])('keeps %s:%s when Crowdin translates it as the English source text', (locale, key, source, currentMessage) => {
+    expect(
+      findTranslationLosses({
+        locale,
+        reference: new Map([[key, source]]),
+        current: new Map([[key, currentMessage]]),
+        exported: new Map([[key, source]]),
+      }),
+    ).toEqual([])
   })
 
-  it('requires exact acknowledgements for intentional translation losses', () => {
+  it('counts a message this sync rejected as a rejection rather than a lost translation', () => {
+    expect(
+      findTranslationLosses({
+        locale: 'cs',
+        reference: new Map([['common.save', 'Save']]),
+        current: new Map([['common.save', 'Uložit']]),
+        exported: new Map(),
+        rejected: new Set(['common.save']),
+      }),
+    ).toEqual([])
+  })
+
+  it('ignores catalog keys that English no longer defines', () => {
+    expect(
+      findTranslationLosses({
+        locale: 'cs',
+        reference: new Map([['common.save', 'Save']]),
+        current: new Map([['common.removed', 'Odstraněno']]),
+        exported: new Map(),
+      }),
+    ).toEqual([])
+  })
+
+  it('needs no acknowledgement when Crowdin corrects a translation to the English source', () => {
+    const referenceMessages = new Map([['bookDock.tab.error', 'Error']])
+    const currentCatalogs = new Map(TARGET_CATALOGS.map(({ locale }) => [locale, new Map()]))
+    const exportedCatalogs = new Map(TARGET_CATALOGS.map(({ locale }) => [locale, new Map([['bookDock.tab.error', 'Error']])]))
+    currentCatalogs.set('es', new Map([['bookDock.tab.error', 'error']]))
+
+    expect(assertTranslationRetention({ reference: referenceMessages, currentCatalogs, exportedCatalogs })).toEqual([])
+  })
+
+  it('reports ordinary Crowdin churn instead of failing the whole export', () => {
     const referenceMessages = new Map([['common.save', 'Save']])
     const currentCatalogs = new Map(TARGET_CATALOGS.map(({ locale }) => [locale, new Map()]))
     const exportedCatalogs = new Map(TARGET_CATALOGS.map(({ locale }) => [locale, new Map()]))
     currentCatalogs.set('cs', new Map([['common.save', 'Uložit']]))
 
-    expect(() => assertTranslationRetention({ reference: referenceMessages, currentCatalogs, exportedCatalogs })).toThrow(
-      'cs:common.save - missing from Crowdin export',
-    )
-    expect(() =>
+    expect(assertTranslationRetention({ reference: referenceMessages, currentCatalogs, exportedCatalogs })).toEqual([
+      { locale: 'cs', key: 'common.save' },
+    ])
+    expect(
       assertTranslationRetention({
         reference: referenceMessages,
         currentCatalogs,
         exportedCatalogs,
         allowedLosses: parseAllowedTranslationLosses('cs:common.save'),
       }),
-    ).not.toThrow()
-    expect(() =>
-      assertTranslationRetention({
-        reference: referenceMessages,
-        currentCatalogs,
-        exportedCatalogs,
-        allowedLosses: parseAllowedTranslationLosses('de:common.save'),
-      }),
-    ).toThrow('de:common.save - acknowledgement does not match an exported loss')
+    ).toEqual([])
+  })
+
+  it('fails when an export drops more of a catalog than churn explains', () => {
+    const keys = Array.from({ length: 200 }, (_, index) => `common.key${index}`)
+    const referenceMessages = new Map(keys.map((key) => [key, 'Save']))
+    const currentCatalogs = new Map(TARGET_CATALOGS.map(({ locale }) => [locale, new Map()]))
+    const exportedCatalogs = new Map(TARGET_CATALOGS.map(({ locale }) => [locale, new Map()]))
+    currentCatalogs.set('cs', new Map(keys.map((key) => [key, 'Uložit'])))
+
+    expect(retentionLossLimit(200)).toBe(25)
+    expect(() => assertTranslationRetention({ reference: referenceMessages, currentCatalogs, exportedCatalogs })).toThrow(
+      'cs: 200 translations dropped, more than the 25 allowed',
+    )
+    exportedCatalogs.set('cs', new Map(keys.slice(0, 190).map((key) => [key, 'Uložit'])))
+    expect(() => assertTranslationRetention({ reference: referenceMessages, currentCatalogs, exportedCatalogs })).not.toThrow()
+  })
+
+  it('scales the retention limit with the size of the translated catalog', () => {
+    expect(retentionLossLimit(0)).toBe(25)
+    expect(retentionLossLimit(2500)).toBe(25)
+    expect(retentionLossLimit(5640)).toBe(57)
   })
 
   it('rejects malformed and duplicate loss acknowledgements', () => {
@@ -154,7 +239,7 @@ describe('Crowdin translation synchronization', () => {
     expect(() => parseAllowedTranslationLosses('cs:common.save,cs:common.save')).toThrow('Duplicate translation loss acknowledgement')
   })
 
-  it('requests untranslated-string omission and downloads the bounded export', async () => {
+  it('omits untranslated strings from the export so retention can read absence as loss', async () => {
     const fetchImpl = vi
       .fn()
       .mockResolvedValueOnce(
@@ -171,6 +256,45 @@ describe('Crowdin translation synchronization', () => {
     expect(JSON.parse(fetchImpl.mock.calls[0][1].body)).toEqual({
       targetLanguageId: 'cs',
       skipUntranslatedStrings: true,
+    })
+  })
+
+  it('leaves an identical Crowdin source file unchanged', async () => {
+    const catalogDirectory = await createCatalogFixture([], new Map(), { common: { save: 'Save' } })
+    const fetchImpl = createSynchronizationFetch()
+
+    await expect(
+      syncCrowdinSource({
+        token: 'secret',
+        fetchImpl,
+        catalogDirectory,
+        assertTargetConfiguration: async () => {},
+      }),
+    ).resolves.toEqual({ fileId: 7, messageCount: 1, updated: false })
+    expect(fetchImpl.mock.calls.some(([, init]) => ['POST', 'PUT'].includes(init.method))).toBe(false)
+  })
+
+  it('updates changed Crowdin source text without discarding translations', async () => {
+    const catalogDirectory = await createCatalogFixture([], new Map(), { common: { save: 'Save now' } })
+    const fetchImpl = createSynchronizationFetch({ sourceCatalog: { common: { save: 'Save' } } })
+
+    await expect(
+      syncCrowdinSource({
+        token: 'secret',
+        fetchImpl,
+        catalogDirectory,
+        assertTargetConfiguration: async () => {},
+      }),
+    ).resolves.toEqual({ fileId: 7, messageCount: 1, updated: true })
+
+    const storageCall = fetchImpl.mock.calls.find(([input]) => new URL(input).pathname === '/api/v2/storages')
+    expect(storageCall[1].headers['Crowdin-API-FileName']).toBe('en.json')
+    expect(JSON.parse(storageCall[1].body)).toEqual({ common: { save: 'Save now' } })
+
+    const updateCall = fetchImpl.mock.calls.find(([input, init]) => new URL(input).pathname.endsWith('/files/7') && init.method === 'PUT')
+    expect(JSON.parse(updateCall[1].body)).toEqual({
+      storageId: 9,
+      updateOption: 'keep_translations',
     })
   })
 
@@ -258,17 +382,18 @@ describe('Crowdin translation synchronization', () => {
       outputDirectory,
       targetCatalogs,
       assertTargetConfiguration: async () => {},
+      protectedTerms: [],
     })
 
     expect(maximumDownloads).toBe(4)
     await expect(readFile(path.join(outputDirectory, 'cs.json'), 'utf8')).resolves.toContain('Translated cs')
   })
 
-  it('rejects source drift before downloading or writing catalogs', async () => {
+  it('rejects source drift that remains after updating Crowdin', async () => {
     const targetCatalogs = TARGET_CATALOGS.slice(0, 2)
     const catalogDirectory = await createCatalogFixture(targetCatalogs)
     const outputDirectory = path.join(catalogDirectory, 'output')
-    const fetchImpl = createSynchronizationFetch({ identifiers: [] })
+    const fetchImpl = createSynchronizationFetch({ sourceCatalog: {}, applySourceUpdate: false })
 
     await expect(
       syncCrowdinTranslations({
@@ -278,37 +403,148 @@ describe('Crowdin translation synchronization', () => {
         outputDirectory,
         targetCatalogs,
         assertTargetConfiguration: async () => {},
+        protectedTerms: [],
+        wait: async () => {},
       }),
-    ).rejects.toThrow('Crowdin source is not synchronized with en.json')
-    expect(fetchImpl.mock.calls.some(([input]) => new URL(input).hostname === 'downloads.example.test')).toBe(false)
+    ).rejects.toThrow('Crowdin source did not match en.json after update')
+    expect(fetchImpl.mock.calls.some(([input]) => new URL(input).pathname.includes('/translations/builds/files/'))).toBe(false)
     await expect(access(outputDirectory)).rejects.toThrow()
   })
 
-  it('validates every downloaded catalog before writing any files', async () => {
+  it('omits an invalid downloaded message instead of failing the whole export', async () => {
     const targetCatalogs = TARGET_CATALOGS.slice(0, 2)
     const catalogDirectory = await createCatalogFixture(targetCatalogs)
     const outputDirectory = path.join(catalogDirectory, 'output')
-    const catalogs = new Map([[targetCatalogs[0].languageId, { common: { save: 'Bad \u2014 value' } }]])
+    const reportPath = path.join(catalogDirectory, 'rejections.md')
+    const catalogs = new Map([[targetCatalogs[0].languageId, { common: { save: 'Bad <b>value</b>' } }]])
 
-    await expect(
-      syncCrowdinTranslations({
-        token: 'secret',
-        fetchImpl: createSynchronizationFetch({ catalogs }),
-        catalogDirectory,
-        outputDirectory,
-        targetCatalogs,
-        assertTargetConfiguration: async () => {},
-      }),
-    ).rejects.toThrow('Unicode em dash is not allowed')
-    await expect(access(outputDirectory)).rejects.toThrow()
+    const { rejections } = await syncCrowdinTranslations({
+      token: 'secret',
+      fetchImpl: createSynchronizationFetch({ catalogs }),
+      catalogDirectory,
+      outputDirectory,
+      targetCatalogs,
+      reportPath,
+      assertTargetConfiguration: async () => {},
+      protectedTerms: [],
+    })
+
+    expect(rejections).toEqual([
+      {
+        locale: targetCatalogs[0].locale,
+        key: 'common.save',
+        errors: [`${targetCatalogs[0].locale}: HTML is not allowed in common.save`],
+      },
+    ])
+    expect(JSON.parse(await readFile(path.join(outputDirectory, `${targetCatalogs[0].locale}.json`), 'utf8'))).toEqual({})
+    expect(JSON.parse(await readFile(path.join(outputDirectory, `${targetCatalogs[1].locale}.json`), 'utf8'))).toEqual({
+      common: { save: `Translated ${targetCatalogs[1].languageId}` },
+    })
+    expect(await readFile(reportPath, 'utf8')).toContain('HTML is not allowed in common.save')
   })
 
-  it('checks translation retention before writing any files', async () => {
+  it('keeps exporting when a rejected message drops an existing translation', async () => {
     const targetCatalogs = TARGET_CATALOGS.slice(0, 2)
     const currentCatalogs = new Map([[targetCatalogs[0].locale, { common: { save: 'Ulozit' } }]])
     const catalogDirectory = await createCatalogFixture(targetCatalogs, currentCatalogs)
     const outputDirectory = path.join(catalogDirectory, 'output')
-    const catalogs = new Map([[targetCatalogs[0].languageId, {}]])
+    const catalogs = new Map([[targetCatalogs[0].languageId, { common: { save: 'Bad <b>value</b>' } }]])
+
+    const { rejections, losses } = await syncCrowdinTranslations({
+      token: 'secret',
+      fetchImpl: createSynchronizationFetch({ catalogs }),
+      catalogDirectory,
+      outputDirectory,
+      targetCatalogs,
+      assertTargetConfiguration: async () => {},
+      protectedTerms: [],
+    })
+
+    expect(rejections).toHaveLength(1)
+    expect(losses).toEqual([])
+    expect(JSON.parse(await readFile(path.join(outputDirectory, `${targetCatalogs[0].locale}.json`), 'utf8'))).toEqual({})
+  })
+
+  it('rewrites a Crowdin em dash instead of discarding the translation', async () => {
+    const targetCatalogs = TARGET_CATALOGS.slice(0, 2)
+    const currentCatalogs = new Map([[targetCatalogs[0].locale, { common: { save: 'Ulozit - hned' } }]])
+    const catalogDirectory = await createCatalogFixture(targetCatalogs, currentCatalogs)
+    const outputDirectory = path.join(catalogDirectory, 'output')
+    const catalogs = new Map([[targetCatalogs[0].languageId, { common: { save: 'Ulozit \u2014 hned' } }]])
+
+    const { rejections, losses, repairs } = await syncCrowdinTranslations({
+      token: 'secret',
+      fetchImpl: createSynchronizationFetch({ catalogs }),
+      catalogDirectory,
+      outputDirectory,
+      targetCatalogs,
+      assertTargetConfiguration: async () => {},
+      protectedTerms: [],
+    })
+
+    expect(rejections).toEqual([])
+    expect(losses).toEqual([])
+    expect(repairs).toEqual([{ locale: targetCatalogs[0].locale, key: 'common.save', message: 'Ulozit - hned', kinds: ['typography'] }])
+    expect(JSON.parse(await readFile(path.join(outputDirectory, `${targetCatalogs[0].locale}.json`), 'utf8'))).toEqual({
+      common: { save: 'Ulozit - hned' },
+    })
+  })
+
+  it('completes a plural category the target locale needs and Crowdin omitted', async () => {
+    const targetCatalogs = [TARGET_CATALOGS.find(({ locale }) => locale === 'ro')]
+    const referenceCatalog = { books: { count: '{count, plural, one {# book} other {# books}}' } }
+    const catalogDirectory = await createCatalogFixture(targetCatalogs, new Map(), referenceCatalog)
+    const outputDirectory = path.join(catalogDirectory, 'output')
+    const catalogs = new Map([['ro', { books: { count: '{count, plural, one {# carte} other {# de carti}}' } }]])
+
+    const { rejections, repairs } = await syncCrowdinTranslations({
+      token: 'secret',
+      fetchImpl: createSynchronizationFetch({ sourceCatalog: referenceCatalog, catalogs }),
+      catalogDirectory,
+      outputDirectory,
+      targetCatalogs,
+      assertTargetConfiguration: async () => {},
+      protectedTerms: [],
+    })
+
+    expect(rejections).toEqual([])
+    expect(repairs).toEqual([
+      { locale: 'ro', key: 'books.count', message: expect.stringContaining('few {# de carti}'), kinds: ['plural categories'] },
+    ])
+    expect(JSON.parse(await readFile(path.join(outputDirectory, 'ro.json'), 'utf8'))).toEqual({
+      books: { count: '{count, plural, one {# carte} other {# de carti} few {# de carti}}' },
+    })
+  })
+
+  it('checks translation retention before writing any files', async () => {
+    const targetCatalogs = TARGET_CATALOGS.slice(0, 2)
+    const keys = Array.from({ length: 40 }, (_, index) => `key${index}`)
+    const referenceCatalog = { common: Object.fromEntries(keys.map((key) => [key, 'Save'])) }
+    const currentCatalogs = new Map([[targetCatalogs[0].locale, { common: Object.fromEntries(keys.map((key) => [key, 'Ulozit'])) }]])
+    const catalogDirectory = await createCatalogFixture(targetCatalogs, currentCatalogs, referenceCatalog)
+    const outputDirectory = path.join(catalogDirectory, 'output')
+    const catalogs = new Map(targetCatalogs.map(({ languageId }) => [languageId, {}]))
+
+    await expect(
+      syncCrowdinTranslations({
+        token: 'secret',
+        fetchImpl: createSynchronizationFetch({ sourceCatalog: referenceCatalog, catalogs }),
+        catalogDirectory,
+        outputDirectory,
+        targetCatalogs,
+        assertTargetConfiguration: async () => {},
+        protectedTerms: [],
+      }),
+    ).rejects.toThrow('40 translations dropped, more than the 25 allowed')
+    await expect(access(outputDirectory)).rejects.toThrow()
+  })
+
+  it('writes a Crowdin correction that replaces a translation with the English source text', async () => {
+    const targetCatalogs = TARGET_CATALOGS.slice(0, 2)
+    const currentCatalogs = new Map([[targetCatalogs[0].locale, { common: { save: 'Ulozit' } }]])
+    const catalogDirectory = await createCatalogFixture(targetCatalogs, currentCatalogs)
+    const outputDirectory = path.join(catalogDirectory, 'output')
+    const catalogs = new Map([[targetCatalogs[0].languageId, { common: { save: 'Save' } }]])
 
     await expect(
       syncCrowdinTranslations({
@@ -318,8 +554,143 @@ describe('Crowdin translation synchronization', () => {
         outputDirectory,
         targetCatalogs,
         assertTargetConfiguration: async () => {},
+        protectedTerms: [],
       }),
-    ).rejects.toThrow('missing from Crowdin export')
-    await expect(access(outputDirectory)).rejects.toThrow()
+    ).resolves.toEqual({ rejections: [], corrections: [], repairs: [], losses: [] })
+    expect(JSON.parse(await readFile(path.join(outputDirectory, `${targetCatalogs[0].locale}.json`), 'utf8'))).toEqual({
+      common: { save: 'Save' },
+    })
+  })
+
+  it('drops a slot count violation so the catalog it writes passes locale validation', async () => {
+    const key = 'tools.bulkRename.confirmDialog.body'
+    const referenceCatalog = { tools: { bulkRename: { confirmDialog: { body: '{count, plural, one {Rename # file} other {Rename # files}}' } } } }
+    const targetCatalogs = TARGET_CATALOGS.slice(0, 2)
+    const catalogDirectory = await createCatalogFixture(targetCatalogs, new Map(), referenceCatalog)
+    const outputDirectory = path.join(catalogDirectory, 'output')
+    const catalogs = new Map([
+      [
+        targetCatalogs[0].languageId,
+        { tools: { bulkRename: { confirmDialog: { body: '{count, plural, one {Rename # file} few {Rename # files} other {Rename files}}' } } } },
+      ],
+      [targetCatalogs[1].languageId, {}],
+    ])
+
+    const { rejections } = await syncCrowdinTranslations({
+      token: 'secret',
+      fetchImpl: createSynchronizationFetch({ sourceCatalog: referenceCatalog, catalogs }),
+      catalogDirectory,
+      outputDirectory,
+      targetCatalogs,
+      assertTargetConfiguration: async () => {},
+      protectedTerms: [],
+      collectMessageKeys: async () => ({ keys: new Set([key]), slotCountKeys: new Set([key]) }),
+    })
+
+    expect(rejections).toEqual([
+      {
+        locale: targetCatalogs[0].locale,
+        key,
+        errors: [`${targetCatalogs[0].locale}: slot count message ${key} must render exactly one # in every branch`],
+      },
+    ])
+    expect(JSON.parse(await readFile(path.join(outputDirectory, `${targetCatalogs[0].locale}.json`), 'utf8'))).toEqual({})
+
+    const written = new Map([['en', flattenCatalog(referenceCatalog)]])
+    for (const { locale } of targetCatalogs) {
+      written.set(locale, flattenCatalog(JSON.parse(await readFile(path.join(outputDirectory, `${locale}.json`), 'utf8'))))
+    }
+    expect(validateCatalogs({ catalogs: written, slotCountKeys: new Set([key]) })).toEqual([])
+  })
+
+  it('reports a protected term only for the locales that were reviewed', () => {
+    const catalogs = new Map([
+      [
+        'en',
+        new Map([
+          ['settings.oidc.form.slug', 'Slug'],
+          ['annotations.hub.exportMarkdown', 'Markdown'],
+        ]),
+      ],
+      ['es', new Map([['settings.oidc.form.slug', 'Nombre corto de URL']])],
+      ['da', new Map([['settings.oidc.form.slug', 'Snegl']])],
+    ])
+
+    expect(findProtectedTermDrift({ catalogs })).toEqual([
+      { locale: 'es', key: 'settings.oidc.form.slug', message: 'Nombre corto de URL', source: 'Slug' },
+    ])
+  })
+
+  it('ignores a protected term a sparse catalog does not carry', () => {
+    const catalogs = new Map([
+      [
+        'en',
+        new Map([
+          ['settings.oidc.form.slug', 'Slug'],
+          ['annotations.hub.exportMarkdown', 'Markdown'],
+        ]),
+      ],
+      ['es', new Map()],
+    ])
+
+    expect(findProtectedTermDrift({ catalogs })).toEqual([])
+  })
+
+  it('fails loudly when a protected term leaves the English catalog', () => {
+    expect(() =>
+      findProtectedTermDrift({
+        catalogs: new Map([['en', new Map()]]),
+        terms: [{ key: 'settings.oidc.form.slug', locales: ['es'] }],
+      }),
+    ).toThrow('Protected term settings.oidc.form.slug is missing from the English catalog')
+  })
+
+  it('keeps every protected term present in the shipped English catalog', async () => {
+    const reference = flattenCatalog(JSON.parse(await readFile(path.join(process.cwd(), 'src/locales/en.json'), 'utf8')))
+
+    expect(findProtectedTermDrift({ catalogs: new Map([['en', reference]]) })).toEqual([])
+  })
+
+  it('restores a protected term Crowdin translated instead of failing the run', async () => {
+    const key = 'settings.oidc.form.slug'
+    const translated = { settings: { oidc: { form: { slug: 'Slug' } } } }
+    const referenceCatalog = { ...translated, annotations: { hub: { exportMarkdown: 'Markdown' } } }
+    const targetCatalogs = TARGET_CATALOGS.filter(({ locale }) => locale === 'es')
+    const currentCatalogs = new Map([['es', translated]])
+    const catalogDirectory = await createCatalogFixture(targetCatalogs, currentCatalogs, referenceCatalog)
+    const outputDirectory = path.join(catalogDirectory, 'output')
+    const reportPath = path.join(catalogDirectory, 'rejections.md')
+    const catalogs = new Map([[targetCatalogs[0].languageId, { settings: { oidc: { form: { slug: 'Nombre corto de URL' } } } }]])
+
+    const { rejections, corrections } = await syncCrowdinTranslations({
+      token: 'secret',
+      fetchImpl: createSynchronizationFetch({ sourceCatalog: referenceCatalog, catalogs }),
+      catalogDirectory,
+      outputDirectory,
+      targetCatalogs,
+      reportPath,
+      assertTargetConfiguration: async () => {},
+      collectMessageKeys: async () => ({ keys: new Set([key]), slotCountKeys: new Set() }),
+    })
+
+    expect(rejections).toEqual([])
+    expect(corrections).toEqual([{ locale: 'es', key, message: 'Nombre corto de URL', source: 'Slug' }])
+    expect(JSON.parse(await readFile(path.join(outputDirectory, 'es.json'), 'utf8'))).toEqual(translated)
+    expect(await readFile(reportPath, 'utf8')).toContain(`es: ${key} was "Nombre corto de URL"`)
+  })
+
+  it('scans the same sources locale validation scans', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'bookorbit-locale-source-'))
+    temporaryDirectories.push(directory)
+    await mkdir(path.join(directory, '__tests__'), { recursive: true })
+    await writeFile(path.join(directory, 'Widget.vue'), '<template><IcuCountText keypath="tools.bulkRename.confirmDialog.body" /></template>')
+    await writeFile(path.join(directory, 'helper.ts'), "export const label = t('common.save')\n")
+    await writeFile(path.join(directory, 'helper.spec.ts'), "t('ignored.spec')\n")
+    await writeFile(path.join(directory, '__tests__', 'helper.ts'), "t('ignored.tests')\n")
+
+    await expect(collectSourceMessageKeys(directory)).resolves.toEqual({
+      keys: new Set(['tools.bulkRename.confirmDialog.body', 'common.save']),
+      slotCountKeys: new Set(['tools.bulkRename.confirmDialog.body']),
+    })
   })
 })

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { nextTick, ref, type Ref } from 'vue'
-import { WIDGET_TYPES, type WidgetConfig } from '@bookorbit/types'
+import { WIDGET_TYPES, type Library, type WidgetConfig } from '@bookorbit/types'
 
 import { setI18nLocale } from '@/i18n'
 import en from '@/locales/en.json'
@@ -13,6 +13,12 @@ import pt from '@/locales/pt.json'
 // behind a new dashboard key.
 const PT_WIDGET_NAMES = { ...en.dashboard.settings.widgetNames, ...pt.dashboard.settings.widgetNames }
 const PT_SHELF_NAMES = { ...en.dashboard.settings.shelfNames, ...pt.dashboard.settings.shelfNames }
+const ENABLED_EN_SHELF_NAMES = Object.entries(en.dashboard.settings.shelfNames)
+  .filter(([key]) => key !== 'continuePodcasts')
+  .map(([, label]) => label)
+const ENABLED_PT_SHELF_NAMES = Object.entries(PT_SHELF_NAMES)
+  .filter(([key]) => key !== 'continuePodcasts')
+  .map(([, label]) => label)
 
 type UseSmartScopesMock = () => {
   smartScopes: Ref<unknown[]>
@@ -21,11 +27,17 @@ type UseSmartScopesMock = () => {
 
 type UseDashboardWidgetsMock = () => {
   widgets: Ref<WidgetConfig[]>
-  saveWidgets: (widgets: WidgetConfig[]) => Promise<void>
+  libraryIds: Ref<number[] | null>
+  saveWidgets: (widgets: WidgetConfig[], libraryIds?: readonly number[] | null) => Promise<void>
+  saveLibraryScope: (libraryIds: readonly number[] | null) => Promise<void>
   DEFAULT_WIDGETS: WidgetConfig[]
 }
 
 const widgetsRef = ref<WidgetConfig[]>([])
+const libraryIdsRef = ref<number[] | null>(null)
+const librariesRef = ref<Library[]>([])
+const saveWidgetsMock = vi.fn<(widgets: WidgetConfig[], libraryIds?: readonly number[] | null) => Promise<void>>()
+const saveLibraryScopeMock = vi.fn<(libraryIds: readonly number[] | null) => Promise<void>>()
 
 vi.mock('@/components/ui/sheet', () => {
   const passthrough = { template: '<div><slot /></div>' }
@@ -44,10 +56,19 @@ vi.mock('@/features/smart-scope/composables/useSmartScopes', () => ({
   })),
 }))
 
+vi.mock('@/features/library/composables/useLibraries', () => ({
+  useLibraries: () => ({
+    libraries: librariesRef,
+    fetchLibraries: vi.fn<() => Promise<void>>(),
+  }),
+}))
+
 vi.mock('../composables/useDashboardWidgets', () => ({
   useDashboardWidgets: vi.fn<UseDashboardWidgetsMock>(() => ({
     widgets: widgetsRef,
-    saveWidgets: vi.fn<(widgets: WidgetConfig[]) => Promise<void>>(),
+    libraryIds: libraryIdsRef,
+    saveWidgets: saveWidgetsMock,
+    saveLibraryScope: saveLibraryScopeMock,
     DEFAULT_WIDGETS: [],
   })),
 }))
@@ -103,6 +124,10 @@ beforeEach(async () => {
   // would otherwise seed the next test's draft.
   useDashboardConfig().reset()
   widgetsRef.value = []
+  libraryIdsRef.value = null
+  librariesRef.value = [{ id: 1, name: 'Books' } as Library, { id: 2, name: 'Comics' } as Library]
+  saveWidgetsMock.mockResolvedValue()
+  saveLibraryScopeMock.mockResolvedValue()
   await setI18nLocale('en')
 })
 
@@ -111,6 +136,65 @@ afterEach(async () => {
 })
 
 describe('DashboardSettingsSheet', () => {
+  it('defaults to all accessible libraries', async () => {
+    const wrapper = await openSheet()
+
+    const labels = wrapper.findAll('label').map((label) => label.text())
+    expect(labels).toContain(en.dashboard.settings.libraryScope.allLibraries)
+  })
+
+  it('collapses the library scope and summarises the selection', async () => {
+    libraryIdsRef.value = [2]
+
+    const wrapper = await openSheet()
+    const disclosure = wrapper.find('[aria-controls="dashboard-library-scope"]')
+
+    expect(disclosure.attributes('aria-expanded')).toBe('false')
+    expect(disclosure.text()).toContain('Comics')
+
+    await disclosure.trigger('click')
+
+    expect(disclosure.attributes('aria-expanded')).toBe('true')
+  })
+
+  it('persists an explicit library subset with shelf settings', async () => {
+    const wrapper = await openSheet()
+    const allLibraries = wrapper.findAll('label').find((label) => label.text().includes(en.dashboard.settings.libraryScope.allLibraries))
+    await allLibraries?.find('input').setValue(false)
+    const comics = wrapper.findAll('label').find((label) => label.text() === 'Comics')
+    await comics?.find('input').setValue(false)
+
+    const saveButton = wrapper.findAll('button').find((button) => button.text() === en.common.save)
+    await saveButton?.trigger('click')
+
+    expect(saveLibraryScopeMock).toHaveBeenCalledWith([1])
+    expect(wrapper.emitted('saved')).toHaveLength(1)
+  })
+
+  it('requires at least one library when an explicit subset is used', async () => {
+    const wrapper = await openSheet()
+    const allLibraries = wrapper.findAll('label').find((label) => label.text().includes(en.dashboard.settings.libraryScope.allLibraries))
+    await allLibraries?.find('input').setValue(false)
+    for (const name of ['Books', 'Comics']) {
+      const label = wrapper.findAll('label').find((candidate) => candidate.text() === name)
+      await label?.find('input').setValue(false)
+    }
+
+    const saveButton = wrapper.findAll('button').find((button) => button.text() === en.common.save)
+    expect(saveButton?.attributes('disabled')).toBeDefined()
+    expect(wrapper.text()).toContain(en.dashboard.settings.libraryScope.required)
+  })
+
+  it('does not count inaccessible saved library ids as a valid selection', async () => {
+    libraryIdsRef.value = [99]
+
+    const wrapper = await openSheet()
+    const saveButton = wrapper.findAll('button').find((button) => button.text() === en.common.save)
+
+    expect(saveButton?.attributes('disabled')).toBeDefined()
+    expect(wrapper.text()).toContain(en.dashboard.settings.libraryScope.required)
+  })
+
   it('includes continue-listening and want-to-read in the shelf selector', async () => {
     const wrapper = await openSheet()
     await openShelvesTab(wrapper)
@@ -125,7 +209,7 @@ describe('DashboardSettingsSheet', () => {
     const wrapper = await openSheet()
     await openShelvesTab(wrapper)
 
-    expect(shelfOptionLabels(wrapper).sort()).toEqual(Object.values(en.dashboard.settings.shelfNames).sort())
+    expect(shelfOptionLabels(wrapper).sort()).toEqual(ENABLED_EN_SHELF_NAMES.sort())
   })
 
   it('offers wide-row and two-column shelf layouts', async () => {
@@ -151,7 +235,7 @@ describe('DashboardSettingsSheet', () => {
     await setI18nLocale('pt')
     await nextTick()
 
-    expect(shelfOptionLabels(wrapper).sort()).toEqual(Object.values(PT_SHELF_NAMES).sort())
+    expect(shelfOptionLabels(wrapper).sort()).toEqual(ENABLED_PT_SHELF_NAMES.sort())
   })
 
   it('opens on the shelves tab and lists it before widgets', async () => {

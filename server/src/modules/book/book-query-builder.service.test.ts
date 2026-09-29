@@ -3,6 +3,8 @@ vi.mock('drizzle-orm', () => {
     vi.fn((strings: TemplateStringsArray, ...values: unknown[]) => ({ type: 'sql', text: strings.join(''), values })),
     {
       raw: vi.fn((value: string) => ({ type: 'raw', value })),
+      join: vi.fn((chunks: unknown[]) => ({ type: 'join', chunks })),
+      identifier: vi.fn((value: string) => ({ type: 'identifier', value })),
     },
   );
 
@@ -22,11 +24,13 @@ vi.mock('drizzle-orm', () => {
     isNull: vi.fn((value: unknown) => ({ type: 'isNull', value })),
     isNotNull: vi.fn((value: unknown) => ({ type: 'isNotNull', value })),
     not: vi.fn((value: unknown) => ({ type: 'not', value })),
+    getTableName: vi.fn(() => 'table'),
     sql: sqlTag,
   };
 });
 
-vi.mock('../../common/utils/accent-insensitive-search.utils', () => ({
+vi.mock('../../common/utils/accent-insensitive-search.utils', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../common/utils/accent-insensitive-search.utils')>()),
   accentInsensitiveIlike: vi.fn((left: unknown, pattern: string) => ({ type: 'accentInsensitiveIlike', left, pattern })),
 }));
 
@@ -44,7 +48,7 @@ import {
 } from '@bookorbit/types';
 
 import { accentInsensitiveIlike } from '../../common/utils/accent-insensitive-search.utils';
-import { bookCustomMetadataValues, books } from '../../db/schema';
+import { bookCustomMetadataValues, bookMetadata, books } from '../../db/schema';
 import { BookQueryBuilder } from './book-query-builder.service';
 import { BookSortBuilder } from './book-sort-builder.service';
 
@@ -135,7 +139,16 @@ const USER_CTX = { accessibleLibraryIds: [1] as number[], userId: 10 };
  * new operator is added to RuleOperator but not handled here.
  */
 function buildValueFor(operator: RuleOperator, field: RuleField): { value?: unknown; valueTo?: unknown } {
-  const numericFields: RuleField[] = ['publishedYear', 'seriesIndex', 'pageCount', 'rating', 'communityRating', 'metadataScore'];
+  const numericFields: RuleField[] = [
+    'publishedYear',
+    'seriesIndex',
+    'pageCount',
+    'fileSize',
+    'rating',
+    'communityRating',
+    'communityRatingCount',
+    'metadataScore',
+  ];
   const dateFields: RuleField[] = ['publishedDate', 'addedAt', 'startedAt', 'finishedAt'];
   const isNumericField = numericFields.includes(field);
 
@@ -160,14 +173,15 @@ function buildValueFor(operator: RuleOperator, field: RuleField): { value?: unkn
       return { value: 'test' };
     case 'eq':
     case 'notEq':
-      return { value: isNumericField ? 10 : 'test' };
+      return { value: field === 'seriesIndex' ? '5.10' : isNumericField ? 10 : 'test' };
     case 'gt':
     case 'gte':
     case 'lt':
     case 'lte':
-      return { value: 10 };
+      return { value: field === 'seriesIndex' ? '5.10' : 10 };
     case 'between':
-      return dateFields.includes(field) ? { value: '2023-01-01', valueTo: '2023-12-31' } : { value: 10, valueTo: 20 };
+      if (dateFields.includes(field)) return { value: '2023-01-01', valueTo: '2023-12-31' };
+      return field === 'seriesIndex' ? { value: '5.2', valueTo: '5.10' } : { value: 10, valueTo: 20 };
     case 'before':
     case 'after':
       return { value: '2023-01-01' };
@@ -387,10 +401,11 @@ describe('BookQueryBuilder', () => {
 
     const result = builder.buildOrderBy([{ field: 'seriesIndex', dir: 'desc' }]);
 
-    expect(result).toHaveLength(3);
-    expect(raw).toHaveBeenCalledTimes(2);
+    expect(result).toHaveLength(4);
+    expect(raw).toHaveBeenCalledTimes(3);
     expect(raw).toHaveBeenNthCalledWith(1, 'DESC');
     expect(raw).toHaveBeenNthCalledWith(2, 'DESC');
+    expect(raw).toHaveBeenNthCalledWith(3, 'DESC');
   });
 
   it('falls back to default order when runtime direction is invalid', () => {
@@ -551,6 +566,89 @@ describe('communityRating filter field', () => {
   });
 });
 
+describe('communityRatingCount filter field', () => {
+  it('matches any provider count with the requested numeric predicate', () => {
+    const { builder } = makeBuilder();
+
+    const where = builder.buildWhere(
+      wrapRule({ type: 'rule', field: 'communityRatingCount', operator: 'gte', value: 1000, provider: 'any' }) as never,
+      USER_CTX,
+    ) as any;
+
+    const ruleSql = getRuleSql(where) as any;
+    expect(ruleSql).toMatchObject({ type: 'sql' });
+    expect(ruleSql.values[0].whereClause.clauses).toHaveLength(2);
+    expect(ruleSql.values[0].whereClause.clauses[1]).toMatchObject({ type: 'gte', right: 1000 });
+    expect(collectColumnNames(ruleSql)).toContain('rating_count');
+  });
+
+  it('matches a specific provider count in the same exists subquery', () => {
+    const { builder } = makeBuilder();
+
+    const where = builder.buildWhere(
+      wrapRule({ type: 'rule', field: 'communityRatingCount', operator: 'lt', value: 25, provider: 'hardcover' }) as never,
+      USER_CTX,
+    ) as any;
+
+    const predicates = (getRuleSql(where) as any).values[0].whereClause.clauses;
+    expect(predicates).toHaveLength(3);
+    expect(predicates[1]).toMatchObject({ type: 'eq', right: 'hardcover' });
+    expect(predicates[2]).toMatchObject({ type: 'lt', right: 25 });
+    expect(collectColumnNames(predicates[2])).toContain('rating_count');
+  });
+
+  it('treats a missing row or null count as empty', () => {
+    const { builder } = makeBuilder();
+
+    const where = builder.buildWhere(
+      wrapRule({ type: 'rule', field: 'communityRatingCount', operator: 'isEmpty', provider: 'goodreads' }) as never,
+      USER_CTX,
+    ) as any;
+
+    const ruleSql = getRuleSql(where) as any;
+    expect(ruleSql).toMatchObject({ type: 'not' });
+    expect(ruleSql.value.values[0].whereClause.clauses[1]).toMatchObject({ type: 'eq', right: 'goodreads' });
+    expect(ruleSql.value.values[0].whereClause.clauses[2]).toMatchObject({ type: 'isNotNull' });
+    expect(collectColumnNames(ruleSql.value.values[0].whereClause.clauses[2])).toContain('rating_count');
+  });
+
+  it('requires a non-null count for isNotEmpty', () => {
+    const { builder } = makeBuilder();
+
+    const where = builder.buildWhere(
+      wrapRule({ type: 'rule', field: 'communityRatingCount', operator: 'isNotEmpty', provider: 'goodreads' }) as never,
+      USER_CTX,
+    ) as any;
+
+    const predicates = (getRuleSql(where) as any).values[0].whereClause.clauses;
+    expect(predicates[1]).toMatchObject({ type: 'eq', right: 'goodreads' });
+    expect(predicates[2]).toMatchObject({ type: 'isNotNull' });
+    expect(collectColumnNames(predicates[2])).toContain('rating_count');
+  });
+
+  it('keeps rating and count predicates provider-specific in an AND group', () => {
+    const { builder } = makeBuilder();
+
+    const where = builder.buildWhere(
+      {
+        type: 'group',
+        join: 'AND',
+        rules: [
+          { type: 'rule', field: 'communityRating', operator: 'gte', value: 4.5, provider: 'amazon' },
+          { type: 'rule', field: 'communityRatingCount', operator: 'gte', value: 1000, provider: 'amazon' },
+        ],
+      } as never,
+      USER_CTX,
+    ) as any;
+
+    const [ratingRule, countRule] = where.clauses[1].clauses;
+    expect(ratingRule.values[0].whereClause.clauses[1]).toMatchObject({ type: 'eq', right: 'amazon' });
+    expect(countRule.values[0].whereClause.clauses[1]).toMatchObject({ type: 'eq', right: 'amazon' });
+    expect(collectColumnNames(ratingRule)).toContain('rating');
+    expect(collectColumnNames(countRule)).toContain('rating_count');
+  });
+});
+
 describe('readStatus filter field', () => {
   it('includesAny generates exists with inArray', () => {
     const { builder, db } = makeBuilder();
@@ -680,22 +778,35 @@ describe('buildQuickSearch', () => {
 
     builder.buildQuickSearch('gracian');
 
-    expect(accentInsensitiveIlike).toHaveBeenCalledTimes(5);
+    expect(accentInsensitiveIlike).toHaveBeenCalledTimes(6);
     expect(accentInsensitiveIlike).toHaveBeenCalledWith(expect.anything(), '%gracian%');
   });
 
-  it('produces an OR of accent-insensitive title/series matches and author/series/narrator exists subqueries', () => {
+  it('matches subtitle alongside title, series, author, and narrator', () => {
     const { builder } = makeBuilder();
 
     const result = builder.buildQuickSearch('tolkien') as any;
 
     expect(result).toMatchObject({ type: 'or' });
-    expect(result.clauses).toHaveLength(5);
-    expect(result.clauses[0]).toMatchObject({ type: 'accentInsensitiveIlike', pattern: '%tolkien%' });
-    expect(result.clauses[1]).toMatchObject({ type: 'sql' });
-    expect(result.clauses[2]).toMatchObject({ type: 'accentInsensitiveIlike', pattern: '%tolkien%' });
-    expect(result.clauses[3]).toMatchObject({ type: 'sql' });
+    expect(result.clauses).toHaveLength(6);
+    expect(result.clauses[0]).toMatchObject({ type: 'accentInsensitiveIlike', left: bookMetadata.title, pattern: '%tolkien%' });
+    expect(result.clauses[1]).toMatchObject({ type: 'accentInsensitiveIlike', left: bookMetadata.subtitle, pattern: '%tolkien%' });
+    expect(result.clauses[2]).toMatchObject({ type: 'sql' });
+    expect(result.clauses[3]).toMatchObject({ type: 'accentInsensitiveIlike', left: bookMetadata.seriesName, pattern: '%tolkien%' });
     expect(result.clauses[4]).toMatchObject({ type: 'sql' });
+    expect(result.clauses[5]).toMatchObject({ type: 'sql' });
+  });
+
+  it('uses phrase containment without trigram expansion for multi-word searches', () => {
+    const { builder } = makeBuilder();
+    vi.mocked(accentInsensitiveIlike).mockClear();
+
+    const result = builder.buildQuickSearch('The Wax Child');
+
+    expect(accentInsensitiveIlike).toHaveBeenCalledTimes(6);
+    expect(accentInsensitiveIlike).toHaveBeenCalledWith(expect.anything(), '%The Wax Child%');
+    expect(accentInsensitiveIlike).toHaveBeenCalledWith(bookMetadata.subtitle, '%The Wax Child%');
+    expect(collectSqlText(result).join(' ')).not.toContain(' % ');
   });
 
   it('escapes LIKE special characters in q', () => {
@@ -704,7 +815,8 @@ describe('buildQuickSearch', () => {
     const result = builder.buildQuickSearch('50% off') as any;
 
     expect(result.clauses[0]).toMatchObject({ type: 'accentInsensitiveIlike', pattern: '%50\\% off%' });
-    expect(result.clauses[2]).toMatchObject({ type: 'accentInsensitiveIlike', pattern: '%50\\% off%' });
+    expect(result.clauses[1]).toMatchObject({ type: 'accentInsensitiveIlike', left: bookMetadata.subtitle, pattern: '%50\\% off%' });
+    expect(result.clauses[3]).toMatchObject({ type: 'accentInsensitiveIlike', pattern: '%50\\% off%' });
   });
 
   it('escapes underscore in q', () => {
@@ -713,6 +825,17 @@ describe('buildQuickSearch', () => {
     const result = builder.buildQuickSearch('book_one') as any;
 
     expect(result.clauses[0]).toMatchObject({ type: 'accentInsensitiveIlike', pattern: '%book\\_one%' });
+    expect(result.clauses[1]).toMatchObject({ type: 'accentInsensitiveIlike', left: bookMetadata.subtitle, pattern: '%book\\_one%' });
+  });
+
+  it('uses the same containment predicate for two-character queries', () => {
+    const { builder } = makeBuilder();
+
+    const result = builder.buildQuickSearch('du') as any;
+
+    expect(result.clauses[0]).toMatchObject({ type: 'accentInsensitiveIlike', pattern: '%du%' });
+    expect(result.clauses[1]).toMatchObject({ type: 'accentInsensitiveIlike', left: bookMetadata.subtitle, pattern: '%du%' });
+    expect(result.clauses[3]).toMatchObject({ type: 'accentInsensitiveIlike', pattern: '%du%' });
   });
 
   it('calls db.select three times for author, series membership, and narrator exists subqueries', () => {
@@ -875,6 +998,16 @@ describe('numericRuleToSql (via pageCount and publishedYear)', () => {
     const { builder } = makeBuilder();
     const where = builder.buildWhere(wrapRule({ type: 'rule', field: 'publishedYear', operator: 'notEq', value: 2001 }) as never, BASE_CTX) as any;
     expect(getRuleSql(where)).toMatchObject({ type: 'ne' });
+  });
+
+  it('filters file size through the selected primary file', () => {
+    const { builder } = makeBuilder();
+    const where = builder.buildWhere(wrapRule({ type: 'rule', field: 'fileSize', operator: 'gte', value: 10_485_760 }) as never, BASE_CTX) as any;
+    const clause = getRuleSql(where) as any;
+
+    expect(clause).toMatchObject({ type: 'gte', right: 10_485_760 });
+    expect(clause.left).toMatchObject({ type: 'sql' });
+    expect(collectColumnNames(clause.left)).toEqual(expect.arrayContaining(['size_bytes', 'id', 'primary_file_id']));
   });
 });
 
@@ -1596,6 +1729,38 @@ describe('coverRuleToSql', () => {
   });
 });
 
+describe('audioCoverRuleToSql', () => {
+  it('isMissing keeps books with audio cover media and no active audio slot', () => {
+    const { builder } = makeBuilder();
+    const where = builder.buildWhere(wrapRule({ type: 'rule', field: 'audioCover', operator: 'isMissing' }) as never, BASE_CTX) as any;
+    const clause = getRuleSql(where);
+    expect(clause.type).toBe('and');
+    const [hasAudio, missingSlot] = clause.clauses;
+    expect(hasAudio.text).toContain("= 'epub'");
+    expect(missingSlot.type).toBe('not');
+    expect(missingSlot.value.values).toContain('audio');
+    expect(missingSlot.value.text).toContain('is null');
+  });
+
+  it('isPresent keeps books with audio cover media and an active audio slot', () => {
+    const { builder } = makeBuilder();
+    const where = builder.buildWhere(wrapRule({ type: 'rule', field: 'audioCover', operator: 'isPresent' }) as never, BASE_CTX) as any;
+    const clause = getRuleSql(where);
+    expect(clause.type).toBe('and');
+    const [hasAudio, activeSlot] = clause.clauses;
+    expect(hasAudio.type).toBe('sql');
+    expect(activeSlot.type).toBe('sql');
+    expect(activeSlot.values).toContain('audio');
+  });
+
+  it('rejects operators the field does not offer', () => {
+    const { builder } = makeBuilder();
+    expect(() => builder.buildWhere(wrapRule({ type: 'rule', field: 'audioCover', operator: 'isEmpty' }) as never, BASE_CTX)).toThrow(
+      BadRequestException,
+    );
+  });
+});
+
 describe('lockStatusRuleToSql', () => {
   it('isLocked produces cardinality(lockedFields) > 0', () => {
     const { builder } = makeBuilder();
@@ -1743,7 +1908,9 @@ describe('BookQueryBuilder.buildCollapseOrderBy', () => {
 
   it('generates seriesIndex with sort_title fallback when series is not in sort', () => {
     const result = BookQueryBuilder.buildCollapseOrderBy([{ field: 'seriesIndex', dir: 'asc' }], 1);
-    expect(result).toBe('series_index ASC NULLS LAST, sort_title ASC NULLS LAST, r.id ASC');
+    expect(result).toContain("split_part(series_index::text, '.', 1)::numeric");
+    expect(result).toContain('series_index COLLATE "C" ASC NULLS LAST');
+    expect(result).toContain('sort_title ASC NULLS LAST, r.id ASC');
   });
 
   it('does not add sort_title fallback when series field is already in sort', () => {
@@ -1754,7 +1921,8 @@ describe('BookQueryBuilder.buildCollapseOrderBy', () => {
       ],
       1,
     );
-    expect(result).toBe('series_index ASC NULLS LAST, sort_title ASC NULLS LAST, r.id ASC');
+    expect(result).toContain("split_part(series_index::text, '.', 1)::numeric");
+    expect(result).toContain('series_index COLLATE "C" ASC NULLS LAST, sort_title ASC NULLS LAST, r.id ASC');
   });
 
   it('generates user-scoped subquery for readProgress', () => {
@@ -1769,6 +1937,9 @@ describe('BookQueryBuilder.buildCollapseOrderBy', () => {
     expect(result).toContain('rp.user_id = 7');
     expect(result).toContain('bf.book_id = r.id');
     expect(result).toContain('ASC NULLS LAST');
+    // Must aggregate last_read_at; rp.updated_at is frozen by the KOReader sync path.
+    expect(result).toContain('SELECT max(rp.last_read_at)');
+    expect(result).not.toContain('max(rp.updated_at)');
   });
 
   it('generates user-scoped subquery for finishedAt', () => {
@@ -1835,6 +2006,12 @@ describe('BookQueryBuilder.buildCollapseOrderBy', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('uses the supplied shuffle seed for the collapsed random sort', () => {
+    const result = BookQueryBuilder.buildCollapseOrderBy([{ field: 'random', dir: 'asc' }], 7, undefined, { randomSeed: 4242 });
+
+    expect(result).toContain(`md5(r.id::text || ':' || 4242::text) ASC`);
   });
 
   it('joins multiple sort parts with comma', () => {

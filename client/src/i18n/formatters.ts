@@ -6,6 +6,7 @@ const numberFormatters = new Map<string, Intl.NumberFormat>()
 const dateTimeFormatters = new Map<string, Intl.DateTimeFormat>()
 const relativeTimeFormatters = new Map<string, Intl.RelativeTimeFormat>()
 const languageNameFormatters = new Map<Locale, Intl.DisplayNames>()
+const listFormatters = new Map<string, Intl.ListFormat>()
 
 function activeLocale(): Locale {
   return (i18n.global.locale as Ref<Locale>).value
@@ -27,12 +28,37 @@ export function formatNumber(value: number, options: Intl.NumberFormatOptions = 
 }
 
 /**
+ * Percentages of a whole. Takes the fraction (0.128), not the percentage (12.8), so the locale
+ * decides where the sign goes and whether it gets a space.
+ */
+export function formatPercent(fraction: number, fractionDigits = 0): string {
+  return formatNumber(fraction, {
+    style: 'percent',
+    minimumFractionDigits: fractionDigits,
+    maximumFractionDigits: fractionDigits,
+  })
+}
+
+/**
  * Short form for counts in tight spots such as sidebar badges: 1000 becomes 1K, 1234 becomes 1.2K.
  * Locales without a short thousands form (German) keep the grouped number, which is the correct
  * rendering for them.
  */
 export function formatCompactNumber(value: number): string {
   return formatNumber(value, { notation: 'compact' })
+}
+
+/** Joins values into a locale-aware list: "Audiobooks, Comics, Novels" in English. */
+export function formatList(values: string[]): string {
+  const locale = activeLocale()
+  const options: Intl.ListFormatOptions = { style: 'short', type: 'unit' }
+  const key = formatterKey(locale, options)
+  let formatter = listFormatters.get(key)
+  if (!formatter) {
+    formatter = new Intl.ListFormat(locale, options)
+    listFormatters.set(key, formatter)
+  }
+  return formatter.format(values)
 }
 
 export function formatDate(value: Date | number, options: Intl.DateTimeFormatOptions = {}): string {
@@ -72,6 +98,28 @@ export function formatRelativeTime(
   return formatter.format(value, unit)
 }
 
+const MINUTE_MS = 60_000
+const HOUR_MS = 3_600_000
+const DAY_MS = 86_400_000
+const MONTH_MS = 2_592_000_000
+const YEAR_MS = 31_536_000_000
+
+/**
+ * Picks the unit a timestamp reads best in relative to now. Pass `now` to drive it from a
+ * reactive clock, and `smallestUnit: 'minute'` where second-by-second precision is noise.
+ */
+export function formatRelativeTimeFromNow(value: Date | number | string, options: { now?: number; smallestUnit?: 'second' | 'minute' } = {}): string {
+  const target = value instanceof Date ? value.getTime() : typeof value === 'number' ? value : new Date(value).getTime()
+  const difference = target - (options.now ?? Date.now())
+  const absolute = Math.abs(difference)
+  if (absolute < MINUTE_MS && options.smallestUnit !== 'minute') return formatRelativeTime(Math.round(difference / 1000), 'second')
+  if (absolute < HOUR_MS) return formatRelativeTime(Math.round(difference / MINUTE_MS), 'minute')
+  if (absolute < DAY_MS) return formatRelativeTime(Math.round(difference / HOUR_MS), 'hour')
+  if (absolute < MONTH_MS) return formatRelativeTime(Math.round(difference / DAY_MS), 'day')
+  if (absolute < YEAR_MS) return formatRelativeTime(Math.round(difference / MONTH_MS), 'month')
+  return formatRelativeTime(Math.round(difference / YEAR_MS), 'year')
+}
+
 export function formatLanguageName(value: string): string {
   const locale = activeLocale()
   let formatter = languageNameFormatters.get(locale)
@@ -84,4 +132,29 @@ export function formatLanguageName(value: string): string {
   } catch {
     return value
   }
+}
+
+/** Largest unit whose threshold the elapsed time clears, so "2 minutes ago" beats "120 seconds ago". */
+const RELATIVE_UNITS: Array<{ unit: Intl.RelativeTimeFormatUnit; ms: number }> = [
+  { unit: 'year', ms: 31_536_000_000 },
+  { unit: 'month', ms: 2_592_000_000 },
+  { unit: 'week', ms: 604_800_000 },
+  { unit: 'day', ms: 86_400_000 },
+  { unit: 'hour', ms: 3_600_000 },
+  { unit: 'minute', ms: 60_000 },
+]
+
+/**
+ * "4 minutes ago" rather than a timestamp, for values whose recency is the point: when an indexer
+ * was last reached, when a request was asked for. Anything under a minute reads as "now", because
+ * a connection tested 12 seconds ago and one tested 41 seconds ago are the same fact.
+ */
+export function formatRelativeFromNow(value: Date | number, now: Date | number = Date.now()): string {
+  const elapsed = new Date(value).getTime() - new Date(now).getTime()
+  const magnitude = Math.abs(elapsed)
+
+  for (const { unit, ms } of RELATIVE_UNITS) {
+    if (magnitude >= ms) return formatRelativeTime(Math.round(elapsed / ms), unit)
+  }
+  return formatRelativeTime(0, 'second')
 }

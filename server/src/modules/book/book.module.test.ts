@@ -22,6 +22,8 @@ import { BookExportService } from './book-export.service';
 import { BookExportSessionStore } from './book-export-session.store';
 import { BookAuthorSortKeyBackfillService } from './book-author-sort-key-backfill.service';
 import { ReadingAttemptController } from './reading-attempt.controller';
+import { AudiobookEbookProgressSyncService } from './audiobook-ebook-progress-sync.service';
+import { AudiolessEpubService } from './audioless-epub.service';
 
 describe('BookModule', () => {
   it('registers expected controller/providers/exports', () => {
@@ -35,8 +37,12 @@ describe('BookModule', () => {
       BookSortBuilder,
       BookQueryBuilder,
       BookAuthorSortKeyBackfillService,
+      AudiobookEbookProgressSyncService,
+      AudiolessEpubService,
     ]);
-    expect(Reflect.getMetadata('exports', BookModule)).toEqual([BookService, BookReadService, BookQueryBuilder]);
+    // AudiolessEpubService is exported so the Kobo download path can strip narration itself,
+    // without routing through BookService and its RequestUser-based access checks.
+    expect(Reflect.getMetadata('exports', BookModule)).toEqual([BookService, BookReadService, BookQueryBuilder, AudiolessEpubService]);
   });
 
   it('keeps library module in forwardRef imports', () => {

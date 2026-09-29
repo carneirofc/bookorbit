@@ -7,6 +7,7 @@ import type { CommunityRatingProviderKey } from "./metadata-fetch";
  * Most fields map directly to a DB column. The exceptions:
  * - `fileAvailability` - derived from `books.status` ('present' | 'missing')
  * - `communityRating` - from `book_community_ratings.rating` (optionally provider-specific)
+ * - `communityRatingCount` - from `book_community_ratings.rating_count` (optionally provider-specific)
  * - `readProgress` - aggregated from `reading_progress.percentage` (per-user, per-book-file)
  * - `readStatus` - stored in `user_book_status.status` (per-user)
  * - `startedAt` - from `user_book_status.started_at` (per-user)
@@ -17,8 +18,11 @@ import type { CommunityRatingProviderKey } from "./metadata-fetch";
  * - `collection` - resolved via `collection_books` join to `collections.name`
  * - `library` - resolved via `books.library_id` join to `libraries.name`
  * - `format` - resolved via `book_files.format` (primary file)
+ * - `fileSize` - resolved via `book_files.size_bytes` (primary file; rule values are bytes)
  * - `isbn` - matches both `isbn10` and `isbn13` in `book_metadata`
  * - `publishedDate` - uses full dates when available and falls back to published year
+ * - `cover` - either cover slot filled (`book_metadata.cover_source` is the summary of both)
+ * - `audioCover` - books whose cover media include audio, by whether their audio cover slot is filled
  * - `lockStatus` - derived from `book_metadata.locked_fields` (non-empty array = locked)
  * - `seriesStatus` - computed per-user: "up next in series" (next unstarted book whose earlier series entries are all finished)
  *
@@ -39,18 +43,21 @@ export type StaticRuleField =
   | "collection"
   | "library"
   | "format"
+  | "fileSize"
   | "addedAt"
   | "startedAt"
   | "finishedAt"
   | "fileAvailability"
   | "rating"
   | "communityRating"
+  | "communityRatingCount"
   | "readProgress"
   | "readStatus"
   | "description"
   | "isbn"
   | "metadataScore"
   | "cover"
+  | "audioCover"
   | "lockStatus"
   | "seriesStatus";
 
@@ -109,6 +116,7 @@ export const FIELD_OPERATORS: Record<StaticRuleField, RuleOperator[]> = {
   collection: ["includesAny", "excludesAll", "isEmpty", "isNotEmpty"],
   library: ["includesAny", "excludesAll"],
   format: ["includesAny", "excludesAll"],
+  fileSize: ["eq", "notEq", "gt", "gte", "lt", "lte", "between", "isEmpty", "isNotEmpty"],
   publishedDate: ["before", "after", "between", "withinLast", "isEmpty", "isNotEmpty"],
   publishedYear: ["eq", "notEq", "gt", "gte", "lt", "lte", "between", "isEmpty", "isNotEmpty"],
   seriesIndex: ["eq", "notEq", "gt", "gte", "lt", "lte", "between", "isEmpty", "isNotEmpty"],
@@ -119,12 +127,14 @@ export const FIELD_OPERATORS: Record<StaticRuleField, RuleOperator[]> = {
   fileAvailability: ["isMissing", "isPresent"],
   rating: ["eq", "gt", "gte", "lt", "lte", "isEmpty", "isNotEmpty"],
   communityRating: ["eq", "notEq", "gt", "gte", "lt", "lte", "between", "isEmpty", "isNotEmpty"],
+  communityRatingCount: ["eq", "notEq", "gt", "gte", "lt", "lte", "between", "isEmpty", "isNotEmpty"],
   readProgress: ["isUnread", "isInProgress", "isFinished"],
   readStatus: ["includesAny", "excludesAll", "isEmpty", "isNotEmpty"],
   description: ["isEmpty", "isNotEmpty"],
   isbn: ["isEmpty", "isNotEmpty", "eq"],
   metadataScore: ["gt", "gte", "lt", "lte", "between", "isEmpty", "isNotEmpty"],
   cover: ["isMissing", "isPresent"],
+  audioCover: ["isMissing", "isPresent"],
   lockStatus: ["isLocked", "isUnlocked"],
   seriesStatus: ["isUpNext"],
 };
@@ -186,11 +196,12 @@ export const RULE_OPERATORS: RuleOperator[] = [
 ];
 
 export type CommunityRatingProvider = CommunityRatingProviderKey | "any";
+export type CommunityRatingRuleField = "communityRating" | "communityRatingCount";
 export type RuleValue = string | number | string[] | number[];
 
 export type StandardRule = {
   type: "rule";
-  field: Exclude<StaticRuleField, "communityRating">;
+  field: Exclude<StaticRuleField, CommunityRatingRuleField>;
   operator: RuleOperator;
   value?: RuleValue;
   valueTo?: string | number;
@@ -198,7 +209,7 @@ export type StandardRule = {
 
 export type CommunityRatingRule = {
   type: "rule";
-  field: "communityRating";
+  field: CommunityRatingRuleField;
   operator: RuleOperator;
   provider?: CommunityRatingProvider;
   value?: RuleValue;
@@ -235,7 +246,8 @@ export type GroupRule = {
  * - `rating` - from `user_book_ratings.rating` (per-user, correlated subquery)
  * - `format` - from `book_files.format` for the primary file (correlated subquery)
  * - `publishedDate` - uses full dates when available and falls back to published year
- * - `random` - day-seeded pseudorandom based on book id and user id
+ * - `random` - pseudorandom, seeded by `BookQuery.randomSeed` so one browsing session
+ *   keeps a stable order across pages while a new visit reshuffles
  *
  * Fields marked "per-user, correlated subquery" require an authenticated userId and
  * execute a subquery per result row; they are slower on large result sets.
@@ -243,6 +255,7 @@ export type GroupRule = {
  * User-defined custom metadata fields are sortable too, as `CustomSortField`.
  */
 export type StaticSortField =
+  | "relevance"
   | "author"
   | "title"
   | "series"
@@ -281,6 +294,7 @@ export type SortField = StaticSortField | CustomSortField;
 
 /** Built-in sort fields only. Custom fields are resolved at runtime, not enumerable here. */
 export const SORT_FIELDS: StaticSortField[] = [
+  "relevance",
   "author",
   "title",
   "series",
@@ -383,4 +397,24 @@ export type BookQuery = {
   pagination: { page: number; size: number };
   collapseSeries?: boolean;
   q?: string;
+  /**
+   * Shuffle seed for the `random` sort field. Every page of one listing must send the same
+   * value or paging would draw from a different shuffle and repeat or skip books; a new value
+   * reshuffles. Ignored when no sort tier is `random`. Callers that omit it get a per-user
+   * order that only changes daily.
+   */
+  randomSeed?: number;
 };
+
+/** Upper bound for `BookQuery.randomSeed`, chosen so the seed always fits a signed 32-bit int. */
+export const MAX_RANDOM_SORT_SEED = 2_147_483_647;
+
+/** True when any sort tier shuffles, which is what makes `BookQuery.randomSeed` meaningful. */
+export function hasRandomSort(sort: SortSpec[] | undefined): boolean {
+  return sort?.some((spec) => spec.field === "random") ?? false;
+}
+
+/** A fresh shuffle seed. One per browsing session, reused for every page of that session. */
+export function createRandomSortSeed(): number {
+  return Math.floor(Math.random() * (MAX_RANDOM_SORT_SEED + 1));
+}

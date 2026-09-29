@@ -8,13 +8,13 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { DialogRoot, DialogContent, DialogPortal, DialogOverlay, DialogClose, DialogTitle, DialogDescription } from 'reka-ui'
 import { formatBytes } from '@/lib/formatting'
 import { getProviderColor } from '@/lib/provider-colors'
-import { providerIconPath } from '@/features/book/lib/provider-icons'
-import { libroFmAudiobookUrl, lubimyczytacBookUrl } from '@/features/book/lib/provider-links'
+import { createBookProviderLinks } from '@/features/book/lib/provider-links'
 import { useBookDetail } from '../composables/useBookDetail'
 import { useCoverVersions } from '../composables/useCoverVersions'
-import { getFormatColor } from '../lib/format-colors'
+import BookFormatChip from './BookFormatChip.vue'
+import { bookFormatEntries, fileFormatKey } from '../lib/book-formats'
 import { displayPublishedDate } from '../lib/published-date'
-import { FORMAT_TO_GROUP } from '@bookorbit/types'
+import { FORMAT_TO_GROUP, getPrimaryBookFile } from '@bookorbit/types'
 import { COVER_ASPECT_RATIO_KEY, DEFAULT_COVER_ASPECT_RATIO } from '../lib/cover-aspect-ratio'
 import { useDisplaySettings } from '@/composables/useDisplaySettings'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
@@ -31,14 +31,6 @@ const emit = defineEmits<{
   'update:open': [value: boolean]
   action: [type: 'add-to-collection' | 'delete']
 }>()
-
-type ProviderLink = {
-  key: string
-  label: string
-  url: string
-  iconUrl: string
-  fallback: string
-}
 
 const router = useRouter()
 const { detail, loading, fetch } = useBookDetail()
@@ -68,7 +60,7 @@ watch(
 )
 
 const { coverUrl } = useCoverVersions()
-const coverSrc = computed(() => (detail.value ? coverUrl(detail.value.id, 'cover', detail.value.updatedAt ?? detail.value.addedAt) : null))
+const coverSrc = computed(() => (detail.value ? coverUrl(detail.value.id, 'cover', detail.value.coverVersion) : null))
 
 const coverSeed = computed(() => (detail.value ? (detail.value.title ?? detail.value.folderPath.split('/').pop() ?? String(detail.value.id)) : ''))
 const coverPlaceholderTitle = computed(() => (detail.value ? (detail.value.title ?? detail.value.folderPath.split('/').pop() ?? null) : null))
@@ -76,108 +68,12 @@ const coverPlaceholderTitle = computed(() => (detail.value ? (detail.value.title
 const seriesLine = computed(() => {
   if (!detail.value?.seriesName) return null
   const idx = detail.value.seriesIndex
-  return idx != null ? `${detail.value.seriesName} #${idx % 1 === 0 ? Math.floor(idx) : idx}` : detail.value.seriesName
+  return idx != null ? `${detail.value.seriesName} #${idx}` : detail.value.seriesName
 })
 
 const authorLine = computed(() => detail.value?.authors.map((a) => a.name).join(', ') ?? null)
 const ratingStars = [1, 2, 3, 4, 5]
-const providerLinks = computed<ProviderLink[]>(() => {
-  const out: ProviderLink[] = []
-  const ids = detail.value?.providerIds
-  if (!ids) return out
-  if (ids.google) {
-    out.push({
-      key: 'google',
-      label: 'Google Books',
-      url: `https://books.google.com/books?id=${ids.google}`,
-      iconUrl: providerIconPath('google'),
-      fallback: 'G',
-    })
-  }
-  if (ids.goodreads) {
-    out.push({
-      key: 'goodreads',
-      label: 'Goodreads',
-      url: `https://www.goodreads.com/book/show/${ids.goodreads}`,
-      iconUrl: providerIconPath('goodreads'),
-      fallback: 'GR',
-    })
-  }
-  if (ids.amazon) {
-    out.push({
-      key: 'amazon',
-      label: 'Amazon',
-      url: `https://www.amazon.com/dp/${ids.amazon}`,
-      iconUrl: providerIconPath('amazon'),
-      fallback: 'A',
-    })
-  }
-  if (ids.hardcover) {
-    out.push({
-      key: 'hardcover',
-      label: 'Hardcover',
-      url: `https://hardcover.app/books/${ids.hardcover}`,
-      iconUrl: providerIconPath('hardcover'),
-      fallback: 'H',
-    })
-  }
-  if (ids.openLibrary) {
-    const path = String(ids.openLibrary).startsWith('/works/') ? String(ids.openLibrary) : `/works/${ids.openLibrary}`
-    out.push({
-      key: 'openLibrary',
-      label: 'Open Library',
-      url: `https://openlibrary.org${path}`,
-      iconUrl: providerIconPath('openLibrary'),
-      fallback: 'OL',
-    })
-  }
-  if (ids.itunes) {
-    out.push({
-      key: 'itunes',
-      label: 'Apple Books',
-      url: `https://books.apple.com/book/id${ids.itunes}`,
-      iconUrl: providerIconPath('itunes'),
-      fallback: '',
-    })
-  }
-  if (ids.librofm) {
-    out.push({
-      key: 'librofm',
-      label: 'Libro.fm',
-      url: libroFmAudiobookUrl(ids.librofm),
-      iconUrl: providerIconPath('librofm'),
-      fallback: 'Lf',
-    })
-  }
-  if (ids.ranobedb) {
-    out.push({
-      key: 'ranobedb',
-      label: 'RanobeDB',
-      url: `https://ranobedb.org/book/${ids.ranobedb}`,
-      iconUrl: providerIconPath('ranobedb'),
-      fallback: 'RN',
-    })
-  }
-  if (ids.lubimyczytac) {
-    out.push({
-      key: 'lubimyczytac',
-      label: 'LubimyCzytac',
-      url: lubimyczytacBookUrl(ids.lubimyczytac),
-      iconUrl: providerIconPath('lubimyczytac'),
-      fallback: 'LC',
-    })
-  }
-  if (ids.aladin) {
-    out.push({
-      key: 'aladin',
-      label: 'Aladin',
-      url: `https://www.aladin.co.kr/shop/wproduct.aspx?ItemId=${ids.aladin}`,
-      iconUrl: providerIconPath('aladin'),
-      fallback: '알',
-    })
-  }
-  return out
-})
+const providerLinks = computed(() => (detail.value ? createBookProviderLinks(detail.value.providerIds) : []))
 
 const safeDescription = useSafeHtml(() => detail.value?.description)
 
@@ -197,12 +93,10 @@ const quickViewCoverAspectRatio = computed(() => {
   return `${coverImageRatio.value} / 1`
 })
 
-const primaryFile = computed(() => detail.value?.files.find((f) => f.role === 'primary') ?? detail.value?.files[0] ?? null)
+const primaryFile = computed(() => (detail.value ? getPrimaryBookFile(detail.value.files) : null))
 const isPrimaryAudio = computed(() => primaryFile.value?.format != null && FORMAT_TO_GROUP[primaryFile.value.format] === 'audio')
 const isPrimaryComic = computed(() => primaryFile.value?.format != null && FORMAT_TO_GROUP[primaryFile.value.format] === 'cbx')
-const knownFormats = computed(() => [
-  ...new Set((detail.value?.files ?? []).filter((f) => f.format && FORMAT_TO_GROUP[f.format]).map((f) => f.format!)),
-])
+const formatEntries = computed(() => (detail.value ? bookFormatEntries(detail.value.files, detail.value.formatPriority) : []))
 const publishedDisplay = computed(() => (detail.value ? displayPublishedDate(detail.value.publishedDate, detail.value.publishedYear) : null))
 
 function providerLinkStyle(provider: string) {
@@ -210,15 +104,6 @@ function providerLinkStyle(provider: string) {
   return {
     borderColor: `${color}66`,
     backgroundColor: `${color}12`,
-  }
-}
-
-function formatBadgeStyle(fmt: string) {
-  const color = getFormatColor(fmt)
-  return {
-    color,
-    borderColor: `${color}66`,
-    backgroundColor: `${color}1a`,
   }
 }
 
@@ -351,7 +236,7 @@ function handleDelete() {
                     :style="providerLinkStyle(link.key)"
                   >
                     <img
-                      v-if="!providerIconErrors[link.key]"
+                      v-if="link.iconUrl && !providerIconErrors[link.key]"
                       :src="link.iconUrl"
                       :alt="link.label"
                       class="size-3.5 rounded-[2px] object-contain"
@@ -391,14 +276,13 @@ function handleDelete() {
             <template v-else-if="detail">
               <!-- Format badges + meta chips -->
               <div class="flex flex-wrap gap-1.5">
-                <span
-                  v-for="fmt in knownFormats"
-                  :key="fmt"
-                  class="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded border"
-                  :style="formatBadgeStyle(fmt)"
-                >
-                  {{ fmt }}
-                </span>
+                <BookFormatChip
+                  v-for="entry in formatEntries"
+                  :key="entry.key"
+                  :format-key="entry.key"
+                  :primary="entry.primary"
+                  class="rounded px-2 py-0.5 text-[10px] tracking-wider"
+                />
                 <span v-if="detail.pageCount" class="text-[10px] font-semibold px-2 py-0.5 rounded bg-muted text-muted-foreground">
                   {{ t('book.quickView.pages', { count: detail.pageCount }) }}
                 </span>
@@ -425,12 +309,7 @@ function handleDelete() {
                   {{ primaryFile.filename ?? t('book.quickView.fileNumber', { id: primaryFile.id }) }}
                 </p>
                 <div class="mt-1.5 flex items-center gap-1.5">
-                  <span
-                    class="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded border"
-                    :style="formatBadgeStyle(primaryFile.format ?? '?')"
-                  >
-                    {{ (primaryFile.format ?? '?').toUpperCase() }}
-                  </span>
+                  <BookFormatChip :format-key="fileFormatKey(primaryFile) ?? '?'" class="rounded px-2 py-0.5 text-[10px] tracking-wider" />
                   <span class="text-[10px] px-2 py-0.5 rounded bg-muted text-muted-foreground">
                     {{ formatBytes(primaryFile.sizeBytes) }}
                   </span>

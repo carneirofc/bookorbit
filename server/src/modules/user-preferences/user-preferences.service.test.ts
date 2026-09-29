@@ -2,9 +2,11 @@ import { BadRequestException } from '@nestjs/common';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   Accent,
+  BookRequestPreferences,
   CoverSearchPreferences,
   DisplayPreferences,
   LocalePreferences,
+  PodcastPlaylistPreferences,
   ServerFontPreferences,
   ThemePreferences,
 } from '@bookorbit/types';
@@ -19,6 +21,25 @@ const validThemePreferences: ThemePreferences = {
   radius: 'rounded',
   background: 'vinyl',
   brightness: 35,
+};
+
+const validPodcastPlaylistPreferences: PodcastPlaylistPreferences = {
+  playlists: [
+    {
+      id: 'playlist-1',
+      name: 'Morning commute',
+      libraryId: 4,
+      rules: {
+        filter: 'unplayed',
+        sort: 'shortest',
+        minDurationMinutes: null,
+        maxDurationMinutes: 30,
+        publishedWithinDays: 14,
+        podcastIds: [8, 9],
+        followedOnly: true,
+      },
+    },
+  ],
 };
 
 const addedAccentIds: readonly Accent[] = [
@@ -71,6 +92,8 @@ const validDisplayPreferences: DisplayPreferences = {
   smartScopeFilterExpanded: true,
   authorCoverSize: 140,
   authorCoverShape: 'circle',
+  authorRowDensity: 'comfortable',
+  authorCoverFallback: false,
   tableZebraStriping: false,
   tableDensity: 'comfortable',
   bookSpineOverlay: 'subtle',
@@ -93,13 +116,17 @@ const validCoverSearchPreferences: CoverSearchPreferences = {
   defaultProvider: 'itunes',
 };
 
+const validBookRequestPreferences: BookRequestPreferences = { defaultLanguage: 'de' };
+
 const repo = {
-  findByCategory:
-    vi.fn<
-      (
-        ...args: [number, string]
-      ) => Promise<{ data: ThemePreferences | DisplayPreferences | LocalePreferences | ServerFontPreferences | CoverSearchPreferences } | undefined>
-    >(),
+  findByCategory: vi.fn<
+    (...args: [number, string]) => Promise<
+      | {
+          data: ThemePreferences | DisplayPreferences | LocalePreferences | ServerFontPreferences | CoverSearchPreferences | BookRequestPreferences;
+        }
+      | undefined
+    >
+  >(),
   upsert: vi.fn<(...args: [number, string, Record<string, unknown>]) => Promise<void>>(),
   delete: vi.fn<(...args: [number, string]) => Promise<void>>(),
 };
@@ -165,6 +192,66 @@ describe('UserPreferencesService', () => {
 
   it('upsertCoverSearchPreferences rejects unknown fields', async () => {
     await expect(service.upsertCoverSearchPreferences(11, { ...validCoverSearchPreferences, unexpected: true })).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+    expect(repo.upsert).not.toHaveBeenCalled();
+  });
+
+  it('getBookRequestPreferences returns no language when nothing was saved', async () => {
+    await expect(service.getBookRequestPreferences(7)).resolves.toEqual({ defaultLanguage: null });
+    expect(repo.findByCategory).toHaveBeenCalledWith(7, 'book-requests');
+  });
+
+  it('getBookRequestPreferences returns the pinned language', async () => {
+    repo.findByCategory.mockResolvedValueOnce({ data: validBookRequestPreferences });
+
+    await expect(service.getBookRequestPreferences(7)).resolves.toEqual(validBookRequestPreferences);
+  });
+
+  it('getBookRequestPreferences falls back safely when stored data is malformed', async () => {
+    repo.findByCategory.mockResolvedValueOnce({ data: { defaultLanguage: 'klingon' } } as never);
+
+    await expect(service.getBookRequestPreferences(7)).resolves.toEqual({ defaultLanguage: null });
+  });
+
+  it('upsertBookRequestPreferences saves a pinned language', async () => {
+    await expect(service.upsertBookRequestPreferences(11, { ...validBookRequestPreferences })).resolves.toBeUndefined();
+    expect(repo.upsert).toHaveBeenCalledWith(11, 'book-requests', validBookRequestPreferences);
+  });
+
+  /**
+   * Destinations lived in this category under two different shapes before the instance default
+   * replaced them. Rows written by either build still exist, and both must keep their language
+   * rather than failing strict validation and reverting the whole category to the defaults.
+   */
+  it('getBookRequestPreferences drops a destination pinned before the instance default existed', async () => {
+    repo.findByCategory.mockResolvedValueOnce({ data: { defaultLibraryId: 4, defaultFolderId: 9, defaultLanguage: 'de' } } as never);
+
+    await expect(service.getBookRequestPreferences(7)).resolves.toEqual({ defaultLanguage: 'de' });
+  });
+
+  it('getBookRequestPreferences drops a per-medium destination too', async () => {
+    repo.findByCategory.mockResolvedValueOnce({
+      data: { destinations: { ebook: { libraryId: 4, folderId: 9 } }, defaultLanguage: 'de' },
+    } as never);
+
+    await expect(service.getBookRequestPreferences(7)).resolves.toEqual({ defaultLanguage: 'de' });
+  });
+
+  it('upsertBookRequestPreferences drops a destination a stale client still sends', async () => {
+    await expect(service.upsertBookRequestPreferences(11, { defaultLibraryId: 4, defaultLanguage: 'de' })).resolves.toBeUndefined();
+    expect(repo.upsert).toHaveBeenCalledWith(11, 'book-requests', { defaultLanguage: 'de' });
+  });
+
+  it('upsertBookRequestPreferences rejects a language no release could be matched against', async () => {
+    await expect(service.upsertBookRequestPreferences(11, { ...validBookRequestPreferences, defaultLanguage: 'klingon' })).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+    expect(repo.upsert).not.toHaveBeenCalled();
+  });
+
+  it('upsertBookRequestPreferences rejects unknown fields', async () => {
+    await expect(service.upsertBookRequestPreferences(11, { ...validBookRequestPreferences, unexpected: true })).rejects.toBeInstanceOf(
       BadRequestException,
     );
     expect(repo.upsert).not.toHaveBeenCalled();
@@ -404,6 +491,49 @@ describe('UserPreferencesService', () => {
     expect(repo.upsert).not.toHaveBeenCalled();
   });
 
+  it('upsertDisplayPreferences accepts and persists author display preferences', async () => {
+    const preferences = {
+      ...validDisplayPreferences,
+      authorRowDensity: 'compact',
+      authorCoverFallback: true,
+    } satisfies DisplayPreferences;
+
+    await expect(service.upsertDisplayPreferences(11, preferences)).resolves.toBeUndefined();
+
+    expect(repo.upsert).toHaveBeenCalledWith(11, 'display', preferences);
+  });
+
+  it('upsertDisplayPreferences accepts the complete client payload for fill-crop covers', async () => {
+    const preferences = {
+      ...validDisplayPreferences,
+      authorRowDensity: 'comfortable',
+      authorCoverFallback: false,
+      bookCoverDisplayMode: 'fill-crop',
+    } satisfies DisplayPreferences;
+
+    await expect(service.upsertDisplayPreferences(11, preferences)).resolves.toBeUndefined();
+
+    expect(repo.upsert).toHaveBeenCalledWith(11, 'display', preferences);
+  });
+
+  it('upsertDisplayPreferences defaults author display preferences omitted by older clients', async () => {
+    const { authorRowDensity, authorCoverFallback, ...olderPreferences } = validDisplayPreferences;
+    void authorRowDensity;
+    void authorCoverFallback;
+
+    await expect(service.upsertDisplayPreferences(11, olderPreferences)).resolves.toBeUndefined();
+
+    expect(repo.upsert).toHaveBeenCalledWith(11, 'display', expect.objectContaining({ authorRowDensity: 'comfortable', authorCoverFallback: false }));
+  });
+
+  it.each([
+    ['authorRowDensity', 'dense'],
+    ['authorCoverFallback', 'yes'],
+  ])('upsertDisplayPreferences rejects invalid %s values', async (field, value) => {
+    await expect(service.upsertDisplayPreferences(11, { ...validDisplayPreferences, [field]: value })).rejects.toBeInstanceOf(BadRequestException);
+    expect(repo.upsert).not.toHaveBeenCalled();
+  });
+
   it('upsertDisplayPreferences rejects invalid cover display modes', async () => {
     await expect(
       service.upsertDisplayPreferences(11, { ...validDisplayPreferences, bookCoverDisplayMode: 'stretched' } as never),
@@ -629,5 +759,40 @@ describe('UserPreferencesService', () => {
       await expect(service.upsertServerFontPreferences(11, { hiddenFamilies: [], sneaky: true })).rejects.toBeInstanceOf(BadRequestException);
       expect(repo.upsert).not.toHaveBeenCalled();
     });
+  });
+
+  it('getPodcastPlaylistPreferences returns an empty list when nothing is stored', async () => {
+    await expect(service.getPodcastPlaylistPreferences(7)).resolves.toEqual({ playlists: [] });
+    expect(repo.findByCategory).toHaveBeenCalledWith(7, 'podcast-playlists');
+  });
+
+  it('getPodcastPlaylistPreferences falls back to an empty list when the stored payload no longer validates', async () => {
+    repo.findByCategory.mockResolvedValueOnce({ data: { playlists: [{ id: 'a', name: 'Legacy' }] } } as never);
+
+    await expect(service.getPodcastPlaylistPreferences(7)).resolves.toEqual({ playlists: [] });
+  });
+
+  it('upsertPodcastPlaylistPreferences persists validated playlists', async () => {
+    await expect(service.upsertPodcastPlaylistPreferences(11, validPodcastPlaylistPreferences)).resolves.toBeUndefined();
+    expect(repo.upsert).toHaveBeenCalledWith(11, 'podcast-playlists', validPodcastPlaylistPreferences);
+  });
+
+  it('upsertPodcastPlaylistPreferences rejects duplicate playlist ids', async () => {
+    const [playlist] = validPodcastPlaylistPreferences.playlists;
+
+    await expect(service.upsertPodcastPlaylistPreferences(11, { playlists: [playlist, playlist] })).rejects.toBeInstanceOf(BadRequestException);
+    expect(repo.upsert).not.toHaveBeenCalled();
+  });
+
+  it('upsertPodcastPlaylistPreferences rejects an unknown sort and out-of-range durations', async () => {
+    const [playlist] = validPodcastPlaylistPreferences.playlists;
+
+    await expect(
+      service.upsertPodcastPlaylistPreferences(11, { playlists: [{ ...playlist, rules: { ...playlist!.rules, sort: 'random' } }] }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    await expect(
+      service.upsertPodcastPlaylistPreferences(11, { playlists: [{ ...playlist, rules: { ...playlist!.rules, maxDurationMinutes: 2000 } }] }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(repo.upsert).not.toHaveBeenCalled();
   });
 });

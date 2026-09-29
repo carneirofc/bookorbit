@@ -3,10 +3,11 @@ vi.mock('drizzle-orm', () => ({
   eq: vi.fn((left: unknown, right: unknown) => ({ op: 'eq', left, right })),
   getTableColumns: vi.fn(() => ({})),
   inArray: vi.fn((left: unknown, right: unknown[]) => ({ op: 'inArray', left, right })),
+  isNotNull: vi.fn((value: unknown) => ({ op: 'isNotNull', value })),
   sql: vi.fn((strings: TemplateStringsArray, ...values: unknown[]) => ({ op: 'sql', text: strings.join(''), values })),
 }));
 
-import { books, libraries } from '../../db/schema';
+import { books, libraries, libraryFolders } from '../../db/schema';
 import { LIBRARY_BOOK_STATUS_PRESENT } from './library.constants';
 import { LibraryRepository } from './library.repository';
 
@@ -56,7 +57,8 @@ describe('LibraryRepository', () => {
   it('findAll counts only present books while retaining empty libraries', async () => {
     const orderBy = vi.fn().mockResolvedValue([]);
     const groupBy = vi.fn().mockReturnValue({ orderBy });
-    const leftJoin = vi.fn().mockReturnValue({ groupBy });
+    const where = vi.fn().mockReturnValue({ groupBy });
+    const leftJoin = vi.fn().mockReturnValue({ where });
     const from = vi.fn().mockReturnValue({ leftJoin });
     db.select.mockReturnValue({ from });
 
@@ -69,12 +71,14 @@ describe('LibraryRepository', () => {
         { op: 'eq', left: books.status, right: LIBRARY_BOOK_STATUS_PRESENT },
       ],
     });
+    expect(where).toHaveBeenCalledWith({ op: 'eq', left: libraries.type, right: 'books' });
   });
 
   it('findAllForUser includes file rename eligibility and counts only present books', async () => {
     const orderBy = vi.fn().mockResolvedValue([]);
     const groupBy = vi.fn().mockReturnValue({ orderBy });
-    const leftJoin = vi.fn().mockReturnValue({ groupBy });
+    const where = vi.fn().mockReturnValue({ groupBy });
+    const leftJoin = vi.fn().mockReturnValue({ where });
     const innerJoin = vi.fn().mockReturnValue({ leftJoin });
     const from = vi.fn().mockReturnValue({ innerJoin });
     db.select.mockReturnValue({ from });
@@ -94,6 +98,60 @@ describe('LibraryRepository', () => {
       ],
     });
     expect(orderBy).toHaveBeenCalledWith(libraries.displayOrder, libraries.name);
+    expect(where).toHaveBeenCalledWith({ op: 'eq', left: libraries.type, right: 'books' });
+  });
+
+  it('findAutoScanSchedules selects only libraries with a configured expression', async () => {
+    const orderBy = vi.fn().mockResolvedValue([{ id: 4, autoScanCronExpression: '0 4 * * *' }]);
+    const where = vi.fn().mockReturnValue({ orderBy });
+    const from = vi.fn().mockReturnValue({ where });
+    db.select.mockReturnValue({ from });
+
+    await expect(repo.findAutoScanSchedules()).resolves.toEqual([{ id: 4, autoScanCronExpression: '0 4 * * *' }]);
+
+    expect(db.select).toHaveBeenCalledWith({
+      id: libraries.id,
+      autoScanCronExpression: libraries.autoScanCronExpression,
+    });
+    expect(where).toHaveBeenCalledWith({ op: 'isNotNull', value: libraries.autoScanCronExpression });
+    expect(orderBy).toHaveBeenCalledWith(libraries.id);
+  });
+
+  it('orders folders by creation time with an id tie-breaker', async () => {
+    const byLibraryOrderBy = vi.fn().mockResolvedValue([]);
+    const byLibraryWhere = vi.fn().mockReturnValue({ orderBy: byLibraryOrderBy });
+    const byLibraryFrom = vi.fn().mockReturnValue({ where: byLibraryWhere });
+    db.select.mockReturnValueOnce({ from: byLibraryFrom });
+
+    await repo.findFoldersByLibrary(7);
+
+    expect(byLibraryOrderBy).toHaveBeenCalledWith(libraryFolders.createdAt, libraryFolders.id);
+
+    const allOrderBy = vi.fn().mockResolvedValue([]);
+    const allFrom = vi.fn().mockReturnValue({ orderBy: allOrderBy });
+    db.select.mockReturnValueOnce({ from: allFrom });
+
+    await repo.findAllFolders();
+
+    expect(allOrderBy).toHaveBeenCalledWith(libraryFolders.libraryId, libraryFolders.createdAt, libraryFolders.id);
+
+    const scopedOrderBy = vi.fn().mockResolvedValue([]);
+    const scopedWhere = vi.fn().mockReturnValue({ orderBy: scopedOrderBy });
+    const scopedFrom = vi.fn().mockReturnValue({ where: scopedWhere });
+    db.select.mockReturnValueOnce({ from: scopedFrom });
+
+    await repo.findFoldersByLibraryIds([7, 8]);
+
+    expect(scopedOrderBy).toHaveBeenCalledWith(libraryFolders.libraryId, libraryFolders.createdAt, libraryFolders.id);
+
+    const pathsOrderBy = vi.fn().mockResolvedValue([]);
+    const pathsInnerJoin = vi.fn().mockReturnValue({ orderBy: pathsOrderBy });
+    const pathsFrom = vi.fn().mockReturnValue({ innerJoin: pathsInnerJoin });
+    db.select.mockReturnValueOnce({ from: pathsFrom });
+
+    await repo.findAllFolderPaths();
+
+    expect(pathsOrderBy).toHaveBeenCalledWith(libraries.displayOrder, libraries.name, libraryFolders.createdAt, libraryFolders.id);
   });
 
   it('getStats aggregates counts, sizes, and format map', async () => {
@@ -125,6 +183,48 @@ describe('LibraryRepository', () => {
       totalSizeBytes: 3700,
       formatCounts: { epub: 2, pdf: 1 },
     });
+  });
+
+  it('getStatsForLibraries aggregates every library in two queries', async () => {
+    const countChain = {
+      from: vi.fn().mockReturnValue({
+        where: vi.fn().mockReturnValue({
+          groupBy: vi.fn().mockResolvedValue([
+            { libraryId: 1, count: 3 },
+            { libraryId: 2, count: 1 },
+          ]),
+        }),
+      }),
+    };
+
+    const formatChain = {
+      from: vi.fn().mockReturnValue({
+        innerJoin: vi.fn().mockReturnValue({
+          where: vi.fn().mockReturnValue({
+            groupBy: vi.fn().mockResolvedValue([
+              { libraryId: 1, format: 'epub', count: 2, totalSize: '3000' },
+              { libraryId: 1, format: 'pdf', count: 1, totalSize: '700' },
+              { libraryId: 2, format: 'cbz', count: 1, totalSize: '500' },
+            ]),
+          }),
+        }),
+      }),
+    };
+
+    db.select.mockReturnValueOnce(countChain as any).mockReturnValueOnce(formatChain as any);
+
+    const stats = await repo.getStatsForLibraries([1, 2, 3]);
+
+    expect(db.select).toHaveBeenCalledTimes(2);
+    expect(stats.get(1)).toEqual({ totalBooks: 3, totalSizeBytes: 3700, formatCounts: { epub: 2, pdf: 1 } });
+    expect(stats.get(2)).toEqual({ totalBooks: 1, totalSizeBytes: 500, formatCounts: { cbz: 1 } });
+    // A library with no present books still gets an entry, so the caller never has to guess.
+    expect(stats.get(3)).toEqual({ totalBooks: 0, totalSizeBytes: 0, formatCounts: {} });
+  });
+
+  it('getStatsForLibraries issues no query for an empty id list', async () => {
+    await expect(repo.getStatsForLibraries([])).resolves.toEqual(new Map());
+    expect(db.select).not.toHaveBeenCalled();
   });
 
   it('hasUserAccess returns false when no access row exists', async () => {

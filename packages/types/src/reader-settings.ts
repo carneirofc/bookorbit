@@ -1,7 +1,17 @@
+import type { FontStyle } from "./font";
+
 export type ReaderFormatGroup = "epub" | "pdf" | "cbx" | "audio";
 
 export const EPUB_FONT_SIZE_MIN = 6;
 export const EPUB_FONT_SIZE_MAX = 32;
+export const EPUB_PARAGRAPH_SPACING_MIN = 0;
+export const EPUB_PARAGRAPH_SPACING_MAX = 2;
+export const EPUB_LETTER_SPACING_MIN = 0;
+export const EPUB_LETTER_SPACING_MAX = 0.2;
+export const EPUB_WORD_SPACING_MIN = 0;
+export const EPUB_WORD_SPACING_MAX = 0.5;
+export const EPUB_TEXT_INDENT_MIN = 0;
+export const EPUB_TEXT_INDENT_MAX = 4;
 export const CBX_SPREAD_GAP_MIN = 0;
 export const CBX_SPREAD_GAP_MAX = 64;
 
@@ -52,12 +62,30 @@ export function getFormatGroup(format: string): ReaderFormatGroup {
   return FORMAT_TO_GROUP[format.toLowerCase()] ?? "epub";
 }
 
+/** Formats a given reader can open, so a caller can ask for "another file this same reader handles". */
+export function getOpenableFormatsForGroup(group: ReaderFormatGroup): string[] {
+  return Object.entries(FORMAT_TO_GROUP)
+    .filter(
+      ([format, formatGroup]) =>
+        formatGroup === group && READER_OPENABLE_FORMATS.has(format),
+    )
+    .map(([format]) => format);
+}
+
 export interface EpubReaderSettings {
   themeName: string; // matches one of the reader's built-in theme names
   isDark: boolean;
   fontFamily: string | null; // null = use the book's embedded font
+  // Base style for body text. The book's own bold and italic runs still resolve relative
+  // to this, so a bold base leaves emphasis rendered at the same weight.
+  fontWeight: number; // CSS font-weight: integer from 1-1000
+  fontStyle: FontStyle;
   fontSize: number; // EPUB_FONT_SIZE_MIN-EPUB_FONT_SIZE_MAX
   lineHeight: number; // 0.8-3.0
+  paragraphSpacing: number; // EPUB_PARAGRAPH_SPACING_MIN-EPUB_PARAGRAPH_SPACING_MAX em; 0 preserves publisher spacing
+  letterSpacing: number | null; // null preserves publisher spacing
+  wordSpacing: number | null; // null preserves publisher spacing
+  textIndent: number | null; // null preserves publisher first-line indentation
   maxColumnCount: number; // 1-10
   gap: number; // 0-0.5 (column gap as fraction)
   maxInlineSize: number; // 400-1600 (max content width in px)
@@ -92,6 +120,8 @@ export interface CbxReaderSettings {
   forceTwoPage: boolean;
   widePageSingletonMode: "auto" | "disable";
   bgColor: "black" | "gray" | "white";
+  // Turning past the last page opens the next book in the series instead of stopping.
+  autoAdvance: boolean;
 }
 
 export interface AudioReaderSettings {
@@ -108,14 +138,24 @@ export type ReaderSettingsMap = {
   audio: AudioReaderSettings;
 };
 
-export type ReaderSettings = EpubReaderSettings | PdfReaderSettings | CbxReaderSettings | AudioReaderSettings;
+export type ReaderSettings =
+  | EpubReaderSettings
+  | PdfReaderSettings
+  | CbxReaderSettings
+  | AudioReaderSettings;
 
 export const EPUB_READER_DEFAULTS: EpubReaderSettings = {
   themeName: "default",
   isDark: false,
   fontFamily: null,
+  fontWeight: 400,
+  fontStyle: "normal",
   fontSize: 16,
   lineHeight: 1.5,
+  paragraphSpacing: EPUB_PARAGRAPH_SPACING_MIN,
+  letterSpacing: null,
+  wordSpacing: null,
+  textIndent: null,
   maxColumnCount: 2,
   gap: 0.05,
   maxInlineSize: 720,
@@ -146,6 +186,7 @@ export const CBX_READER_DEFAULTS: CbxReaderSettings = {
   forceTwoPage: false,
   widePageSingletonMode: "auto",
   bgColor: "black",
+  autoAdvance: false,
 };
 
 export const AUDIO_READER_DEFAULTS: AudioReaderSettings = {
@@ -154,6 +195,34 @@ export const AUDIO_READER_DEFAULTS: AudioReaderSettings = {
   skipBackSeconds: 10,
   skipForwardSeconds: 30,
 };
+
+/**
+ * Body of `PATCH /reader/defaults/:formatGroup`.
+ *
+ * Only the keys present in `set` are written. Every other key of the group keeps whatever the
+ * stored row already holds, so a client that owns a subset of the fields can save its own without
+ * having to send, and therefore without having to know, the rest. The iOS app is the only caller:
+ * it keeps the layout fields on the device and sends only the look fields.
+ */
+export interface ReaderDefaultsPatchBody<
+  G extends ReaderFormatGroup = ReaderFormatGroup,
+> {
+  set: Partial<ReaderSettingsMap[G]>;
+}
+
+/**
+ * Body of `PATCH /reader/preferences/:bookFileId`.
+ *
+ * `set` pins fields on the book; `unset` removes them so the field falls back to the account
+ * default. At least one of the two must be non-empty, and a key may not appear in both. A row left
+ * with no keys is deleted, which is the same state as never having been customized.
+ */
+export interface ReaderPreferencePatchBody<
+  G extends ReaderFormatGroup = ReaderFormatGroup,
+> {
+  set?: Partial<ReaderSettingsMap[G]>;
+  unset?: string[];
+}
 
 export const READER_GROUP_DEFAULTS: ReaderSettingsMap = {
   epub: EPUB_READER_DEFAULTS,

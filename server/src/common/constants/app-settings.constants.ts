@@ -15,6 +15,7 @@ export const APP_SETTING_KEYS = {
   AUTHORS_AUTO_ENRICHMENT_CONFIG: 'authors_auto_enrichment_config',
   AUTHORS_PROVIDER_AUDNEXUS_ENABLED: 'authors_provider_audnexus_enabled',
   AUTHORS_ENRICHMENT_PAUSED: 'authors_enrichment_paused',
+  AUTHORS_METADATA_PREFERENCES: 'authors_metadata_preferences',
   OIDC_CONFIG: 'oidc_config',
   DEFAULT_LIBRARY_ACCESS: 'default_library_access',
   UPLOAD_FILE_PATTERN: 'upload_file_pattern',
@@ -26,7 +27,18 @@ export const APP_SETTING_KEYS = {
   INITIAL_SETUP_COMPLETED_AT: 'initial_setup_completed_at',
   UPDATE_CHECK_ENABLED: 'update_check_enabled',
   MAX_UPLOAD_SIZE_MB: 'max_upload_size_mb',
+  HARDCOVER_ENABLED: 'hardcover_enabled',
 } as const;
+
+export const BOOK_DOCK_MANAGED_SETTING_KEYS: readonly string[] = [
+  APP_SETTING_KEYS.BOOK_DOCK_PAUSED,
+  APP_SETTING_KEYS.BOOK_DOCK_AUTO_FETCH_METADATA,
+  APP_SETTING_KEYS.BOOK_DOCK_AUTO_FINALIZE_ENABLED,
+  APP_SETTING_KEYS.BOOK_DOCK_AUTO_FINALIZE_THRESHOLD,
+  APP_SETTING_KEYS.BOOK_DOCK_AUTO_FINALIZE_LIBRARY_ID,
+  APP_SETTING_KEYS.BOOK_DOCK_AUTO_FINALIZE_FOLDER_ID,
+  APP_SETTING_KEYS.BOOK_DOCK_AUTO_FINALIZE_METADATA_MODE,
+];
 
 export const DEFAULT_AUDIT_RETENTION_DAYS = 90;
 
@@ -65,7 +77,6 @@ export const DEFAULT_LIBRARY_ACCESS_CONFIG: DefaultLibraryAccessConfig = {
 export const DEFAULT_AUTHOR_ENRICHMENT_CONFIG: AuthorAutoEnrichmentConfig = {
   enabled: false,
   triggerOnImport: true,
-  writeMode: 'missing_only',
   conditions: {
     neverEnriched: true,
     missingBio: false,

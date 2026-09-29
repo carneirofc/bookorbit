@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
+import { extractAudioCover } from './extractors/audio.extractor';
 import { AudioFormatExtractor } from './extractors/audio-format.extractor';
 import { ComicFormatExtractor } from './extractors/comic-format.extractor';
 import { EpubFormatExtractor } from './extractors/epub-format.extractor';
@@ -10,6 +11,7 @@ import { MobiFormatExtractor } from './extractors/mobi-format.extractor';
 import { OpfFormatExtractor } from './extractors/opf-format.extractor';
 import { PdfFormatExtractor } from './extractors/pdf-format.extractor';
 import { extractCover } from './lib/cover';
+import { extractEpubFixedLayout } from './lib/epub';
 import type { PdfParseWarning } from './lib/pdf-parser';
 
 export const METADATA_AUDIO_FORMATS = ['m4b', 'mp3', 'm4a', 'opus', 'ogg', 'flac'] as const;
@@ -56,12 +58,29 @@ export class MetadataExtractionService {
     return (await this.extractors.get(format)?.extract(absolutePath)) ?? null;
   }
 
+  /**
+   * Reads only the fixed-layout declaration from an EPUB, without the full metadata parse.
+   * Returns null when the format cannot carry the declaration or the file cannot be read, so
+   * callers can retry rather than caching a read failure as a definitive answer.
+   */
+  async detectFixedLayout(absolutePath: string, format: string): Promise<boolean | null> {
+    if (format !== 'epub' && format !== 'kepub') return null;
+    return extractEpubFixedLayout(absolutePath);
+  }
+
   async extractWithCoverFallback(absolutePath: string, format: string): Promise<MetadataExtractionResult> {
     const metadata = await this.extract(absolutePath, format);
     if (metadata) return { metadata, cover: metadata.cover };
 
     const cover = await extractCover(absolutePath, format);
     return { metadata: null, cover };
+  }
+
+  /** Reads only a file's embedded cover. KEPUB is an EPUB container, and audio art comes from ffmpeg. */
+  async extractEmbeddedCover(absolutePath: string, format: string): Promise<Buffer | null> {
+    const normalized = format.toLowerCase();
+    if ((METADATA_AUDIO_FORMATS as readonly string[]).includes(normalized)) return extractAudioCover(absolutePath);
+    return extractCover(absolutePath, normalized === 'kepub' ? 'epub' : normalized);
   }
 
   private logPdfParseWarning(warning: PdfParseWarning): void {

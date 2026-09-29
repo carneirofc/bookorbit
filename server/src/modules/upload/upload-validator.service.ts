@@ -1,28 +1,11 @@
-import { BadRequestException, Injectable, UnprocessableEntityException } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
+import { open } from 'fs/promises';
 import { extname } from 'path';
+import { UPLOAD_SUPPORTED_FORMATS } from '@bookorbit/types';
 
-import { ChunkUploadErrorCode } from '@bookorbit/types';
+import { uploadError } from './upload-errors';
 
-import { classifySignature, readSignatureHead } from '../../common/file-signature';
-
-export const SUPPORTED_BOOK_FORMATS = new Set([
-  'epub',
-  'kepub',
-  'pdf',
-  'mobi',
-  'azw',
-  'azw3',
-  'cbz',
-  'cbr',
-  'cb7',
-  'fb2',
-  'm4b',
-  'm4a',
-  'mp3',
-  'opus',
-  'ogg',
-  'flac',
-]);
+export const SUPPORTED_BOOK_FORMATS = new Set<string>(UPLOAD_SUPPORTED_FORMATS);
 
 @Injectable()
 export class UploadValidatorService {
@@ -35,48 +18,14 @@ export class UploadValidatorService {
     const normalizedAllowed = libraryAllowedFormats.map((f) => f.trim().toLowerCase()).filter(Boolean);
 
     if (!SUPPORTED_BOOK_FORMATS.has(ext)) {
-      throw new BadRequestException(`Unsupported file type .${ext}. Allowed types: ${[...SUPPORTED_BOOK_FORMATS].join(', ')}`);
+      throw uploadError.unsupportedFormat(`Unsupported file type .${ext}. Allowed types: ${[...SUPPORTED_BOOK_FORMATS].join(', ')}`);
     }
 
     if (normalizedAllowed.length > 0 && !normalizedAllowed.includes(ext)) {
-      throw new BadRequestException(`This library does not allow .${ext} files`);
+      throw uploadError.formatNotAllowed(`This library does not allow .${ext} files`);
     }
 
     return ext;
-  }
-
-  /**
-   * Returns the normalized extension if it is a supported book format; throws otherwise.
-   * The library-scoped variant is `validateFormat`.
-   */
-  validateBookFormat(filename: string): string {
-    const ext = extname(filename).toLowerCase().slice(1);
-
-    if (!SUPPORTED_BOOK_FORMATS.has(ext)) {
-      throw new BadRequestException(`Unsupported file type .${ext}. Allowed types: ${[...SUPPORTED_BOOK_FORMATS].join(', ')}`);
-    }
-
-    return ext;
-  }
-
-  /**
-   * Rejects a file whose leading bytes contradict its extension.
-   *
-   * Only an outright contradiction is fatal: an unrecognized container passes,
-   * because the signature table cannot cover every valid book.
-   */
-  assertHeadMatchesExtension(head: Buffer, ext: string): void {
-    if (classifySignature(head, ext) !== 'mismatch') return;
-
-    throw new UnprocessableEntityException({
-      message: `File contents do not match the .${ext} extension`,
-      errorCode: ChunkUploadErrorCode.CONTENT_TYPE_MISMATCH,
-    });
-  }
-
-  /** `assertHeadMatchesExtension` for callers that have a path rather than a head buffer. */
-  async assertContentMatchesExtension(absolutePath: string, ext: string): Promise<void> {
-    this.assertHeadMatchesExtension(await readSignatureHead(absolutePath), ext);
   }
 
   /**
@@ -84,7 +33,14 @@ export class UploadValidatorService {
    * Preserves the original extension.
    */
   sanitizeFilename(raw: string): string {
-    const sanitized = raw.replace(/[/\\:*?"<>|\0]/g, '_').trim();
+    const forbidden = /[/\\:*?"<>|]/;
+    const sanitized = [...raw]
+      .map((character) => {
+        const code = character.charCodeAt(0);
+        return code <= 31 || code === 127 || forbidden.test(character) ? '_' : character;
+      })
+      .join('')
+      .trim();
 
     if (!sanitized) return 'upload';
 
@@ -102,5 +58,54 @@ export class UploadValidatorService {
       .slice(0, 255 - ext.length)
       .trim();
     return `${stem || 'upload'}${ext}`;
+  }
+
+  async validateContent(absolutePath: string, format: string): Promise<void> {
+    const handle = await open(absolutePath, 'r');
+    try {
+      const header = Buffer.alloc(512);
+      const { bytesRead } = await handle.read(header, 0, header.length, 0);
+      const bytes = header.subarray(0, bytesRead);
+      if (!matchesFormatSignature(bytes, format)) {
+        throw uploadError.invalidContent(`File contents do not match the .${format} format`);
+      }
+    } finally {
+      await handle.close();
+    }
+  }
+}
+
+function matchesFormatSignature(bytes: Buffer, format: string): boolean {
+  if (bytes.length === 0) return false;
+  const ascii = bytes.toString('ascii');
+  switch (format) {
+    case 'epub':
+    case 'kepub':
+    case 'cbz':
+      return bytes[0] === 0x50 && bytes[1] === 0x4b;
+    case 'pdf':
+      return ascii.startsWith('%PDF-');
+    case 'cbr':
+      return ascii.startsWith('Rar!\x1a\x07');
+    case 'cb7':
+      return bytes.subarray(0, 6).equals(Buffer.from([0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c]));
+    case 'mobi':
+    case 'azw':
+    case 'azw3':
+      return ascii.includes('BOOKMOBI');
+    case 'fb2':
+      return /<\??(?:xml[^>]*>\s*)?(?:[\w-]+:)?FictionBook\b/i.test(bytes.toString('utf8'));
+    case 'flac':
+      return ascii.startsWith('fLaC');
+    case 'ogg':
+    case 'opus':
+      return ascii.startsWith('OggS');
+    case 'm4a':
+    case 'm4b':
+      return bytes.length >= 12 && ascii.slice(4, 8) === 'ftyp';
+    case 'mp3':
+      return ascii.startsWith('ID3') || (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0);
+    default:
+      return false;
   }
 }

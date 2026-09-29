@@ -112,7 +112,7 @@ function makeBook(overrides: Partial<BookCard> = {}): BookCard {
     authors: ['Author'],
     seriesId: 42,
     seriesName: 'The Series',
-    seriesIndex: 1,
+    seriesIndex: '1',
     files: [],
     publishedDate: null,
     publishedYear: null,
@@ -124,6 +124,7 @@ function makeBook(overrides: Partial<BookCard> = {}): BookCard {
     readStatus: null,
     addedAt: '2026-01-01T00:00:00.000Z',
     updatedAt: null,
+    coverVersion: 'legacy:2026-01-01T00:00:00.000Z',
     metadataScore: null,
     hasCover: false,
     hasMetadataLocks: false,
@@ -282,7 +283,7 @@ describe('SeriesDetailView', () => {
     mocks.loadBooks.mockResolvedValue(undefined)
     mocks.fetchSeriesBooks.mockReset()
     mocks.fetchSeriesBooks.mockResolvedValue({
-      items: [makeBook({ id: 7, seriesIndex: 1 })],
+      items: [makeBook({ id: 7, seriesIndex: '1' })],
       total: 1,
       page: 0,
       size: 8,
@@ -304,7 +305,8 @@ describe('SeriesDetailView', () => {
 
     expect(wrapper.find('[data-testid="virtual-book-grid"]').exists()).toBe(true)
     expect(wrapper.findAll('[data-testid="virtual-book-grid"]')).toHaveLength(1)
-    expect(wrapper.get('[data-testid="series-books-section-heading"]').text()).toBe('Books')
+    expect(wrapper.find('[data-testid="series-books-section-heading"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="series-media-group-books"]').exists()).toBe(true)
   })
 
   it('shows the ownership bar only once a provider has supplied a series total', async () => {
@@ -328,8 +330,7 @@ describe('SeriesDetailView', () => {
     expect(wrapper.find('[role="progressbar"]').exists()).toBe(false)
   })
 
-  it('shows grouped media sections with labels and counts when enabled', async () => {
-    localStorage.setItem(GROUP_BY_MEDIA_STORAGE_KEY, 'true')
+  it('shows grouped media sections with labels and counts by default', async () => {
     mocks.items = ref([
       makeBook({ id: 7, files: [{ id: 1, format: 'epub', role: 'primary', sizeBytes: null }] }),
       makeBook({ id: 8, files: [{ id: 2, format: 'pdf', role: 'primary', sizeBytes: null }] }),
@@ -370,22 +371,23 @@ describe('SeriesDetailView', () => {
     const wrapper = mountView()
     await nextTick()
 
-    expect(wrapper.findAll('[data-testid="virtual-book-grid"]')).toHaveLength(1)
-    expect(wrapper.get('[data-testid="series-books-section-heading"]').text()).toBe('Books')
+    expect(wrapper.find('[data-testid="series-books-section-heading"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="series-media-group-books"]').exists()).toBe(true)
+    expect(wrapper.findAll('[data-testid="virtual-book-grid"]')).toHaveLength(3)
 
     await wrapper.get('[data-testid="series-group-by-media-toggle"]').trigger('click')
     await nextTick()
 
-    expect(wrapper.find('[data-testid="series-books-section-heading"]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="series-media-group-books"]').exists()).toBe(true)
+    expect(wrapper.get('[data-testid="series-books-section-heading"]').text()).toBe('Books')
+    expect(wrapper.find('[data-testid="series-media-group-books"]').exists()).toBe(false)
     const grids = wrapper.findAll('[data-testid="virtual-book-grid"]')
-    expect(grids).toHaveLength(3)
-    expect(grids.map((grid) => grid.attributes('data-book-ids'))).toEqual(['7', '8', '9'])
-    expect(localStorage.getItem(GROUP_BY_MEDIA_STORAGE_KEY)).toBe('true')
+    expect(grids).toHaveLength(1)
+    expect(grids[0]?.attributes('data-book-ids')).toBe('7,8,9')
+    expect(localStorage.getItem(GROUP_BY_MEDIA_STORAGE_KEY)).toBe('false')
   })
 
   it('loads the stored group by media preference', async () => {
-    localStorage.setItem(GROUP_BY_MEDIA_STORAGE_KEY, 'true')
+    localStorage.setItem(GROUP_BY_MEDIA_STORAGE_KEY, 'false')
     mocks.items = ref([
       makeBook({ id: 7, files: [{ id: 1, format: 'epub', role: 'primary', sizeBytes: null }] }),
       makeBook({ id: 8, files: [{ id: 2, format: 'm4b', role: 'primary', sizeBytes: null }] }),
@@ -396,10 +398,10 @@ describe('SeriesDetailView', () => {
     const wrapper = mountView()
     await nextTick()
 
-    expect(wrapper.find('[data-testid="series-books-section-heading"]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="series-media-group-books"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="series-media-group-audiobooks"]').exists()).toBe(true)
-    expect(wrapper.findAll('[data-testid="virtual-book-grid"]')).toHaveLength(2)
+    expect(wrapper.get('[data-testid="series-books-section-heading"]').text()).toBe('Books')
+    expect(wrapper.find('[data-testid="series-media-group-books"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="series-media-group-audiobooks"]').exists()).toBe(false)
+    expect(wrapper.findAll('[data-testid="virtual-book-grid"]')).toHaveLength(1)
   })
 
   it('opens AddToCollectionSheet with the clicked book id from grid actions', async () => {
@@ -448,7 +450,7 @@ describe('SeriesDetailView', () => {
   })
 
   it('scales and centers square lead covers in the series header stack', async () => {
-    const lead = makeBook({ id: 7, seriesIndex: 1, hasCover: true })
+    const lead = makeBook({ id: 7, seriesIndex: '1', hasCover: true })
     mocks.fetchSeriesBooks.mockResolvedValueOnce({
       items: [lead],
       total: 1,
@@ -497,7 +499,7 @@ describe('SeriesDetailView', () => {
     await nextTick()
 
     resolveLeadPreview({
-      items: [makeBook({ id: 7, seriesIndex: 1, hasCover: true })],
+      items: [makeBook({ id: 7, seriesIndex: '1', hasCover: true })],
       total: 1,
       page: 0,
       size: 8,

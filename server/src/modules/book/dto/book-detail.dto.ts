@@ -6,9 +6,13 @@ import type {
   BookCommunityRating,
   CustomMetadataBookValue,
   ComicMetadataFields,
+  BookCoverSlot,
+  CoverMedium,
   NarratorRef,
   ProviderIds,
+  ReadAloudProgressSync,
   UserBookStatus,
+  EpubMediaOverlayCapability,
 } from '@bookorbit/types';
 
 export class BookFileDto {
@@ -20,6 +24,7 @@ export class BookFileDto {
   createdAt: Date;
   filename: string | null;
   durationSeconds: number | null;
+  mediaOverlay: EpubMediaOverlayCapability | null;
 }
 
 export class AudioMetadataDto {
@@ -49,13 +54,16 @@ export class BookDetailDto {
   pageCount: number | null;
   seriesId: number | null;
   seriesName: string | null;
-  seriesIndex: number | null;
+  seriesIndex: string | null;
   seriesMemberships: BookSeriesMembership[];
   rating: number | null;
   personalNote: string | null;
   personalNoteUpdatedAt: Date | null;
   communityRatings: BookCommunityRating[];
   coverSource: 'extracted' | 'custom' | null;
+  coverMedia: CoverMedium[];
+  covers: Record<CoverMedium, BookCoverSlot | null>;
+  coverVersion: string;
   hardcoverEditionId: string | null;
   providerIds: ProviderIds;
   authors: { id: number; name: string; sortName: string | null }[];
@@ -66,6 +74,7 @@ export class BookDetailDto {
   metadataScore: number | null;
   readStatus: UserBookStatus | null;
   audioMetadata: AudioMetadataDto | null;
+  readAloudSync: ReadAloudProgressSync;
   formatPriority: string[];
   comicMetadata: ComicMetadataFields | null;
   customMetadata: CustomMetadataBookValue[];

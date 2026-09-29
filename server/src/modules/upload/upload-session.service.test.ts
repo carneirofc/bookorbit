@@ -1,381 +1,271 @@
-import { ConfigService } from '@nestjs/config';
-import { createHash, randomBytes } from 'crypto';
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'fs/promises';
+import { ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
+import { Permission, UploadErrorCode } from '@bookorbit/types';
+import { createHash } from 'crypto';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { Readable } from 'stream';
+import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 
-import { ChunkUploadErrorCode } from '@bookorbit/types';
-
+import { UploadSessionService } from './upload-session.service';
 import { UploadValidatorService } from './upload-validator.service';
-import { UploadSessionService, UPLOADS_DIR, type ChunkWriteResult } from './upload-session.service';
-
-const CHUNK_SIZE = 256 * 1024;
-const MAX_TOTAL_BYTES = 500 * 1024 * 1024;
-
-function errorCodeOf(err: unknown): string | undefined {
-  const response = (err as { response?: { errorCode?: string } }).response;
-  return response?.errorCode;
-}
-
-function statusOf(err: unknown): number | undefined {
-  return (err as { status?: number }).status;
-}
 
 describe('UploadSessionService', () => {
   let root: string;
-  let uploadDir: string;
   let service: UploadSessionService;
-  let source: Buffer;
-  let totalChunks: number;
-
-  function makeConfig(): ConfigService {
-    return { get: vi.fn().mockImplementation((key: string) => (key === 'storage.appDataPath' ? root : undefined)) } as unknown as ConfigService;
-  }
-
-  function chunkOf(index: number): Buffer {
-    return source.subarray(index * CHUNK_SIZE, Math.min((index + 1) * CHUNK_SIZE, source.length));
-  }
-
-  function write(index: number, overrides: Partial<Parameters<UploadSessionService['writeChunk']>[0]> = {}) {
-    const body = overrides.chunkStream ? undefined : chunkOf(index);
-    return service.writeChunk({
-      uploadId: 'upload-1',
-      userId: 7,
-      rawFileName: 'dune.epub',
-      chunkIndex: index,
-      totalChunks,
-      chunkSize: CHUNK_SIZE,
-      totalSize: source.length,
-      chunkStream: body ? Readable.from([body]) : Readable.from([]),
-      maxTotalBytes: MAX_TOTAL_BYTES,
-      ...overrides,
-    });
-  }
-
-  function assembledOf(results: ChunkWriteResult[]) {
-    return results.filter((r) => r.status === 'assembled');
-  }
-
-  /**
-   * Rebuilds `service` under fake timers. The sweep interval is created during bootstrap,
-   * so installing fake timers afterwards would leave the real interval in place and
-   * `advanceTimersByTime` would never fire it.
-   */
-  async function withSweeperClock(body: () => Promise<void>): Promise<void> {
-    await service.onModuleDestroy();
-    vi.useFakeTimers();
-    try {
-      service = new UploadSessionService(makeConfig(), new UploadValidatorService());
-      await service.onApplicationBootstrap();
-      await body();
-    } finally {
-      vi.useRealTimers();
-    }
-  }
+  let rows: Map<string, any>;
+  let repo: Record<string, any>;
+  let storage: Record<string, any>;
+  let upload: Record<string, any>;
+  let library: Record<string, any>;
+  const validator = new UploadValidatorService();
+  const user = { id: 7, isSuperuser: false, permissions: [Permission.LibraryUpload, Permission.BookDockAccess] } as any;
 
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), 'bookorbit-upload-session-test-'));
-    uploadDir = join(root, UPLOADS_DIR);
-    service = new UploadSessionService(makeConfig(), new UploadValidatorService());
-    await service.onApplicationBootstrap();
-
-    // A ZIP signature keeps the assembled bytes plausible as the .epub they claim to be.
-    source = Buffer.concat([Buffer.from([0x50, 0x4b, 0x03, 0x04]), randomBytes(CHUNK_SIZE * 2 + 1234)]);
-    totalChunks = Math.ceil(source.length / CHUNK_SIZE);
+    await mkdir(join(root, 'upload-sessions'), { recursive: true });
+    rows = new Map();
+    repo = {
+      // Mirrors the repository's predicate, expiry included. Without the expiry check this fake is
+      // more permissive than the real query, and no test here could fail when a dead session is
+      // handed back under a live key.
+      findByIdempotencyKey: vi.fn(
+        (userId: number, key: string) =>
+          [...rows.values()].find((row) => row.userId === userId && row.idempotencyKey === key && row.expiresAt > new Date()) ?? null,
+      ),
+      create: vi.fn((values: any) => {
+        const row = makeRow(values);
+        rows.set(row.id, row);
+        return row;
+      }),
+      findById: vi.fn((id: string) => rows.get(id) ?? null),
+      update: vi.fn((id: string, values: any) => {
+        const current = rows.get(id);
+        if (!current) return null;
+        const updated = { ...current, ...values, updatedAt: new Date() };
+        rows.set(id, updated);
+        return updated;
+      }),
+      findProcessing: vi.fn(() => []),
+      findExpiredReceiving: vi.fn(() => []),
+      deleteTerminalBefore: vi.fn(() => undefined),
+      findCapabilityLibraries: vi.fn(() => [{ id: 1, name: 'Main', allowedFormats: ['epub', 'pdf'], organizationMode: 'book_per_folder' }]),
+      findCapabilityFolders: vi.fn(() => [{ id: 2, libraryId: 1, path: '/books/Main Shelf' }]),
+      findLibrary: vi.fn((id: number) => (id === 1 ? { id: 1, allowedFormats: ['epub', 'pdf'], organizationMode: 'book_per_folder' } : null)),
+      folderBelongsToLibrary: vi.fn((folderId: number, libraryId: number) => folderId === 2 && libraryId === 1),
+      // Book 9's folder is a real directory; book 8's "folder" is a file, which is the shape that
+      // reached `complete` and threw ENOTDIR before validateTarget checked it. See F-006.
+      findBookTarget: vi.fn((id: number) => {
+        if (id === 9) {
+          return { id: 9, libraryId: 1, allowedFormats: ['epub', 'pdf'], organizationMode: 'book_per_folder', folderPath: root };
+        }
+        if (id === 8) {
+          return {
+            id: 8,
+            libraryId: 1,
+            allowedFormats: ['epub', 'pdf'],
+            organizationMode: 'book_per_folder',
+            folderPath: join(root, 'a-book-that-is-a-file.cbz'),
+          };
+        }
+        return null;
+      }),
+      findBookLibraryId: vi.fn(() => 1),
+      findLibraryAllowedFormats: vi.fn(() => ['epub', 'pdf']),
+      findPrimaryBookFile: vi.fn(() => null),
+    };
+    storage = {
+      streamToTemp: vi.fn(),
+      cleanup: vi.fn(async (path: string) => rm(path, { force: true })),
+    };
+    upload = {
+      uploadForSession: vi.fn(),
+      processStoredUpload: vi.fn(() => undefined),
+      addFileToBook: vi.fn(() => ({ id: 22 })),
+    };
+    library = {
+      findAccessibleLibraryIds: vi.fn(() => [1]),
+      verifyUserAccess: vi.fn(() => undefined),
+    };
+    service = new UploadSessionService(
+      { appDataPath: root } as any,
+      repo as any,
+      { getMaxUploadSizeMb: vi.fn(() => 500) } as any,
+      library as any,
+      validator,
+      storage as any,
+      upload as any,
+      { processNewBookImport: vi.fn(() => undefined) } as any,
+      { get: vi.fn() } as any,
+    );
   });
 
   afterEach(async () => {
-    await service.onModuleDestroy();
     await rm(root, { recursive: true, force: true });
   });
 
-  describe('assembly', () => {
-    it('reassembles chunks that arrive out of order', async () => {
-      expect(totalChunks).toBe(3);
-      await write(2);
-      await write(0);
-      const result = await write(1);
+  it('returns permission-scoped capabilities with safe folder display names', async () => {
+    const result = await service.capabilities(user);
 
-      expect(result.status).toBe('assembled');
-      if (result.status !== 'assembled') return;
-      expect(await readFile(result.assembled.tempPath)).toEqual(source);
-      expect(result.assembled.sizeBytes).toBe(source.length);
-      expect(result.assembled.sha256).toBe(createHash('sha256').update(source).digest('hex'));
-      expect(result.assembled.fileName).toBe('dune.epub');
-      expect(result.assembled.ext).toBe('epub');
+    expect(result.canUploadToLibrary).toBe(true);
+    expect(result.canUseBookDock).toBe(true);
+    expect(result.chunkSizeBytes).toBe(16 * 1_024 * 1_024);
+    expect(result.libraries[0]?.folders).toEqual([{ id: 2, name: 'Main Shelf' }]);
+
+    const denied = await service.capabilities({ ...user, permissions: [] });
+    expect(denied.libraries).toEqual([]);
+  });
+
+  it('creates an empty durable staging file and reuses a matching idempotency key', async () => {
+    const dto = createDto();
+    const first = await service.create(dto, user);
+    const second = await service.create(dto, user);
+
+    expect(second.id).toBe(first.id);
+    expect(repo.create).toHaveBeenCalledTimes(1);
+    expect(await readFile(rows.get(first.id).stagingPath)).toHaveLength(0);
+  });
+
+  it('creates a new session when the key belongs to an expired one', async () => {
+    const dto = createDto();
+    const first = await service.create(dto, user);
+    rows.set(first.id, { ...rows.get(first.id), expiresAt: new Date(Date.now() - 60_000) });
+
+    const second = await service.create(dto, user);
+
+    // The client's idempotency key is its queue record's own id and does not change when it
+    // retries, so returning the expired session here left Retry unable to ever succeed: the next
+    // chunk failed assertReceiving with the very error the retry was escaping. See F-007.
+    expect(second.id).not.toBe(first.id);
+    expect(repo.create).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects an existing_book target whose folder path is a file', async () => {
+    await writeFile(join(root, 'a-book-that-is-a-file.cbz'), 'not a directory');
+
+    // Rejected at create, before a byte moves. Without the check the session was created, the whole
+    // file was transferred, and complete threw ENOTDIR: not a coded upload error, so the filter
+    // reported a 500 and persisted the absolute server path into errorMessage where the client
+    // reads it. isRetryable then treats the 5xx as retryable and re-sends the file against a
+    // condition that cannot improve. See F-006.
+    await expect(service.create({ ...createDto(), target: { kind: 'existing_book', bookId: 8 } } as any, user)).rejects.toMatchObject({
+      response: { errorCode: UploadErrorCode.InvalidTarget },
     });
+    expect(repo.create).not.toHaveBeenCalled();
+  });
 
-    it('captures a signature head that identifies the assembled file', async () => {
-      await write(0);
-      await write(1);
-      const result = await write(2);
+  it('accepts an existing_book target whose folder path is a directory', async () => {
+    await expect(service.create({ ...createDto(), target: { kind: 'existing_book', bookId: 9 } } as any, user)).resolves.toBeDefined();
+  });
 
-      if (result.status !== 'assembled') throw new Error('expected assembly');
-      expect(result.assembled.head.subarray(0, 4)).toEqual(Buffer.from([0x50, 0x4b, 0x03, 0x04]));
-    });
+  it('rejects idempotency-key reuse with different upload details', async () => {
+    const dto = createDto();
+    await service.create(dto, user);
 
-    it('produces exactly one assembly when every chunk lands concurrently', async () => {
-      const results = await Promise.all(Array.from({ length: totalChunks }, (_, i) => write(i)));
+    await expect(service.create({ ...dto, sizeBytes: 11 }, user)).rejects.toBeInstanceOf(ConflictException);
+  });
 
-      expect(assembledOf(results)).toHaveLength(1);
-      expect(results.filter((r) => r.status === 'partial')).toHaveLength(totalChunks - 1);
-    });
-
-    it('reports progress on each incomplete chunk', async () => {
-      const first = await write(0);
-
-      expect(first).toMatchObject({ status: 'partial', receivedChunks: 1, totalChunks: 3, finalizing: false });
-    });
-
-    it('treats a duplicate chunk as idempotent rather than progress', async () => {
-      await write(0);
-      await write(0);
-      const third = await write(0);
-
-      expect(third).toMatchObject({ status: 'partial', receivedChunks: 1 });
-    });
-
-    it('releases the temp file on request', async () => {
-      const results = await Promise.all(Array.from({ length: totalChunks }, (_, i) => write(i)));
-      const [assembled] = assembledOf(results);
-      if (assembled.status !== 'assembled') throw new Error('expected assembly');
-
-      await assembled.assembled.release();
-
-      expect(await readdir(uploadDir)).toHaveLength(0);
-    });
-
-    it('clears the session once assembled, so its quota is returned', async () => {
-      await Promise.all(Array.from({ length: totalChunks }, (_, i) => write(i)));
-
-      expect(service.getStats()).toEqual({ sessions: 0, bytesReserved: 0 });
+  it('enforces upload permission and library-folder ownership before creating files', async () => {
+    await expect(service.create(createDto(), { ...user, permissions: [] })).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(service.create({ ...createDto(), target: { kind: 'library', libraryId: 1, folderId: 99 } } as any, user)).rejects.toMatchObject({
+      response: { errorCode: UploadErrorCode.InvalidTarget },
     });
   });
 
-  describe('integrity', () => {
-    it('accepts a chunk whose checksum matches', async () => {
-      const result = await write(0, { chunkSha256: createHash('sha256').update(chunkOf(0)).digest('hex') });
+  it('appends a checksummed chunk at the exact offset and reconciles durable byte count', async () => {
+    const response = await service.create(createDto(), user);
+    const chunk = Buffer.from('%PDF-1234');
+    const chunkPath = join(root, 'chunk');
+    await writeFile(chunkPath, chunk);
+    storage.streamToTemp.mockResolvedValue({ tempPath: chunkPath, sizeBytes: chunk.length });
+    const checksum = createHash('sha256').update(chunk).digest('hex');
 
-      expect(result.status).toBe('partial');
-    });
+    const result = await service.appendChunk(response.id, 0, `sha256 ${checksum}`, Readable.from(chunk), user);
 
-    it('rejects a chunk whose checksum does not match', async () => {
-      const err = await write(0, { chunkSha256: 'a'.repeat(64) }).catch((e: unknown) => e);
-
-      expect(statusOf(err)).toBe(422);
-      expect(errorCodeOf(err)).toBe(ChunkUploadErrorCode.CHUNK_CORRUPT);
-    });
-
-    it('rejects a malformed checksum before writing', async () => {
-      const err = await write(0, { chunkSha256: 'not-a-hash' }).catch((e: unknown) => e);
-
-      expect(errorCodeOf(err)).toBe(ChunkUploadErrorCode.INVALID_CHUNK_METADATA);
-    });
-
-    it('lets a corrupt chunk be retried, overwriting the bad bytes', async () => {
-      const corrupt = Buffer.alloc(CHUNK_SIZE, 0xff);
-      await write(1, { chunkStream: Readable.from([corrupt]), chunkSha256: 'b'.repeat(64) }).catch(() => undefined);
-
-      await write(0);
-      await write(1);
-      const result = await write(2);
-
-      if (result.status !== 'assembled') throw new Error('expected assembly');
-      expect(await readFile(result.assembled.tempPath)).toEqual(source);
-    });
-
-    it('rejects a chunk shorter than its declared length', async () => {
-      const err = await write(0, { chunkStream: Readable.from([chunkOf(0).subarray(0, 10)]) }).catch((e: unknown) => e);
-
-      expect(errorCodeOf(err)).toBe(ChunkUploadErrorCode.CHUNK_CORRUPT);
-    });
-
-    it('rejects a chunk the multipart layer truncated', async () => {
-      const stream = Object.assign(Readable.from([chunkOf(0)]), { truncated: true });
-      const err = await write(0, { chunkStream: stream }).catch((e: unknown) => e);
-
-      expect(errorCodeOf(err)).toBe(ChunkUploadErrorCode.CHUNK_CORRUPT);
-    });
-
-    it('does not count a rejected chunk as received', async () => {
-      await write(0, { chunkStream: Readable.from([chunkOf(0).subarray(0, 10)]) }).catch(() => undefined);
-      const result = await write(1);
-
-      expect(result).toMatchObject({ status: 'partial', receivedChunks: 1 });
-    });
-
-    it('rejects a chunk longer than its declared length without letting it complete', async () => {
-      const err = await write(0, { chunkStream: Readable.from([Buffer.alloc(CHUNK_SIZE * 2)]) }).catch((e: unknown) => e);
-
-      expect(statusOf(err)).toBe(413);
-      expect(errorCodeOf(err)).toBe(ChunkUploadErrorCode.CHUNK_TOO_LARGE);
+    expect(result.receivedBytes).toBe(chunk.length);
+    expect(await readFile(rows.get(response.id).stagingPath)).toEqual(chunk);
+    await expect(service.appendChunk(response.id, 0, undefined, Readable.from('x'), user)).rejects.toMatchObject({
+      response: { errorCode: UploadErrorCode.OffsetMismatch, expectedOffset: chunk.length },
     });
   });
 
-  describe('validation before any bytes are written', () => {
-    it('refuses a file larger than the limit and creates nothing', async () => {
-      const oversized = MAX_TOTAL_BYTES + 1;
-      const err = await write(0, {
-        totalSize: oversized,
-        totalChunks: Math.ceil(oversized / CHUNK_SIZE),
-        maxTotalBytes: MAX_TOTAL_BYTES,
-      }).catch((e: unknown) => e);
+  it('rejects a bad checksum without mutating the session staging file', async () => {
+    const response = await service.create(createDto(), user);
+    const chunkPath = join(root, 'bad-chunk');
+    await writeFile(chunkPath, '%PDF-1234');
+    storage.streamToTemp.mockResolvedValue({ tempPath: chunkPath, sizeBytes: 9 });
 
-      expect(statusOf(err)).toBe(413);
-      expect(errorCodeOf(err)).toBe(ChunkUploadErrorCode.UPLOAD_TOO_LARGE);
-      expect(await readdir(uploadDir)).toHaveLength(0);
+    await expect(service.appendChunk(response.id, 0, '0'.repeat(64), Readable.from('ignored'), user)).rejects.toMatchObject({
+      response: { errorCode: UploadErrorCode.ChecksumMismatch },
     });
+    expect(await readFile(rows.get(response.id).stagingPath)).toHaveLength(0);
+  });
 
-    it('refuses an unsupported extension and creates nothing', async () => {
-      const err = await write(0, { rawFileName: 'notes.txt' }).catch((e: unknown) => e);
-
-      expect(statusOf(err)).toBe(400);
-      expect(await readdir(uploadDir)).toHaveLength(0);
-    });
-
-    it.each([
-      ['an upload id with illegal characters', { uploadId: '../escape' }],
-      ['a chunk count of zero', { totalChunks: 0 }],
-      ['a chunk index past the end', { chunkIndex: 99 }],
-      ['a chunk size below the floor', { chunkSize: 1024 }],
-      ['arithmetic that does not add up', { totalChunks: 99 }],
-    ])('refuses %s', async (_label, overrides) => {
-      const err = await write(0, overrides as never).catch((e: unknown) => e);
-
-      expect(errorCodeOf(err)).toBe(ChunkUploadErrorCode.INVALID_CHUNK_METADATA);
-      expect(await readdir(uploadDir)).toHaveLength(0);
+  it('will not complete a partial upload', async () => {
+    const response = await service.create(createDto(), user);
+    await expect(service.complete(response.id, user)).rejects.toMatchObject({
+      response: { errorCode: UploadErrorCode.SessionStateInvalid },
     });
   });
 
-  describe('session identity', () => {
-    it('refuses a second file reusing a live upload id', async () => {
-      await write(0);
-      const err = await write(1, { rawFileName: 'other.epub' }).catch((e: unknown) => e);
+  it('validates and adds a completed session to an existing book', async () => {
+    const dto = { ...createDto(), sizeBytes: 9, target: { kind: 'existing_book', bookId: 9 } } as any;
+    const response = await service.create(dto, user);
+    const row = rows.get(response.id);
+    await writeFile(row.stagingPath, '%PDF-1234');
+    rows.set(response.id, { ...row, receivedBytes: 9 });
 
-      expect(statusOf(err)).toBe(409);
-      expect(errorCodeOf(err)).toBe(ChunkUploadErrorCode.SESSION_MISMATCH);
-      expect(service.getStats().sessions).toBe(1);
-    });
+    const result = await service.complete(response.id, user);
 
-    it('refuses a chunk whose declared size contradicts the session', async () => {
-      await write(0);
-      const err = await write(1, { totalSize: source.length + CHUNK_SIZE, totalChunks: totalChunks + 1 }).catch((e: unknown) => e);
+    expect(upload.addFileToBook).toHaveBeenCalledWith(9, 'book.pdf', expect.anything(), user);
+    expect(result.status).toBe('completed');
+    expect(result.bookId).toBe(9);
+  });
 
-      expect(errorCodeOf(err)).toBe(ChunkUploadErrorCode.SESSION_MISMATCH);
-    });
-
-    it('keeps two users with the same upload id fully separate', async () => {
-      await write(0);
-      const other = await write(0, { userId: 8, rawFileName: 'different.epub', totalSize: CHUNK_SIZE, totalChunks: 1 });
-
-      expect(other.status).toBe('assembled');
-      expect(service.getStats().sessions).toBe(1);
-    });
-
-    it('reports an abandoned session as expired rather than reopening it', async () => {
-      await write(0, { userId: 8 });
-      await service.abort('upload-1', 8);
-
-      const err = await write(1, { userId: 8 }).catch((e: unknown) => e);
-
-      expect(statusOf(err)).toBe(410);
-      expect(errorCodeOf(err)).toBe(ChunkUploadErrorCode.SESSION_EXPIRED);
+  it('hides sessions owned by another account and refuses cancellation during processing', async () => {
+    const response = await service.create(createDto(), user);
+    await expect(service.get(response.id, { ...user, id: 8 })).rejects.toBeInstanceOf(NotFoundException);
+    rows.set(response.id, { ...rows.get(response.id), status: 'processing' });
+    await expect(service.cancel(response.id, user)).rejects.toMatchObject({
+      response: { errorCode: UploadErrorCode.SessionStateInvalid },
     });
   });
 
-  describe('quotas', () => {
-    it('refuses more than the per-user session cap', async () => {
-      for (let i = 0; i < 5; i++) {
-        await write(0, { uploadId: `upload-cap-${i}` });
-      }
+  it('expires abandoned sessions and removes their staged bytes', async () => {
+    const response = await service.create(createDto(), user);
+    const row = rows.get(response.id);
+    repo.findExpiredReceiving.mockResolvedValue([row]);
 
-      const err = await write(0, { uploadId: 'upload-cap-5' }).catch((e: unknown) => e);
+    await service.cleanupExpired();
 
-      expect(statusOf(err)).toBe(429);
-      expect(errorCodeOf(err)).toBe(ChunkUploadErrorCode.TOO_MANY_UPLOADS);
-    });
-
-    it('frees a slot when a session is aborted', async () => {
-      for (let i = 0; i < 5; i++) {
-        await write(0, { uploadId: `upload-cap-${i}` });
-      }
-      await service.abort('upload-cap-0', 7);
-
-      await expect(write(0, { uploadId: 'upload-cap-5' })).resolves.toMatchObject({ status: 'partial' });
-    });
-
-    it('reserves the declared size, not the bytes received so far', async () => {
-      await write(0);
-
-      expect(service.getStats()).toEqual({ sessions: 1, bytesReserved: source.length });
-    });
+    expect(rows.get(response.id).status).toBe('expired');
+    expect(storage.cleanup).toHaveBeenCalledWith(row.stagingPath);
+    expect(repo.deleteTerminalBefore).toHaveBeenCalledOnce();
   });
 
-  describe('cleanup', () => {
-    it('removes the temp file when a session is aborted', async () => {
-      await write(0);
-      expect(await readdir(uploadDir)).toHaveLength(1);
+  function createDto() {
+    return {
+      filename: 'book.pdf',
+      sizeBytes: 10,
+      idempotencyKey: 'upload-key-123',
+      target: { kind: 'library', libraryId: 1, folderId: 2 },
+    } as any;
+  }
 
-      await service.abort('upload-1', 7);
-
-      expect(await readdir(uploadDir)).toHaveLength(0);
-      expect(service.getStats()).toEqual({ sessions: 0, bytesReserved: 0 });
-    });
-
-    it('sweeps sessions that have gone quiet past the TTL', async () => {
-      await withSweeperClock(async () => {
-        await write(0);
-        expect(await readdir(uploadDir)).toHaveLength(1);
-
-        await vi.advanceTimersByTimeAsync(31 * 60_000);
-
-        expect(service.getStats().sessions).toBe(0);
-        expect(await readdir(uploadDir)).toHaveLength(0);
-      });
-    });
-
-    it('leaves an active session alone while it is still being written to', async () => {
-      await withSweeperClock(async () => {
-        await write(0);
-        await vi.advanceTimersByTimeAsync(20 * 60_000);
-        await write(1);
-        await vi.advanceTimersByTimeAsync(20 * 60_000);
-
-        expect(service.getStats().sessions).toBe(1);
-      });
-    });
-
-    it('refuses a chunk for a session that was already swept', async () => {
-      let err: unknown;
-      await withSweeperClock(async () => {
-        await write(0);
-        await vi.advanceTimersByTimeAsync(31 * 60_000);
-        err = await write(1).catch((e: unknown) => e);
-      });
-
-      expect(statusOf(err)).toBe(410);
-      expect(errorCodeOf(err)).toBe(ChunkUploadErrorCode.SESSION_EXPIRED);
-    });
-
-    it('clears part files left behind by a previous process on bootstrap', async () => {
-      await writeFile(join(uploadDir, 'left-over.part'), 'stale');
-      await writeFile(join(uploadDir, 'unrelated.txt'), 'keep');
-
-      const restarted = new UploadSessionService(makeConfig(), new UploadValidatorService());
-      await restarted.onApplicationBootstrap();
-      await restarted.onModuleDestroy();
-
-      expect(await readdir(uploadDir)).toEqual(['unrelated.txt']);
-    });
-
-    it('stops sweeping and drops live temp files on shutdown', async () => {
-      await write(0);
-
-      await service.onModuleDestroy();
-
-      expect(await readdir(uploadDir)).toHaveLength(0);
-      expect(service.getStats()).toEqual({ sessions: 0, bytesReserved: 0 });
-    });
-  });
+  function makeRow(values: any) {
+    const now = new Date();
+    return {
+      receivedBytes: 0,
+      status: 'receiving',
+      expectedSha256: null,
+      errorCode: null,
+      errorMessage: null,
+      resultBookId: null,
+      resultBookDockFileId: null,
+      completedAt: null,
+      createdAt: now,
+      updatedAt: now,
+      ...values,
+    };
+  }
 });

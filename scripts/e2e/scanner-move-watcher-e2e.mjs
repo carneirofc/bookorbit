@@ -13,8 +13,8 @@ const repoRoot = resolve(scriptDir, "../..");
 const requireFromClient = createRequire(new URL("../../client/package.json", import.meta.url));
 const { io } = requireFromClient("socket.io-client");
 
-const DEFAULT_LIB1_ROOT = "/Users/aditya.chandel/Workspace-private/bookorbit-local/books/Move Test Lib 1";
-const DEFAULT_LIB2_ROOT = "/Users/aditya.chandel/Workspace-private/bookorbit-local/books/Move Test Lib 2";
+const DEFAULT_LIB1_ROOT = resolve(repoRoot, "local/books/Move Test Lib 1");
+const DEFAULT_LIB2_ROOT = resolve(repoRoot, "local/books/Move Test Lib 2");
 const PG_IMAGE = "pgvector/pgvector:pg18";
 const SETTLE_MS = 6500;
 const WAIT_MS = 45000;

@@ -83,20 +83,6 @@ describe('MigrationImportRepository', () => {
     );
   });
 
-  it('clearUserBookStatuses no-ops for empty targets and deduplicates ids otherwise', async () => {
-    const where = vi.fn().mockResolvedValue(undefined);
-    const deleteFn = vi.fn().mockReturnValue({ where });
-    const repo = new MigrationImportRepository({ delete: deleteFn } as never);
-
-    await repo.clearUserBookStatuses([], [1, 2]);
-    await repo.clearUserBookStatuses([1], []);
-    expect(deleteFn).not.toHaveBeenCalled();
-
-    await repo.clearUserBookStatuses([1, 1, 2], [10, 10, 11]);
-    expect(deleteFn).toHaveBeenCalledTimes(1);
-    expect(where).toHaveBeenCalledTimes(1);
-  });
-
   it('clearUserBookRatings no-ops for empty targets and deduplicates ids otherwise', async () => {
     const where = vi.fn().mockResolvedValue(undefined);
     const deleteFn = vi.fn().mockReturnValue({ where });
@@ -111,14 +97,14 @@ describe('MigrationImportRepository', () => {
     expect(where).toHaveBeenCalledTimes(1);
   });
 
-  it('chunks user/book clear queries for large migration runs', async () => {
+  it('chunks user/book rating clear queries for large migration runs', async () => {
     const where = vi.fn().mockResolvedValue(undefined);
     const deleteFn = vi.fn().mockReturnValue({ where });
     const repo = new MigrationImportRepository({ delete: deleteFn } as never);
     const userIds = Array.from({ length: 501 }, (_, index) => index + 1);
     const bookIds = Array.from({ length: 1001 }, (_, index) => index + 1);
 
-    await repo.clearUserBookStatuses(userIds, bookIds);
+    await repo.clearUserBookRatings(userIds, bookIds);
 
     expect(deleteFn).toHaveBeenCalledTimes(6);
     expect(where).toHaveBeenCalledTimes(6);
@@ -207,9 +193,9 @@ describe('MigrationImportRepository', () => {
 
   it('groups target files by book id and supports empty input short-circuit', async () => {
     const where = vi.fn().mockResolvedValue([
-      { id: 11, bookId: 1, hash: 'h1', absolutePath: '/books/1.epub' },
-      { id: 12, bookId: 1, hash: null, absolutePath: '/books/1.m4b' },
-      { id: 21, bookId: 2, hash: 'h2', absolutePath: '/books/2.epub' },
+      { id: 12, bookId: 1, hash: null, absolutePath: '/books/1.m4b', format: 'm4b', sortOrder: 1, durationSeconds: 600 },
+      { id: 11, bookId: 1, hash: 'h1', absolutePath: '/books/1.epub', format: 'epub', sortOrder: 0, durationSeconds: null },
+      { id: 21, bookId: 2, hash: 'h2', absolutePath: '/books/2.epub', format: 'epub', sortOrder: null, durationSeconds: null },
     ]);
     const from = vi.fn().mockReturnValue({ where });
     const select = vi.fn().mockReturnValue({ from });
@@ -222,11 +208,11 @@ describe('MigrationImportRepository', () => {
         [
           1,
           [
-            { id: 11, hash: 'h1', absolutePath: '/books/1.epub' },
-            { id: 12, hash: null, absolutePath: '/books/1.m4b' },
+            { id: 11, hash: 'h1', absolutePath: '/books/1.epub', format: 'epub', sortOrder: 0, durationSeconds: null },
+            { id: 12, hash: null, absolutePath: '/books/1.m4b', format: 'm4b', sortOrder: 1, durationSeconds: 600 },
           ],
         ],
-        [[2, [{ id: 21, hash: 'h2', absolutePath: '/books/2.epub' }]]][0],
+        [[2, [{ id: 21, hash: 'h2', absolutePath: '/books/2.epub', format: 'epub', sortOrder: null, durationSeconds: null }]]][0],
       ]),
     );
   });
@@ -234,9 +220,13 @@ describe('MigrationImportRepository', () => {
   it('chunks target file lookups for large matched book sets', async () => {
     const where = vi
       .fn()
-      .mockResolvedValueOnce([{ id: 11, bookId: 1, hash: 'h1', absolutePath: '/books/1.epub', format: 'epub' }])
-      .mockResolvedValueOnce([{ id: 5011, bookId: 501, hash: 'h501', absolutePath: '/books/501.epub', format: 'epub' }])
-      .mockResolvedValueOnce([{ id: 10011, bookId: 1001, hash: 'h1001', absolutePath: '/books/1001.epub', format: 'epub' }]);
+      .mockResolvedValueOnce([{ id: 11, bookId: 1, hash: 'h1', absolutePath: '/books/1.epub', format: 'epub', sortOrder: 0, durationSeconds: null }])
+      .mockResolvedValueOnce([
+        { id: 5011, bookId: 501, hash: 'h501', absolutePath: '/books/501.epub', format: 'epub', sortOrder: 0, durationSeconds: null },
+      ])
+      .mockResolvedValueOnce([
+        { id: 10011, bookId: 1001, hash: 'h1001', absolutePath: '/books/1001.epub', format: 'epub', sortOrder: 0, durationSeconds: null },
+      ]);
     const from = vi.fn().mockReturnValue({ where });
     const select = vi.fn().mockReturnValue({ from });
     const repo = new MigrationImportRepository({ select } as never);
@@ -246,9 +236,13 @@ describe('MigrationImportRepository', () => {
     const result = await repo.fetchTargetBookFiles(bookIds);
 
     expect(where).toHaveBeenCalledTimes(3);
-    expect(result.get(1)).toEqual([{ id: 11, hash: 'h1', absolutePath: '/books/1.epub', format: 'epub' }]);
-    expect(result.get(501)).toEqual([{ id: 5011, hash: 'h501', absolutePath: '/books/501.epub', format: 'epub' }]);
-    expect(result.get(1001)).toEqual([{ id: 10011, hash: 'h1001', absolutePath: '/books/1001.epub', format: 'epub' }]);
+    expect(result.get(1)).toEqual([{ id: 11, hash: 'h1', absolutePath: '/books/1.epub', format: 'epub', sortOrder: 0, durationSeconds: null }]);
+    expect(result.get(501)).toEqual([
+      { id: 5011, hash: 'h501', absolutePath: '/books/501.epub', format: 'epub', sortOrder: 0, durationSeconds: null },
+    ]);
+    expect(result.get(1001)).toEqual([
+      { id: 10011, hash: 'h1001', absolutePath: '/books/1001.epub', format: 'epub', sortOrder: 0, durationSeconds: null },
+    ]);
   });
 
   it('returns library-id map for book ids and skips query for empty input', async () => {
@@ -541,7 +535,7 @@ describe('MigrationImportRepository', () => {
     const insert = vi.fn().mockReturnValue({ values });
     const repo = new MigrationImportRepository({ insert } as never);
 
-    await repo.batchUpsertUserBookStatuses([]);
+    await repo.batchMergeUserBookStatuses([]);
     await repo.batchUpsertReadingProgress([]);
     await repo.batchUpsertAudiobookProgress([]);
     await repo.batchInsertBookmarks([]);
@@ -549,7 +543,9 @@ describe('MigrationImportRepository', () => {
     await repo.batchInsertCollectionBooks([]);
     expect(insert).not.toHaveBeenCalled();
 
-    await repo.batchUpsertUserBookStatuses([{ userId: 1, bookId: 2, status: 'read', source: 'manual', updatedAt: new Date() } as never]);
+    await repo.batchMergeUserBookStatuses([
+      { userId: 1, bookId: 2, status: 'read', source: 'manual', sourceUpdatedAt: new Date('2026-01-02T00:00:00.000Z') },
+    ]);
     await repo.batchUpsertReadingProgress([{ userId: 1, bookFileId: 10, percentage: 50, updatedAt: new Date() } as never]);
     await repo.batchUpsertAudiobookProgress([
       { userId: 1, bookId: 2, percentage: 25, currentFileId: 10, positionSeconds: 0, updatedAt: new Date() } as never,
@@ -565,5 +561,23 @@ describe('MigrationImportRepository', () => {
     expect(insert).toHaveBeenCalledWith(schema.annotations);
     expect(insert).toHaveBeenCalledWith(schema.annotationPositions);
     expect(insert).toHaveBeenCalledWith(schema.collectionBooks);
+    expect(onConflictDoUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        target: [schema.userBookStatus.userId, schema.userBookStatus.bookId],
+        setWhere: expect.anything(),
+      }),
+    );
+  });
+
+  it('inserts statuses without source timestamps but does not update conflicts', async () => {
+    const onConflictDoNothing = vi.fn().mockResolvedValue(undefined);
+    const values = vi.fn().mockReturnValue({ onConflictDoNothing });
+    const insert = vi.fn().mockReturnValue({ values });
+    const repo = new MigrationImportRepository({ insert } as never);
+
+    await repo.batchMergeUserBookStatuses([{ userId: 1, bookId: 2, status: 'reading', source: 'manual', sourceUpdatedAt: null }]);
+
+    expect(values).toHaveBeenCalledWith([expect.objectContaining({ userId: 1, bookId: 2, status: 'reading', updatedAt: expect.any(Date) })]);
+    expect(onConflictDoNothing).toHaveBeenCalledOnce();
   });
 });

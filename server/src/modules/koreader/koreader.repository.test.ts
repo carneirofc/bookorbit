@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createCapturingDb } from '../../common/test-utils/capture-sql-db';
 import { sqlChunkText } from '../../common/test-utils/sql-chunk-text';
 import { KoreaderRepository } from './koreader.repository';
 
@@ -19,8 +20,10 @@ function makeQueryChain(result: unknown) {
 }
 
 function makeDb() {
+  const select = vi.fn();
   return {
-    select: vi.fn(),
+    select,
+    selectDistinctOn: vi.fn((_on, fields) => select(fields)),
     insert: vi.fn(),
     update: vi.fn(),
     delete: vi.fn(),
@@ -42,6 +45,49 @@ describe('KoreaderRepository', () => {
   beforeEach(() => {
     db = makeDb();
     repo = new KoreaderRepository(db as never);
+  });
+
+  describe('progress resets', () => {
+    it('returns the reset timestamp when one is outstanding', async () => {
+      const resetAt = new Date('2026-02-02T12:00:00.000Z');
+      db.select.mockReturnValue(makeQueryChain([{ resetAt }]));
+
+      await expect(repo.getProgressReset(10, 7)).resolves.toEqual(resetAt);
+    });
+
+    it('returns null when no reset is outstanding', async () => {
+      db.select.mockReturnValue(makeQueryChain([]));
+
+      await expect(repo.getProgressReset(10, 7)).resolves.toBeNull();
+    });
+
+    it('records convergence per device rather than retiring the marker', async () => {
+      const onConflictDoNothing = vi.fn().mockResolvedValue(undefined);
+      const values = vi.fn().mockReturnValue({ onConflictDoNothing });
+      db.insert.mockReturnValue({ values });
+
+      await repo.recordResetConvergence(10, 7, 'device-1');
+
+      // One device taking the reset says nothing about the others, so the marker stays.
+      expect(values).toHaveBeenCalledWith({ userId: 7, bookFileId: 10, deviceId: 'device-1' });
+      expect(db.delete).not.toHaveBeenCalled();
+    });
+
+    it('reads back the devices that have taken the reset', async () => {
+      db.select.mockReturnValue(makeQueryChain([{ deviceId: 'device-1' }, { deviceId: 'device-2' }]));
+
+      await expect(repo.getConvergedResetDeviceIds(10, 7)).resolves.toEqual(new Set(['device-1', 'device-2']));
+    });
+
+    it('retires a marker when the outcome is settled for every device', async () => {
+      const where = vi.fn().mockResolvedValue(undefined);
+      db.delete.mockReturnValue({ where });
+
+      await repo.clearProgressReset(10, 7);
+
+      expect(db.delete).toHaveBeenCalledTimes(1);
+      expect(where).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('resolveBookFileByHash', () => {
@@ -70,6 +116,60 @@ describe('KoreaderRepository', () => {
       expect(db.select).toHaveBeenCalledTimes(1);
     });
 
+    it('returns the oldest file when current hash matches stay within one book', async () => {
+      const firstFile = { id: 10, bookId: 20, libraryId: 1, format: 'epub' };
+      const secondFile = { id: 11, bookId: 20, libraryId: 1, format: 'epub' };
+      db.select.mockReturnValue(makeQueryChain([firstFile, secondFile]));
+
+      await expect(repo.resolveBookFileByHash('abc123', null)).resolves.toEqual(firstFile);
+      expect(db.select).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns null when a current hash matches different books', async () => {
+      db.select.mockReturnValue(
+        makeQueryChain([
+          { id: 10, bookId: 20, libraryId: 1, format: 'epub' },
+          { id: 11, bookId: 21, libraryId: 1, format: 'epub' },
+        ]),
+      );
+
+      await expect(repo.resolveBookFileByHash('abc123', null)).resolves.toBeNull();
+      expect(db.select).toHaveBeenCalledTimes(1);
+    });
+
+    it('uses a user-scoped manual link when a current hash matches different books', async () => {
+      const manualFile = { id: 11, bookId: 21, libraryId: 1, format: 'epub' };
+      db.select
+        .mockReturnValueOnce(
+          makeQueryChain([
+            { id: 10, bookId: 20, libraryId: 1, format: 'epub' },
+            { id: 11, bookId: 21, libraryId: 1, format: 'epub' },
+          ]),
+        )
+        .mockReturnValueOnce(makeQueryChain([manualFile]));
+
+      await expect(repo.resolveBookFileByHash('abc123', null, 7)).resolves.toEqual(manualFile);
+      expect(db.select).toHaveBeenCalledTimes(2);
+    });
+
+    it('prefers a user-scoped link when a current hash matches multiple files in one book', async () => {
+      const linkedFile = { id: 11, bookId: 20, libraryId: 1, format: 'epub' };
+      db.select
+        .mockReturnValueOnce(makeQueryChain([{ id: 10, bookId: 20, libraryId: 1, format: 'epub', matchingFileCount: 2 }]))
+        .mockReturnValueOnce(makeQueryChain([linkedFile]));
+
+      await expect(repo.resolveBookFileByHash('abc123', null, 7)).resolves.toEqual(linkedFile);
+      expect(db.select).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps the deterministic first file when a same-book duplicate has no user-scoped link', async () => {
+      const firstFile = { id: 10, bookId: 20, libraryId: 1, format: 'epub', matchingFileCount: 2 };
+      db.select.mockReturnValueOnce(makeQueryChain([firstFile])).mockReturnValueOnce(makeQueryChain([]));
+
+      await expect(repo.resolveBookFileByHash('abc123', null, 7)).resolves.toEqual({ id: 10, bookId: 20, libraryId: 1, format: 'epub' });
+      expect(db.select).toHaveBeenCalledTimes(2);
+    });
+
     it('falls back to hash history when current hash lookup returns nothing', async () => {
       const file = { id: 10, bookId: 20, libraryId: 1, format: 'pdf' };
       db.select.mockReturnValueOnce(makeQueryChain([])).mockReturnValueOnce(makeQueryChain([file]));
@@ -77,6 +177,18 @@ describe('KoreaderRepository', () => {
       const result = await repo.resolveBookFileByHash('oldhash', null);
 
       expect(result).toEqual(file);
+      expect(db.select).toHaveBeenCalledTimes(2);
+    });
+
+    it('returns null when a historical hash matches different books', async () => {
+      db.select.mockReturnValueOnce(makeQueryChain([])).mockReturnValueOnce(
+        makeQueryChain([
+          { id: 10, bookId: 20, libraryId: 1, format: 'epub' },
+          { id: 11, bookId: 21, libraryId: 1, format: 'epub' },
+        ]),
+      );
+
+      await expect(repo.resolveBookFileByHash('oldhash', null)).resolves.toBeNull();
       expect(db.select).toHaveBeenCalledTimes(2);
     });
 
@@ -154,6 +266,96 @@ describe('KoreaderRepository', () => {
 
       expect(result.get('current')).toEqual({ bookFileId: 11, bookId: 21, libraryId: 31, format: 'pdf' });
       expect(db.select).toHaveBeenCalledTimes(1);
+    });
+
+    it('resolves duplicate current hash rows when they belong to one book', async () => {
+      db.select.mockReturnValueOnce(
+        makeQueryChain([
+          { hash: 'current', bookFileId: 11, bookId: 21, libraryId: 31, format: 'epub' },
+          { hash: 'current', bookFileId: 12, bookId: 21, libraryId: 31, format: 'epub' },
+        ]),
+      );
+
+      const result = await repo.resolveBookFilesByHashes(['current'], null);
+
+      expect(result.get('current')).toEqual({ bookFileId: 11, bookId: 21, libraryId: 31, format: 'epub' });
+      expect(db.select).toHaveBeenCalledTimes(1);
+    });
+
+    it('omits a current hash that matches different books', async () => {
+      db.select.mockReturnValueOnce(
+        makeQueryChain([
+          { hash: 'current', bookFileId: 11, bookId: 21, libraryId: 31, format: 'epub' },
+          { hash: 'current', bookFileId: 12, bookId: 22, libraryId: 31, format: 'epub' },
+        ]),
+      );
+
+      const result = await repo.resolveBookFilesByHashes(['current'], null);
+
+      expect(result.has('current')).toBe(false);
+      expect(db.select).toHaveBeenCalledTimes(1);
+    });
+
+    it('uses a user-scoped manual link for an ambiguous current hash', async () => {
+      db.select
+        .mockReturnValueOnce(
+          makeQueryChain([
+            { hash: 'current', bookFileId: 11, bookId: 21, libraryId: 31, format: 'epub' },
+            { hash: 'current', bookFileId: 12, bookId: 22, libraryId: 31, format: 'epub' },
+          ]),
+        )
+        .mockReturnValueOnce(makeQueryChain([{ hash: 'current', bookFileId: 12, bookId: 22, libraryId: 31, format: 'epub' }]));
+
+      const result = await repo.resolveBookFilesByHashes(['current'], null, 7);
+
+      expect(result.get('current')).toEqual({ bookFileId: 12, bookId: 22, libraryId: 31, format: 'epub' });
+      expect(db.select).toHaveBeenCalledTimes(2);
+    });
+
+    it('prefers a user-scoped link for duplicate current hashes within one book', async () => {
+      db.select
+        .mockReturnValueOnce(
+          makeQueryChain([
+            { hash: 'current', bookFileId: 11, bookId: 21, libraryId: 31, format: 'epub' },
+            { hash: 'current', bookFileId: 12, bookId: 21, libraryId: 31, format: 'epub' },
+          ]),
+        )
+        .mockReturnValueOnce(makeQueryChain([{ hash: 'current', bookFileId: 12, bookId: 21, libraryId: 31, format: 'epub' }]));
+
+      const result = await repo.resolveBookFilesByHashes(['current'], null, 7);
+
+      expect(result.get('current')).toEqual({ bookFileId: 12, bookId: 21, libraryId: 31, format: 'epub' });
+      expect(db.select).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps the deterministic first file when a same-book duplicate has no user-scoped bulk link', async () => {
+      db.select
+        .mockReturnValueOnce(
+          makeQueryChain([
+            { hash: 'current', bookFileId: 11, bookId: 21, libraryId: 31, format: 'epub' },
+            { hash: 'current', bookFileId: 12, bookId: 21, libraryId: 31, format: 'epub' },
+          ]),
+        )
+        .mockReturnValueOnce(makeQueryChain([]));
+
+      const result = await repo.resolveBookFilesByHashes(['current'], null, 7);
+
+      expect(result.get('current')).toEqual({ bookFileId: 11, bookId: 21, libraryId: 31, format: 'epub' });
+      expect(db.select).toHaveBeenCalledTimes(2);
+    });
+
+    it('omits a historical hash that matches different books', async () => {
+      db.select.mockReturnValueOnce(makeQueryChain([])).mockReturnValueOnce(
+        makeQueryChain([
+          { hash: 'old', bookFileId: 11, bookId: 21, libraryId: 31, format: 'epub' },
+          { hash: 'old', bookFileId: 12, bookId: 22, libraryId: 31, format: 'epub' },
+        ]),
+      );
+
+      const result = await repo.resolveBookFilesByHashes(['old'], null);
+
+      expect(result.has('old')).toBe(false);
+      expect(db.select).toHaveBeenCalledTimes(2);
     });
 
     it('resolves remaining hashes from user-scoped manual links', async () => {
@@ -623,18 +825,19 @@ describe('KoreaderRepository', () => {
       await expect(repo.getAllDeviceProgress(10, 42)).resolves.toBe(rows);
     });
 
-    it('maps device list rows from raw SQL results', async () => {
+    it('maps device list rows from raw SQL results, carrying the retirement marker', async () => {
       const lastSync = new Date('2026-01-01T00:00:00.000Z');
+      const retiredAt = new Date('2026-02-01T00:00:00.000Z');
       db.execute.mockResolvedValue({
         rows: [
-          { device: 'Kobo', device_id: 'device-1', last_sync_at: lastSync, last_book_title: 'Book' },
-          { device: 'Phone', device_id: 'device-2', last_sync_at: lastSync, last_book_title: null },
+          { device: 'Kobo', device_id: 'device-1', last_sync_at: lastSync, last_book_title: 'Book', retired_at: null },
+          { device: 'Phone', device_id: 'device-2', last_sync_at: lastSync, last_book_title: null, retired_at: retiredAt },
         ],
       });
 
       await expect(repo.getDevicesList(42)).resolves.toEqual([
-        { device: 'Kobo', deviceId: 'device-1', lastSyncAt: lastSync, lastBookTitle: 'Book' },
-        { device: 'Phone', deviceId: 'device-2', lastSyncAt: lastSync, lastBookTitle: null },
+        { device: 'Kobo', deviceId: 'device-1', lastSyncAt: lastSync, lastBookTitle: 'Book', retiredAt: null },
+        { device: 'Phone', deviceId: 'device-2', lastSyncAt: lastSync, lastBookTitle: null, retiredAt: retiredAt },
       ]);
     });
 
@@ -662,8 +865,9 @@ describe('KoreaderRepository', () => {
       await expect(repo.removeDevice(42, 'device-1')).resolves.toBe(6);
 
       expect(db.transaction).toHaveBeenCalledTimes(1);
-      expect(tx.delete).toHaveBeenCalledTimes(6);
-      expect(txDeleteBuilder.where).toHaveBeenCalledTimes(6);
+      // Six data deletes plus the retirement marker, which is cleared without being counted.
+      expect(tx.delete).toHaveBeenCalledTimes(7);
+      expect(txDeleteBuilder.where).toHaveBeenCalledTimes(7);
       expect(returning).toHaveBeenCalledTimes(6);
       expect(tx.select).toHaveBeenCalledTimes(1);
     });
@@ -682,7 +886,7 @@ describe('KoreaderRepository', () => {
 
       await expect(repo.removeDevice(42, 'device-1')).resolves.toBe(1);
 
-      expect(tx.delete).toHaveBeenCalledTimes(5);
+      expect(tx.delete).toHaveBeenCalledTimes(6);
       expect(tx.select).not.toHaveBeenCalled();
     });
 
@@ -694,6 +898,49 @@ describe('KoreaderRepository', () => {
 
       await expect(repo.removeDevice(42, 'unknown-device')).resolves.toBe(0);
       expect(tx.select).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('device retirement', () => {
+    it('retireDevice inserts a marker and tolerates one that already exists', async () => {
+      const onConflictDoNothing = vi.fn().mockResolvedValue(undefined);
+      const values = vi.fn().mockReturnValue({ onConflictDoNothing });
+      db.insert.mockReturnValue({ values });
+
+      await repo.retireDevice(42, 'device-1');
+
+      expect(values).toHaveBeenCalledWith({ userId: 42, deviceId: 'device-1' });
+      expect(onConflictDoNothing).toHaveBeenCalledTimes(1);
+    });
+
+    it('restoreDevice deletes the marker for the given user and device', async () => {
+      const where = vi.fn().mockResolvedValue(undefined);
+      db.delete.mockReturnValue({ where });
+
+      await repo.restoreDevice(42, 'device-1');
+
+      expect(db.delete).toHaveBeenCalledTimes(1);
+      expect(where).toHaveBeenCalledTimes(1);
+    });
+
+    it('listRetiredDeviceIds returns a device-to-timestamp map', async () => {
+      const retiredAt = new Date('2026-02-01T00:00:00.000Z');
+      db.select.mockReturnValue(makeQueryChain([{ deviceId: 'device-1', retiredAt }]));
+
+      await expect(repo.listRetiredDeviceIds(42)).resolves.toEqual(new Map([['device-1', retiredAt]]));
+    });
+
+    it('deviceExists reports a device known to any device-keyed table', async () => {
+      db.execute.mockResolvedValueOnce({ rows: [{ device_exists: true }] }).mockResolvedValueOnce({ rows: [{ device_exists: false }] });
+
+      await expect(repo.deviceExists(42, 'device-1')).resolves.toBe(true);
+      await expect(repo.deviceExists(42, 'device-2')).resolves.toBe(false);
+    });
+
+    it('deviceExists treats an empty result as unknown rather than throwing', async () => {
+      db.execute.mockResolvedValue({ rows: [] });
+
+      await expect(repo.deviceExists(42, 'device-1')).resolves.toBe(false);
     });
   });
 
@@ -843,6 +1090,53 @@ describe('KoreaderRepository', () => {
       await repo.upsertReadingProgress({ bookFileId: 44, userId: 12, percentage: 30, pageNumber: null });
 
       expect(conflictSet(onConflictDoUpdate)).toEqual(expect.objectContaining({ pageNumber: null }));
+    });
+
+    // Regression: sorting by "Last Read" ordered on reading_progress.updated_at, which this path
+    // freezes on purpose so it stays a "last local write" marker. A KOReader-only reader therefore
+    // kept the timestamp of their first ever sync forever and the sort looked random.
+    describe('last-read timestamps in the compiled SQL', () => {
+      async function compileUpsert() {
+        const { db: capturingDb, queries } = createCapturingDb();
+        const capturingRepo = new KoreaderRepository(capturingDb as never);
+
+        await capturingRepo.upsertReadingProgress({ bookFileId: 44, userId: 12, percentage: 41.25 });
+
+        expect(queries).toHaveLength(1);
+        return queries[0]!;
+      }
+
+      function stampedLastReadAt({ sql: text, params }: { sql: string; params: unknown[] }) {
+        const match = /"last_read_at" = \$(\d+)/.exec(text);
+        expect(match).not.toBeNull();
+        return new Date(String(params[Number(match![1]) - 1])).getTime();
+      }
+
+      it('freezes updated_at but advances last_read_at on conflict', async () => {
+        const query = await compileUpsert();
+
+        expect(query.sql).toContain('"updated_at" = "reading_progress"."updated_at"');
+        expect(query.sql).toMatch(/"last_read_at" = \$\d+/);
+        expect(query.sql).not.toMatch(/"last_read_at" = "reading_progress"\."last_read_at"/);
+        expect(stampedLastReadAt(query)).not.toBeNaN();
+      });
+
+      it('stamps last_read_at close to now rather than reusing a stored value', async () => {
+        const before = Date.now();
+        const query = await compileUpsert();
+        const after = Date.now();
+
+        const stamped = stampedLastReadAt(query);
+        expect(stamped).toBeGreaterThanOrEqual(before);
+        expect(stamped).toBeLessThanOrEqual(after);
+      });
+
+      it('lets the insert branch default last_read_at instead of leaving it unset', async () => {
+        const { sql: text } = await compileUpsert();
+
+        expect(text).toContain('"last_read_at"');
+        expect(text.indexOf('"last_read_at"')).toBeLessThan(text.indexOf('on conflict'));
+      });
     });
   });
 

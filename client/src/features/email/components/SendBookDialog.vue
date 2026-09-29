@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { Button } from '@/components/ui/button'
 import { ref, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { toast } from 'vue-sonner'
@@ -8,21 +9,24 @@ import { useEmailRecipients } from '../composables/useEmailRecipients'
 import { useEmailGroups } from '../composables/useEmailGroups'
 import { useEmailTemplates } from '../composables/useEmailTemplates'
 import { useEmailSend } from '../composables/useEmailSend'
-import type { BookSelectionPayload } from '@bookorbit/types'
-
-interface BookFile {
-  id: number
-  format: string | null
-  role: string
-}
+import { isAudioFormat, type BookFileRef, type BookSelectionPayload } from '@bookorbit/types'
+import { fileFormatKey, formatKeyName, rankedContentFiles } from '@/features/book/lib/book-formats'
 
 const props = defineProps<{
   open: boolean
   selectionPayload: BookSelectionPayload
   selectedCount?: number
-  bookFiles?: BookFile[]
+  bookFiles?: BookFileRef[]
   bookTitle?: string
 }>()
+
+/** Editions an email can carry: content files in edition order, without audiobook tracks. */
+const sendableFiles = computed(() => rankedContentFiles(props.bookFiles ?? []).filter((file) => !isAudioFormat(file.format!)))
+
+function sendableFileLabel(file: BookFileRef): string {
+  const key = fileFormatKey(file)
+  return key ? formatKeyName(key) : t('email.send.unknownFormat')
+}
 
 const emit = defineEmits<{
   'update:open': [value: boolean]
@@ -117,7 +121,7 @@ function close() {
   <Teleport to="body">
     <Transition name="dialog-fade">
       <div v-if="open" class="fixed inset-0 z-50 flex items-center justify-center p-4">
-        <div class="absolute inset-0 bg-black/50 backdrop-blur-[1px]" @click="close()" />
+        <div class="absolute inset-0 bg-black/50 backdrop-blur-[1px]" @click="close" />
 
         <div class="relative w-full max-w-md bg-background border border-border rounded-lg shadow-2xl overflow-hidden">
           <!-- Header -->
@@ -129,9 +133,9 @@ function close() {
                 {{ t('email.send.bookCount', { count: selectionCount() }) }}
               </p>
             </div>
-            <button class="text-muted-foreground hover:text-foreground transition-colors" @click="close()">
+            <Button type="button" variant="ghost" size="icon-sm" :aria-label="t('common.close')" @click="close">
               <X :size="16" />
-            </button>
+            </Button>
           </div>
 
           <!-- Body -->
@@ -198,16 +202,15 @@ function close() {
               </summary>
               <div class="mt-3 space-y-3">
                 <!-- File picker -->
-                <div v-if="bookFiles && bookFiles.length > 1">
+                <div v-if="sendableFiles.length > 1">
                   <label class="block text-xs font-medium text-muted-foreground mb-1.5">{{ t('email.send.fileFormat') }}</label>
                   <select
                     v-model="selectedFileId"
                     class="w-full h-9 px-3 text-sm border border-border rounded-md bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-primary"
                   >
                     <option :value="null">{{ t('email.send.autoRecipientPreference') }}</option>
-                    <option v-for="f in bookFiles" :key="f.id" :value="f.id">
-                      {{ f.format?.toUpperCase() ?? t('email.send.unknownFormat')
-                      }}{{ f.role === 'primary' ? ` ${t('email.send.primarySuffix')}` : '' }}
+                    <option v-for="f in sendableFiles" :key="f.id" :value="f.id">
+                      {{ sendableFileLabel(f) }}{{ f.role === 'primary' ? ` ${t('email.send.primarySuffix')}` : '' }}
                     </option>
                   </select>
                 </div>
@@ -241,21 +244,14 @@ function close() {
 
           <!-- Footer -->
           <div class="flex items-center justify-end gap-2 px-5 py-4 border-t border-border">
-            <button
-              class="px-4 py-2 text-xs font-medium rounded-md border border-border bg-background text-foreground hover:bg-muted transition-colors"
-              @click="close()"
-            >
+            <Button type="button" variant="outline" size="sm" @click="close">
               {{ t('common.cancel') }}
-            </button>
-            <button
-              class="flex items-center gap-2 px-4 py-2 text-xs font-medium rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
-              :disabled="sending || !hasSelection"
-              @click="send()"
-            >
+            </Button>
+            <Button type="button" size="sm" :disabled="sending || !hasSelection" @click="send">
               <Loader2 v-if="sending" :size="12" class="animate-spin" />
               <Send v-else :size="12" />
               {{ sending ? t('email.send.sending') : t('email.send.send') }}
-            </button>
+            </Button>
           </div>
         </div>
       </div>

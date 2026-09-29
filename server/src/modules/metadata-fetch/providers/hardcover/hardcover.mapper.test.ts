@@ -10,6 +10,7 @@ const baseDocument: HardcoverSearchDocument = {
   subtitle: '10th Anniversary Edition',
   description: 'A story about a wizard.',
   author_names: ['Patrick Rothfuss'],
+  contributions: [{ author: { id: 1, name: 'Patrick Rothfuss' }, contribution: 'Author' }],
   isbns: ['9780756404079', '0756404079'],
   pages: 662,
   release_year: 2007,
@@ -28,6 +29,12 @@ const baseBook: HardcoverBookWithEditions = {
   subtitle: 'Book Subtitle',
   description: 'A story about a wizard.',
   cached_contributors: [{ author: { id: 1, name: 'Patrick Rothfuss' }, contribution: null }],
+  cached_tags: {
+    Genre: [
+      { tag: 'Fantasy', count: 10 },
+      { tag: 'Fiction', count: 8 },
+    ],
+  },
   featured_book_series: { series: { name: 'The Kingkiller Chronicle', books_count: 3 }, position: 1 },
   rating: 4.42,
   ratings_count: 12345,
@@ -71,8 +78,9 @@ describe('mapSearchDocument', () => {
       isbn10: '0756404079',
       genres: ['Fantasy', 'Fiction'],
       seriesName: 'The Kingkiller Chronicle',
-      seriesIndex: 1,
+      seriesIndex: '1',
       coverUrl: 'https://assets.hardcover.app/cover.jpg',
+      coverShape: 'unknown',
       sourceUrl: 'https://hardcover.app/books/the-name-of-the-wind',
       communityRating: 4.42,
       communityRatingCount: 12345,
@@ -134,9 +142,24 @@ describe('mapSearchDocument', () => {
     expect(result.seriesIndex).toBeUndefined();
   });
 
-  it('returns empty authors array when author_names is absent', () => {
-    const doc: HardcoverSearchDocument = { ...baseDocument, author_names: undefined };
-    expect(mapSearchDocument(doc).authors).toEqual([]);
+  it('omits authors when contribution data is absent', () => {
+    const doc: HardcoverSearchDocument = { ...baseDocument, contributions: undefined };
+    expect(mapSearchDocument(doc).authors).toBeUndefined();
+  });
+
+  it('maps only author contributions from search documents', () => {
+    const doc: HardcoverSearchDocument = {
+      ...baseDocument,
+      author_names: ['Primary Author', 'Second Author', 'Audio Narrator', 'Book Translator'],
+      contributions: [
+        { author: { id: 1, name: 'Primary Author' }, contribution: null },
+        { author: { id: 2, name: 'Second Author' }, contribution: ' AUTHOR ' },
+        { author: { id: 3, name: 'Audio Narrator' }, contribution: 'Narrator' },
+        { author: { id: 4, name: 'Book Translator' }, contribution: 'Translator' },
+      ],
+    };
+
+    expect(mapSearchDocument(doc).authors).toEqual(['Primary Author', 'Second Author']);
   });
 
   it('returns undefined coverUrl when image is absent', () => {
@@ -273,12 +296,14 @@ describe('mapBookWithEditions', () => {
       publishedYear: 2007,
       isbn10: '0756404079',
       isbn13: '9780756404079',
+      genres: ['Fantasy', 'Fiction'],
       seriesName: 'The Kingkiller Chronicle',
-      seriesIndex: 1,
+      seriesIndex: '1',
       seriesTotalBooks: 3,
       communityRating: 4.42,
       communityRatingCount: 12345,
       coverUrl: 'https://assets.hardcover.app/edition-cover.jpg',
+      coverShape: 'portrait',
       sourceUrl: 'https://hardcover.app/books/the-name-of-the-wind',
     });
   });
@@ -340,6 +365,42 @@ describe('mapBookWithEditions', () => {
     expect(results[1].hardcoverEditionId).toBe('1002');
   });
 
+  describe('genres', () => {
+    it('maps the Genre cached-tag bucket to every edition candidate', () => {
+      const book: HardcoverBookWithEditions = {
+        ...baseBook,
+        editions: [
+          { ...baseBook.editions![0], id: 1001 },
+          { ...baseBook.editions![0], id: 1002 },
+        ],
+      };
+
+      expect(mapBookWithEditions(book).map((candidate) => candidate.genres)).toEqual([
+        ['Fantasy', 'Fiction'],
+        ['Fantasy', 'Fiction'],
+      ]);
+    });
+
+    it('trims, de-duplicates, and ignores malformed cached tags', () => {
+      const book: HardcoverBookWithEditions = {
+        ...baseBook,
+        cached_tags: {
+          Genre: [null, 'Fantasy', {}, { tag: null }, { tag: 42 }, { tag: '  ' }, { tag: 'Fantasy' }, { tag: ' fantasy ' }, { tag: 'Sci-Fi' }],
+        },
+      };
+
+      expect(mapBookWithEditions(book)[0].genres).toEqual(['Fantasy', 'Sci-Fi']);
+    });
+
+    it.each([undefined, null, {}, { Genre: null }, { Genre: { tag: 'Fantasy' } }, { Genre: [] }])(
+      'omits genres for an absent or invalid Genre bucket',
+      (cachedTags) => {
+        const book: HardcoverBookWithEditions = { ...baseBook, cached_tags: cachedTags };
+        expect(mapBookWithEditions(book)[0].genres).toBeUndefined();
+      },
+    );
+  });
+
   it('uses edition authors when present', () => {
     const book: HardcoverBookWithEditions = {
       ...baseBook,
@@ -361,6 +422,59 @@ describe('mapBookWithEditions', () => {
       editions: [{ ...baseBook.editions![0], cached_contributors: [] }],
     };
     expect(mapBookWithEditions(book)[0].authors).toEqual(['Book Author']);
+  });
+
+  it('falls back to book authors when the edition has only non-author contributors', () => {
+    const book: HardcoverBookWithEditions = {
+      ...baseBook,
+      cached_contributors: [{ author: { id: 2, name: 'Book Author' }, contribution: 'Author' }],
+      editions: [
+        {
+          ...baseBook.editions![0],
+          cached_contributors: [
+            { author: { id: 3, name: 'Audio Narrator' }, contribution: 'Narrator' },
+            { author: { id: 4, name: 'Book Translator' }, contribution: 'Translator' },
+          ],
+        },
+      ],
+    };
+
+    expect(mapBookWithEditions(book)[0].authors).toEqual(['Book Author']);
+  });
+
+  it('maps only author contributions from an edition', () => {
+    const book: HardcoverBookWithEditions = {
+      ...baseBook,
+      editions: [
+        {
+          ...baseBook.editions![0],
+          cached_contributors: [
+            { author: { id: 1, name: 'Primary Author' }, contribution: null },
+            { author: { id: 2, name: 'Second Author' }, contribution: 'author' },
+            { author: { id: 3, name: 'Audio Narrator' }, contribution: 'Narrator' },
+            { author: { id: 4, name: 'Book Translator' }, contribution: 'Translator' },
+            { author: { id: 5, name: 'Cover Artist' }, contribution: 'Cover Artist' },
+          ],
+        },
+      ],
+    };
+
+    expect(mapBookWithEditions(book)[0].authors).toEqual(['Primary Author', 'Second Author']);
+  });
+
+  it('omits authors when neither the edition nor the book has an author contribution', () => {
+    const book: HardcoverBookWithEditions = {
+      ...baseBook,
+      cached_contributors: [{ author: { id: 2, name: 'Book Translator' }, contribution: 'Translator' }],
+      editions: [
+        {
+          ...baseBook.editions![0],
+          cached_contributors: [{ author: { id: 3, name: 'Audio Narrator' }, contribution: 'Narrator' }],
+        },
+      ],
+    };
+
+    expect(mapBookWithEditions(book)[0].authors).toBeUndefined();
   });
 
   it('falls back to book title when edition title is absent', () => {
@@ -497,6 +611,54 @@ describe('mapBookWithEditions', () => {
     expect(results[0].pageCount).toBe(700);
     expect(results[1].isbn13).toBe('AUDIO');
     expect(results[1].pageCount).toBeUndefined();
+  });
+
+  it('ranks audiobook editions first when asked for the audio medium, with square art', () => {
+    const book: HardcoverBookWithEditions = {
+      ...baseBook,
+      editions: [
+        { ...baseBook.editions![0], id: 2, isbn_13: 'PRINT', reading_format_id: 1, pages: 700 },
+        {
+          ...baseBook.editions![0],
+          id: 1,
+          isbn_13: 'AUDIO',
+          reading_format_id: 2,
+          pages: undefined,
+          image: { url: 'https://assets.hardcover.app/audio.jpg', width: 1000, height: 1000 },
+        },
+      ],
+    };
+    const results = mapBookWithEditions(book, 'audio');
+    expect(results.map((result) => result.isbn13)).toEqual(['AUDIO', 'PRINT']);
+    expect(results[0]).toMatchObject({
+      coverUrl: 'https://assets.hardcover.app/audio.jpg',
+      coverShape: 'square',
+      coverWidth: 1000,
+      coverHeight: 1000,
+    });
+    expect(results[1].coverShape).toBe('portrait');
+  });
+
+  it('reads the shape from the stated size, and does not assume an audiobook edition is square without one', () => {
+    const book: HardcoverBookWithEditions = {
+      ...baseBook,
+      editions: [
+        { ...baseBook.editions![0], id: 1, reading_format_id: 2, image: { url: 'https://assets.hardcover.app/cd.jpg' } },
+        { ...baseBook.editions![0], id: 2, reading_format_id: 2, image: { url: 'https://assets.hardcover.app/jacket.jpg', width: 400, height: 600 } },
+      ],
+    };
+    const [unsized, jacket] = mapBookWithEditions(book, 'audio');
+    expect(unsized!.coverShape).toBe('unknown');
+    expect(jacket).toMatchObject({ coverShape: 'portrait', coverWidth: 400, coverHeight: 600 });
+  });
+
+  it('calls a cover borrowed from the book unknown, since it may belong to any edition', () => {
+    const book: HardcoverBookWithEditions = {
+      ...baseBook,
+      image: { url: 'https://assets.hardcover.app/book.jpg' },
+      editions: [{ ...baseBook.editions![0], reading_format_id: 2, image: undefined }],
+    };
+    expect(mapBookWithEditions(book, 'audio')[0]).toMatchObject({ coverUrl: 'https://assets.hardcover.app/book.jpg', coverShape: 'unknown' });
   });
 
   it('ranks editions with a page count ahead of those without when format is equal', () => {

@@ -8,10 +8,16 @@ import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { resolveTimeZone } from '../../common/utils/timezone.utils';
 import { BookService } from '../book/book.service';
 import { AchievementEventsService, ACHIEVEMENT_EVENT_READING_SESSION_SAVED } from '../achievement/achievement-events.service';
+import { UserStatisticsService } from '../user-statistics/user-statistics.service';
 import type { CreateManualReadingSessionDto } from './dto/create-manual-reading-session.dto';
 import type { ListBookReadingSessionsDto } from './dto/list-book-reading-sessions.dto';
 import type { SaveReadingSessionDto } from './dto/save-reading-session.dto';
-import { ReadingSessionRepository } from './reading-session.repository';
+import {
+  ReadingSessionRepository,
+  type ReadingSessionSyncOptions,
+  type RecordCumulativeReadingSessionParams,
+  type RecordCumulativeReadingSessionResult,
+} from './reading-session.repository';
 
 @Injectable()
 export class ReadingSessionService {
@@ -21,13 +27,20 @@ export class ReadingSessionService {
     private readonly repo: ReadingSessionRepository,
     private readonly bookService: BookService,
     private readonly achievementEvents: AchievementEventsService,
+    private readonly userStatistics: UserStatisticsService,
   ) {}
 
   private resolveUserTimeZone(user: RequestUser): string {
     return resolveTimeZone((user.settings as { timezone?: unknown } | undefined)?.timezone, 'UTC');
   }
 
-  async save(fileId: number, dto: SaveReadingSessionDto, user: RequestUser, source: ReadingSessionSource = 'web'): Promise<void> {
+  async save(
+    fileId: number,
+    dto: SaveReadingSessionDto,
+    user: RequestUser,
+    source: ReadingSessionSource = 'web',
+    sync?: ReadingSessionSyncOptions,
+  ): Promise<void> {
     const event = 'reading_session.save';
     const startedAtMs = Date.now();
     this.logger.log(
@@ -52,7 +65,7 @@ export class ReadingSessionService {
       // span to prevent the client from reporting more time than physically elapsed.
       const durationSeconds = Math.min(dto.durationSeconds, wallClockSeconds);
 
-      const result = await this.repo.saveSession(
+      const saveArgs = [
         user.id,
         fileId,
         dto.sessionId,
@@ -63,18 +76,21 @@ export class ReadingSessionService {
         dto.endProgress ?? null,
         source,
         this.resolveUserTimeZone(user),
-      );
+      ] as const;
+      const result = await this.repo.saveSession(...saveArgs, sync, dto.sessionType ?? 'read');
 
       this.logger.log(
         `[${event}] [end] fileId=${fileId} userId=${user.id} sessionId=${dto.sessionId} durationMs=${Date.now() - startedAtMs} outcome=${result.kind}${result.kind === 'skipped' ? ` reason=${result.reason}` : ''} - reading session save completed`,
       );
 
       if (result.kind === 'saved') {
+        this.userStatistics.invalidateUser(user.id);
         const meaningfulActivity = durationSeconds >= 300 || (dto.progressDelta ?? 0) >= 1;
         if (meaningfulActivity && file && dto.endProgress != null) {
           await this.bookService.autoUpdateReadStatusForProgress(user.id, file, dto.endProgress, {
             origin: source === 'koreader' ? 'koreader' : 'bookorbit',
-            occurredOn: endedAt.toISOString().slice(0, 10),
+            occurredAt: endedAt,
+            timeZone: this.resolveUserTimeZone(user),
             meaningfulActivity: true,
           });
         }
@@ -86,7 +102,8 @@ export class ReadingSessionService {
           endedAt,
           progressDelta: dto.progressDelta ?? null,
           endProgress: dto.endProgress ?? null,
-          timezone: (user.settings as unknown as UserSettings)?.timezone ?? 'UTC',
+          timezone: resolveTimeZone((user.settings as unknown as UserSettings)?.timezone, 'UTC'),
+          source,
         });
       }
     } catch (error) {
@@ -97,6 +114,30 @@ export class ReadingSessionService {
       );
       throw error;
     }
+  }
+
+  async recordCumulativeSyncedSession(params: RecordCumulativeReadingSessionParams): Promise<RecordCumulativeReadingSessionResult> {
+    const result = await this.repo.recordCumulativeSyncedSession(params);
+
+    if (result.kind === 'saved' && params.bookFileId !== null) {
+      const startedAt = new Date(params.endedAt.getTime() - result.durationSeconds * 1000);
+      this.achievementEvents.emit(ACHIEVEMENT_EVENT_READING_SESSION_SAVED, {
+        userId: params.userId,
+        bookFileId: params.bookFileId,
+        durationSeconds: result.durationSeconds,
+        startedAt,
+        endedAt: params.endedAt,
+        progressDelta: params.progressDelta,
+        endProgress: params.endProgress,
+        timezone: params.timeZone,
+      });
+    }
+
+    return result;
+  }
+
+  async deleteLegacyKoreaderSyncEstimatesBatch(limit: number): Promise<{ deleted: number }> {
+    return this.repo.deleteLegacyKoreaderSyncEstimatesBatch(limit);
   }
 
   async createManualSession(bookId: number, dto: CreateManualReadingSessionDto, user: RequestUser): Promise<BookReadingSession> {
@@ -156,6 +197,7 @@ export class ReadingSessionService {
         endProgress,
         timeZone: this.resolveUserTimeZone(user),
       });
+      this.userStatistics.invalidateUser(user.id);
 
       // No achievement event: the payload requires a non-null bookFileId, and retroactive
       // manual entries would allow farming time-based achievements.
@@ -168,6 +210,7 @@ export class ReadingSessionService {
 
       return {
         id: created.id,
+        bookFileId,
         startedAt: startedAt.toISOString(),
         endedAt: endedAt.toISOString(),
         durationSeconds,
@@ -175,6 +218,7 @@ export class ReadingSessionService {
         endProgress,
         format,
         source: 'manual',
+        attemptId: created.attemptId,
       };
     } catch (error) {
       const errorClass = error instanceof Error ? error.constructor.name : 'UnknownError';
@@ -224,6 +268,7 @@ export class ReadingSessionService {
       await this.bookService.verifyBookAccess(bookId, user);
       const result = await this.repo.deleteSessionByBook(user.id, bookId, sessionId, this.resolveUserTimeZone(user));
       if (!result.found) throw new NotFoundException('Reading session not found');
+      this.userStatistics.invalidateUser(user.id);
       this.logger.log(
         `[${event}] [end] bookId=${bookId} sessionId=${sessionId} userId=${user.id} durationMs=${Date.now() - startedAtMs} - delete reading session completed`,
       );

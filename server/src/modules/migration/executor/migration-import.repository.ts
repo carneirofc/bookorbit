@@ -14,11 +14,27 @@ import {
   type ReadingDailyStatsSegment,
 } from '../../../common/utils/reading-daily-stats.utils';
 import { resolveTimeZone } from '../../../common/utils/timezone.utils';
-import { uniqueNumbers } from './executor-utils';
+import { type TargetBookFile, uniqueNumbers } from './executor-utils';
 
 type Db = NodePgDatabase<typeof schema>;
 
 const BATCH_CHUNK_SIZE = 500;
+
+type UserBookStatusMergeItem = Omit<typeof schema.userBookStatus.$inferInsert, 'updatedAt'> & {
+  sourceUpdatedAt: Date | null;
+};
+
+function userBookStatusMergeValues(item: UserBookStatusMergeItem, updatedAt: Date): typeof schema.userBookStatus.$inferInsert {
+  return {
+    userId: item.userId,
+    bookId: item.bookId,
+    status: item.status,
+    source: item.source,
+    startedAt: item.startedAt,
+    finishedAt: item.finishedAt,
+    updatedAt,
+  };
+}
 
 function omitKeys<T extends Record<string, unknown>>(obj: T, ...keys: string[]): Partial<T> {
   const keySet = new Set(keys);
@@ -191,24 +207,11 @@ export class MigrationImportRepository {
     const now = new Date();
     await this.db
       .insert(schema.bookMetadata)
-      .values({ bookId, coverSource: 'custom', updatedAt: now })
-      .onConflictDoUpdate({ target: schema.bookMetadata.bookId, set: { coverSource: 'custom', updatedAt: now } });
+      .values({ bookId, coverSource: 'custom', coverUpdatedAt: now, updatedAt: now })
+      .onConflictDoUpdate({ target: schema.bookMetadata.bookId, set: { coverSource: 'custom', coverUpdatedAt: now, updatedAt: now } });
   }
 
   // --- User book statuses ---
-
-  async clearUserBookStatuses(userIds: number[], bookIds: number[]): Promise<void> {
-    const targetUserIds = uniqueNumbers(userIds);
-    const targetBookIds = uniqueNumbers(bookIds);
-    if (targetUserIds.length === 0 || targetBookIds.length === 0) return;
-    for (const userBatch of chunk(targetUserIds, BATCH_CHUNK_SIZE)) {
-      for (const bookBatch of chunk(targetBookIds, BATCH_CHUNK_SIZE)) {
-        await this.db
-          .delete(schema.userBookStatus)
-          .where(and(inArray(schema.userBookStatus.userId, userBatch), inArray(schema.userBookStatus.bookId, bookBatch)));
-      }
-    }
-  }
 
   async upsertUserBookStatus(values: typeof schema.userBookStatus.$inferInsert): Promise<void> {
     await this.db
@@ -501,12 +504,16 @@ export class MigrationImportRepository {
     }
   }
 
-  async batchUpsertUserBookStatuses(items: Array<typeof schema.userBookStatus.$inferInsert>): Promise<void> {
+  async batchMergeUserBookStatuses(items: UserBookStatusMergeItem[]): Promise<void> {
     if (items.length === 0) return;
-    for (const batch of chunk(items, BATCH_CHUNK_SIZE)) {
+
+    const timestamped = items.filter((item): item is UserBookStatusMergeItem & { sourceUpdatedAt: Date } => item.sourceUpdatedAt !== null);
+    const untimestamped = items.filter((item) => item.sourceUpdatedAt === null);
+
+    for (const batch of chunk(timestamped, BATCH_CHUNK_SIZE)) {
       await this.db
         .insert(schema.userBookStatus)
-        .values(batch)
+        .values(batch.map((item) => userBookStatusMergeValues(item, item.sourceUpdatedAt)))
         .onConflictDoUpdate({
           target: [schema.userBookStatus.userId, schema.userBookStatus.bookId],
           set: {
@@ -516,7 +523,16 @@ export class MigrationImportRepository {
             finishedAt: sql`excluded.finished_at`,
             updatedAt: sql`excluded.updated_at`,
           },
+          setWhere: sql`excluded.updated_at > ${schema.userBookStatus.updatedAt}`,
         });
+    }
+
+    for (const batch of chunk(untimestamped, BATCH_CHUNK_SIZE)) {
+      const insertedAt = new Date();
+      await this.db
+        .insert(schema.userBookStatus)
+        .values(batch.map((item) => userBookStatusMergeValues(item, insertedAt)))
+        .onConflictDoNothing();
     }
   }
 
@@ -550,6 +566,7 @@ export class MigrationImportRepository {
             pageNumber: sql`excluded.page_number`,
             positionSeconds: sql`excluded.position_seconds`,
             updatedAt: sql`excluded.updated_at`,
+            lastReadAt: sql`excluded.last_read_at`,
           },
         });
     }
@@ -772,10 +789,8 @@ export class MigrationImportRepository {
     return { primaryFilesByBookId, audiobookPrimaryFilesByBookId };
   }
 
-  async fetchTargetBookFiles(
-    bookIds: number[],
-  ): Promise<Map<number, Array<{ id: number; hash: string | null; absolutePath: string; format: string | null }>>> {
-    const result = new Map<number, Array<{ id: number; hash: string | null; absolutePath: string; format: string | null }>>();
+  async fetchTargetBookFiles(bookIds: number[]): Promise<Map<number, TargetBookFile[]>> {
+    const result = new Map<number, TargetBookFile[]>();
     const targetBookIds = uniqueNumbers(bookIds);
     if (targetBookIds.length === 0) return result;
 
@@ -787,15 +802,28 @@ export class MigrationImportRepository {
           hash: schema.bookFiles.fileHash,
           absolutePath: schema.bookFiles.absolutePath,
           format: schema.bookFiles.format,
+          sortOrder: schema.bookFiles.sortOrder,
+          durationSeconds: schema.bookFiles.durationSeconds,
         })
         .from(schema.bookFiles)
         .where(inArray(schema.bookFiles.bookId, batch));
 
       for (const row of rows) {
         const files = result.get(row.bookId) ?? [];
-        files.push({ id: row.id, hash: row.hash, absolutePath: row.absolutePath, format: row.format });
+        files.push({
+          id: row.id,
+          hash: row.hash,
+          absolutePath: row.absolutePath,
+          format: row.format,
+          sortOrder: row.sortOrder,
+          durationSeconds: row.durationSeconds,
+        });
         result.set(row.bookId, files);
       }
+    }
+
+    for (const files of result.values()) {
+      files.sort((a, b) => (a.sortOrder ?? Number.MAX_SAFE_INTEGER) - (b.sortOrder ?? Number.MAX_SAFE_INTEGER) || a.id - b.id);
     }
 
     return result;

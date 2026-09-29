@@ -1,5 +1,5 @@
-import { ForbiddenException, Logger, UnauthorizedException } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
+import { ForbiddenException, Inject, Logger, UnauthorizedException } from '@nestjs/common';
+import type { ConfigType } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { OnGatewayConnection, OnGatewayDisconnect, OnGatewayInit, WebSocketGateway, WebSocketServer } from '@nestjs/websockets';
 import { Permission } from '@bookorbit/types';
@@ -11,6 +11,7 @@ import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { UserService } from '../user/user.service';
 import { NotificationRepository } from './notification.repository';
 import { rejectSocketConnection } from '../../common/utils/ws-auth.utils';
+import { appConfig } from '../../config/config';
 
 @WebSocketGateway({ namespace: '/notifications', cors: { credentials: true } })
 export class NotificationGateway implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect {
@@ -22,9 +23,9 @@ export class NotificationGateway implements OnGatewayInit, OnGatewayConnection, 
     private readonly jwtService: JwtService,
     private readonly userService: UserService,
     private readonly notificationRepo: NotificationRepository,
-    config: ConfigService,
+    @Inject(appConfig.KEY) app: ConfigType<typeof appConfig>,
   ) {
-    this.clientOrigin = config.get<string>('app.appUrl') ?? 'http://localhost:5173';
+    this.clientOrigin = app.appUrl;
   }
 
   afterInit(server: Server): void {
@@ -68,6 +69,18 @@ export class NotificationGateway implements OnGatewayInit, OnGatewayConnection, 
 
   emitNew(userId: number, notification: NotificationItem): void {
     this.server?.to(`user:${userId}`).emit('notification:new', notification);
+  }
+
+  /**
+   * A collapsed occurrence. Separate from emitNew because the row was already unread and already
+   * counted; reusing emitNew would double-count the unread badge and the page total.
+   */
+  emitUpdated(userId: number, notification: NotificationItem): void {
+    this.server?.to(`user:${userId}`).emit('notification:updated', notification);
+  }
+
+  emitRefresh(userId: number): void {
+    this.server?.to(`user:${userId}`).emit('notification:refresh');
   }
 
   emitCountUpdate(userId: number, count: number): void {

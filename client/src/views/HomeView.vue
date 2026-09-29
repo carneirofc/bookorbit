@@ -26,6 +26,7 @@ import TableColumnPanel from '@/features/book/components/TableColumnPanel.vue'
 import BookQuickView from '@/features/book/components/BookQuickView.vue'
 import BookFilterBuilder from '@/features/book/components/BookFilterBuilder.vue'
 import BookSortBuilder from '@/features/book/components/BookSortBuilder.vue'
+import BookShuffleButton from '@/features/book/components/BookShuffleButton.vue'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { DropdownMenuItem } from '@/components/ui/dropdown-menu'
 import ViewHeader from '@/components/ViewHeader.vue'
@@ -66,7 +67,7 @@ import { usePermissions } from '@/features/auth/composables/usePermissions'
 import { useBulkDownload } from '@/features/book/composables/useBulkDownload'
 import { useBookViewContext } from '@/features/book/composables/useBookViewContext'
 import { useBookTableShell } from '@/features/book/composables/useBookTableShell'
-import { useInfiniteScrollSentinel } from '@/features/book/composables/useInfiniteScrollSentinel'
+import { useInfiniteScrollSentinel } from '@/composables/useInfiniteScrollSentinel'
 import { useSavedViews, type SavedView } from '@/features/book/composables/useSavedViews'
 import type { GroupRule, Rule, SortSpec } from '@bookorbit/types'
 import EntityNotFound from '@/components/EntityNotFound.vue'
@@ -128,6 +129,8 @@ const {
   error,
   filter,
   sort,
+  randomSortActive,
+  reshuffle,
   reset: resetBooks,
   updateBooks,
   contiguousPrefix,
@@ -654,6 +657,7 @@ defineOptions({ name: 'HomeView' })
               <TooltipContent>{{ t('views.bookView.resetSort') }}</TooltipContent>
             </Tooltip>
           </div>
+          <BookShuffleButton v-if="randomSortActive" desktop-only compact @shuffle="reshuffle" />
           <div class="hidden sm:block w-px h-5 bg-border shrink-0" />
           <Tooltip>
             <TooltipTrigger as-child>
@@ -826,6 +830,8 @@ defineOptions({ name: 'HomeView' })
           >
             <X :size="13" />
           </button>
+
+          <BookShuffleButton v-if="randomSortActive" @shuffle="reshuffle" />
 
           <button
             @click="toggleFilterPanel"

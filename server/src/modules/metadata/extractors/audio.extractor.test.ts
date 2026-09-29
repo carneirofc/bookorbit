@@ -6,7 +6,7 @@ vi.mock('child_process', async (importOriginal) => {
 });
 
 import { execFile as execFileCallback, spawn } from 'child_process';
-import { extractAudioMetadata, parseAudioDuration } from './audio.extractor';
+import { extractAudioMetadata, parseAudioDuration, probeAudioChapters } from './audio.extractor';
 import { EventEmitter } from 'events';
 
 const mockExecFile = execFileCallback as unknown as Mock;
@@ -36,21 +36,20 @@ function makeProbeOutput(overrides: FfprobeOutput = {}): string {
 
 type ExecFileCallback = (err: Error | null, result: { stdout: string; stderr: string } | string) => void;
 
-// promisify(execFile) may call execFile(bin, args, options, cb), so the callback is the
-// last argument, not always the third.
-function lastArgCallback(args: unknown[]): ExecFileCallback {
+// execFile is called with an options object, so the callback is the last argument, not the third.
+function execFileCallbackOf(args: unknown[]): ExecFileCallback {
   return args[args.length - 1] as ExecFileCallback;
 }
 
 function makeExecFileSuccess(stdout: string) {
   mockExecFile.mockImplementation((...args: unknown[]) => {
-    lastArgCallback(args)(null, { stdout, stderr: '' });
+    execFileCallbackOf(args)(null, { stdout, stderr: '' });
   });
 }
 
 function makeExecFileError(message: string) {
   mockExecFile.mockImplementation((...args: unknown[]) => {
-    lastArgCallback(args)(new Error(message), '');
+    execFileCallbackOf(args)(new Error(message), '');
   });
 }
 
@@ -452,7 +451,7 @@ describe('extractAudioMetadata — misc fields', () => {
             language: 'eng',
             genre: 'Science Fiction; Adventure',
             series: 'Dune',
-            'series-part': '1.5',
+            'series-part': '5.10',
             asin: 'B000R34YKC',
             librofm_isbn: '9781234567890',
           },
@@ -468,7 +467,7 @@ describe('extractAudioMetadata — misc fields', () => {
     expect(result.language).toBe('eng');
     expect(result.genres).toEqual(['Science Fiction', 'Adventure']);
     expect(result.seriesName).toBe('Dune');
-    expect(result.seriesIndex).toBe(1.5);
+    expect(result.seriesIndex).toBe('5.10');
     expect(result.audibleId).toBe('B000R34YKC');
     expect(result.librofmId).toBe('9781234567890');
   });
@@ -494,7 +493,7 @@ describe('extractAudioMetadata — misc fields', () => {
     const result = await extractAudioMetadata('/path/book.m4b');
 
     expect(result.seriesName).toBe('Dungeon Crawler Carl');
-    expect(result.seriesIndex).toBe(Number(rawIndex));
+    expect(result.seriesIndex).toBe(rawIndex);
   });
 
   it('reads MP4-native series tags when custom tags are absent', async () => {
@@ -503,7 +502,7 @@ describe('extractAudioMetadata — misc fields', () => {
     const result = await extractAudioMetadata('/path/book.m4b');
 
     expect(result.seriesName).toBe('The Murderbot Diaries');
-    expect(result.seriesIndex).toBe(2.5);
+    expect(result.seriesIndex).toBe('2.5');
   });
 
   it('prefers established custom series tags over MP4-native aliases', async () => {
@@ -523,7 +522,7 @@ describe('extractAudioMetadata — misc fields', () => {
     const result = await extractAudioMetadata('/path/book.m4b');
 
     expect(result.seriesName).toBe('Custom Series');
-    expect(result.seriesIndex).toBe(4.5);
+    expect(result.seriesIndex).toBe('4.5');
   });
 
   it('parses year from a plain year string', async () => {
@@ -636,35 +635,33 @@ describe('extractAudioMetadata — misc fields', () => {
 describe('extractAudioMetadata — failure tolerance', () => {
   beforeEach(() => resetMocks());
 
-  it('returns all-null safe result when ffprobe exits with an error', async () => {
+  // Null, never an all-null result: callers persist what they are handed, so a file that could not
+  // be read must not look like a file whose tags are empty.
+  it('returns null when ffprobe exits with an error', async () => {
     makeExecFileError('ffprobe: command not found');
 
-    const result = await extractAudioMetadata('/path/corrupted.mp3');
-
-    expect(result.title).toBeNull();
-    expect(result.authors).toEqual([]);
-    expect(result.narrators).toEqual([]);
-    expect(result.durationSeconds).toBeNull();
-    expect(result.chapters).toEqual([]);
-    expect(result.coverBytes).toBeNull();
+    expect(await extractAudioMetadata('/path/corrupted.mp3')).toBeNull();
   });
 
-  it('returns all-null safe result when ffprobe outputs invalid JSON', async () => {
+  it('returns null when ffprobe outputs invalid JSON', async () => {
     makeExecFileSuccess('not valid json at all {{}}');
 
-    const result = await extractAudioMetadata('/path/bad-output.mp3');
-
-    expect(result.title).toBeNull();
-    expect(result.durationSeconds).toBeNull();
+    expect(await extractAudioMetadata('/path/bad-output.mp3')).toBeNull();
   });
 
-  it('returns all-null safe result for a non-audio file', async () => {
+  it('returns null for a non-audio file', async () => {
     makeExecFileError('Invalid data found when processing input');
 
-    const result = await extractAudioMetadata('/path/notaudio.txt');
+    expect(await extractAudioMetadata('/path/notaudio.txt')).toBeNull();
+  });
 
-    expect(result.title).toBeNull();
-    expect(result.durationSeconds).toBeNull();
+  it('returns an empty result rather than null when the file has no tags', async () => {
+    makeExecFileSuccess(makeProbeOutput());
+
+    const result = await extractAudioMetadata('/path/untagged.mp3');
+
+    expect(result).not.toBeNull();
+    expect(result?.title).toBeNull();
   });
 
   it('invokes ffprobe with correct arguments', async () => {
@@ -740,6 +737,104 @@ describe('parseAudioDuration', () => {
       expect.objectContaining({ timeout: expect.any(Number), maxBuffer: expect.any(Number) }),
       expect.any(Function),
     );
+  });
+});
+
+// ── probeAudioChapters ────────────────────────────────────────────────────────
+
+describe('probeAudioChapters', () => {
+  beforeEach(() => resetMocks());
+
+  it('returns the embedded chapters and the file length in milliseconds', async () => {
+    makeExecFileSuccess(
+      JSON.stringify({
+        format: { duration: '360.5' },
+        chapters: [
+          { start_time: '0.000000', tags: { title: 'Chapter 1' } },
+          { start_time: '120.000000', tags: { title: 'Chapter 2' } },
+        ],
+      }),
+    );
+
+    const result = await probeAudioChapters('/books/Book/01.m4b');
+
+    expect(result).toEqual({
+      chapters: [
+        { title: 'Chapter 1', startMs: 0 },
+        { title: 'Chapter 2', startMs: 120_000 },
+      ],
+      durationMs: 360_500,
+    });
+  });
+
+  it('keeps sub-second precision that the per-file duration rounds away', async () => {
+    makeExecFileSuccess(JSON.stringify({ format: { duration: '119.994000' }, chapters: [] }));
+
+    const result = await probeAudioChapters('/books/Book/01.m4b');
+
+    expect(result.durationMs).toBe(119_994);
+  });
+
+  it('returns an empty chapter list for a file with no embedded chapters', async () => {
+    makeExecFileSuccess(JSON.stringify({ format: { duration: '60' }, chapters: [] }));
+
+    const result = await probeAudioChapters('/books/Book/02.mp3');
+
+    expect(result).toEqual({ chapters: [], durationMs: 60_000 });
+  });
+
+  it('reports an unknown length rather than guessing when duration is missing', async () => {
+    makeExecFileSuccess(JSON.stringify({ format: {}, chapters: [{ start_time: '0.000000', tags: { title: 'Only' } }] }));
+
+    const result = await probeAudioChapters('/books/Book/03.m4b');
+
+    expect(result).toEqual({ chapters: [{ title: 'Only', startMs: 0 }], durationMs: null });
+  });
+
+  it('titles a chapter with an empty string when the file does not name it', async () => {
+    makeExecFileSuccess(JSON.stringify({ format: { duration: '10' }, chapters: [{ start_time: '0.000000' }] }));
+
+    const result = await probeAudioChapters('/books/Book/04.m4b');
+
+    expect(result.chapters).toEqual([{ title: '', startMs: 0 }]);
+  });
+
+  it('drops a chapter whose start time is not numeric', async () => {
+    makeExecFileSuccess(
+      JSON.stringify({
+        format: { duration: '10' },
+        chapters: [
+          { start_time: 'N/A', tags: { title: 'Broken' } },
+          { start_time: '5.000000', tags: { title: 'Fine' } },
+        ],
+      }),
+    );
+
+    const result = await probeAudioChapters('/books/Book/05.m4b');
+
+    expect(result.chapters).toEqual([{ title: 'Fine', startMs: 5_000 }]);
+  });
+
+  it('returns empty results when ffprobe throws', async () => {
+    makeExecFileError('read error');
+
+    const result = await probeAudioChapters('/books/Book/missing.m4b');
+
+    expect(result).toEqual({ chapters: [], durationMs: null });
+  });
+
+  it('asks ffprobe for chapters and format only, and never extracts a cover', async () => {
+    makeExecFileSuccess(JSON.stringify({ format: { duration: '10' }, chapters: [] }));
+
+    await probeAudioChapters('/books/Book/01.m4b');
+
+    expect(mockExecFile).toHaveBeenCalledWith(
+      'ffprobe',
+      ['-protocol_whitelist', 'file,subfile', '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_chapters', '/books/Book/01.m4b'],
+      expect.objectContaining({ timeout: expect.any(Number), maxBuffer: expect.any(Number) }),
+      expect.any(Function),
+    );
+    expect(mockSpawn).not.toHaveBeenCalled();
   });
 });
 
@@ -920,8 +1015,8 @@ describe('binary path env var override', () => {
     vi.resetModules();
 
     const { execFile: execFileMock, spawn: spawnMock } = await import('child_process');
-    (execFileMock as unknown as Mock).mockImplementation((...callArgs: unknown[]) => {
-      const cb = callArgs[callArgs.length - 1] as (err: null, r: { stdout: string }) => void;
+    (execFileMock as unknown as Mock).mockImplementation((...args: unknown[]) => {
+      const cb = args[args.length - 1] as (err: null, r: { stdout: string }) => void;
       cb(null, { stdout: JSON.stringify({ format: { duration: '100', tags: {} }, streams: [], chapters: [] }) });
     });
     (spawnMock as unknown as Mock).mockReturnValue(makeSpawnProcess(null));
@@ -937,8 +1032,8 @@ describe('binary path env var override', () => {
     vi.resetModules();
 
     const { execFile: execFileMock, spawn: spawnMock } = await import('child_process');
-    (execFileMock as unknown as Mock).mockImplementation((...callArgs: unknown[]) => {
-      const cb = callArgs[callArgs.length - 1] as (err: null, r: { stdout: string }) => void;
+    (execFileMock as unknown as Mock).mockImplementation((...args: unknown[]) => {
+      const cb = args[args.length - 1] as (err: null, r: { stdout: string }) => void;
       cb(null, {
         stdout: JSON.stringify({
           format: { duration: '100', tags: {} },
@@ -968,8 +1063,8 @@ describe('binary path env var override', () => {
     vi.resetModules();
 
     const { execFile: execFileMock, spawn: spawnMock } = await import('child_process');
-    (execFileMock as unknown as Mock).mockImplementation((...callArgs: unknown[]) => {
-      const cb = callArgs[callArgs.length - 1] as (err: null, r: { stdout: string }) => void;
+    (execFileMock as unknown as Mock).mockImplementation((...args: unknown[]) => {
+      const cb = args[args.length - 1] as (err: null, r: { stdout: string }) => void;
       cb(null, { stdout: JSON.stringify({ format: { duration: '100', tags: {} }, streams: [], chapters: [] }) });
     });
     (spawnMock as unknown as Mock).mockReturnValue(makeSpawnProcess(null));

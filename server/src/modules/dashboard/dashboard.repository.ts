@@ -7,12 +7,13 @@ import { DB } from '../../db';
 import * as schema from '../../db/schema';
 import { audiobookProgress, bookFiles, bookMetadata, books, readingProgress, userBookStatus } from '../../db/schema';
 import { buildContentFilterClauses } from '../../common/utils/content-filter-sql.utils';
+import { seriesIndexSortKey } from '../../common/utils/series-index-sql.utils';
 
 type Db = NodePgDatabase<typeof schema>;
 type UpNextInSeriesRow = { id: number };
 type RandomCandidateRow = { sampleIndex: number; id: number };
 const AUDIO_FORMATS = BOOK_FORMATS.filter(isAudioFormat);
-const CONTINUE_READING_EXCLUDED_READ_STATUSES = ['unread', 'read', 'skimmed', 'abandoned'] as const satisfies readonly ReadStatus[];
+const CONTINUE_SCROLLER_EXCLUDED_READ_STATUSES = ['unread', 'read', 'skimmed', 'abandoned'] as const satisfies readonly ReadStatus[];
 const DISCOVERY_EXCLUDED_READ_STATUSES = ['reading', 'rereading', 'on_hold', 'read', 'skimmed', 'abandoned'] as const satisfies readonly ReadStatus[];
 // Three independent pivots per requested row tolerate moderate collisions from
 // sparse eligibility. The ceiling prevents large requests from multiplying probes.
@@ -38,6 +39,33 @@ export class DashboardRepository {
     return rows.map((row) => row.id);
   }
 
+  /**
+   * How many books the shelf could have drawn from.
+   *
+   * Each of these mirrors the `find` above it clause for clause, minus the ordering and the limit.
+   * They are deliberately duplicated rather than factored into a shared predicate builder: the
+   * pairs have to be read side by side to stay honest, and a count that quietly drifts from the
+   * selection it describes is a wrong number on the screen rather than a failing query.
+   */
+  /**
+   * Books added since the start of the current calendar month.
+   *
+   * Deliberately not a count of everything the recently-added shelf could return, which is the
+   * whole library: that number answers "how many books do you own", a question the shelf is not
+   * asking and the library widget already answers. A recency shelf is only interesting for how
+   * much is new, so this counts the window and clients label it as one.
+   */
+  async countBooksAddedThisMonth(accessibleLibraryIds: number[], contentFilters?: ContentFilterRules): Promise<number> {
+    if (accessibleLibraryIds.length === 0) return 0;
+    const cfClauses = contentFilters ? buildContentFilterClauses(contentFilters, this.db) : [];
+    const rows = await this.db
+      .select({ value: sql<number>`count(*)::int` })
+      .from(books)
+      .where(and(inArray(books.libraryId, accessibleLibraryIds), gte(books.addedAt, sql`date_trunc('month', now())`), ...cfClauses));
+
+    return rows[0]?.value ?? 0;
+  }
+
   async findContinueReadingBookIds(
     accessibleLibraryIds: number[],
     userId: number,
@@ -59,14 +87,37 @@ export class DashboardRepository {
           eq(books.status, 'present'),
           or(isNull(bookFiles.format), notInArray(bookFiles.format, AUDIO_FORMATS)),
           sql`${readingProgress.percentage} > 0 and ${readingProgress.percentage} < 100`,
-          or(isNull(userBookStatus.bookId), notInArray(userBookStatus.status, [...CONTINUE_READING_EXCLUDED_READ_STATUSES])),
+          or(isNull(userBookStatus.bookId), notInArray(userBookStatus.status, [...CONTINUE_SCROLLER_EXCLUDED_READ_STATUSES])),
           ...cfClauses,
         ),
       )
-      .orderBy(desc(readingProgress.updatedAt), desc(books.id))
+      .orderBy(desc(readingProgress.lastReadAt), desc(books.id))
       .limit(limit);
 
     return rows.map((row) => row.id);
+  }
+
+  async countContinueReadingBooks(accessibleLibraryIds: number[], userId: number, contentFilters?: ContentFilterRules): Promise<number> {
+    if (accessibleLibraryIds.length === 0) return 0;
+    const cfClauses = contentFilters ? buildContentFilterClauses(contentFilters, this.db) : [];
+    const rows = await this.db
+      .select({ value: sql<number>`count(*)::int` })
+      .from(books)
+      .leftJoin(bookFiles, eq(bookFiles.id, books.primaryFileId))
+      .leftJoin(readingProgress, and(eq(readingProgress.bookFileId, bookFiles.id), eq(readingProgress.userId, userId)))
+      .leftJoin(userBookStatus, and(eq(userBookStatus.bookId, books.id), eq(userBookStatus.userId, userId)))
+      .where(
+        and(
+          inArray(books.libraryId, accessibleLibraryIds),
+          eq(books.status, 'present'),
+          or(isNull(bookFiles.format), notInArray(bookFiles.format, AUDIO_FORMATS)),
+          sql`${readingProgress.percentage} > 0 and ${readingProgress.percentage} < 100`,
+          or(isNull(userBookStatus.bookId), notInArray(userBookStatus.status, [...CONTINUE_SCROLLER_EXCLUDED_READ_STATUSES])),
+          ...cfClauses,
+        ),
+      );
+
+    return rows[0]?.value ?? 0;
   }
 
   async findContinueListeningBookIds(
@@ -91,11 +142,13 @@ export class DashboardRepository {
           inArray(bookFiles.format, AUDIO_FORMATS),
         ),
       )
+      .leftJoin(userBookStatus, and(eq(userBookStatus.bookId, books.id), eq(userBookStatus.userId, userId)))
       .where(
         and(
           inArray(books.libraryId, accessibleLibraryIds),
           eq(books.status, 'present'),
           sql`${audiobookProgress.percentage} > 0 and ${audiobookProgress.percentage} < 100`,
+          or(isNull(userBookStatus.bookId), notInArray(userBookStatus.status, [...CONTINUE_SCROLLER_EXCLUDED_READ_STATUSES])),
           ...cfClauses,
         ),
       )
@@ -103,6 +156,48 @@ export class DashboardRepository {
       .limit(limit);
 
     return rows.map((row) => row.id);
+  }
+
+  async countContinueListeningBooks(accessibleLibraryIds: number[], userId: number, contentFilters?: ContentFilterRules): Promise<number> {
+    if (accessibleLibraryIds.length === 0) return 0;
+    const cfClauses = contentFilters ? buildContentFilterClauses(contentFilters, this.db) : [];
+    const rows = await this.db
+      .select({ value: sql<number>`count(*)::int` })
+      .from(books)
+      .innerJoin(audiobookProgress, and(eq(audiobookProgress.bookId, books.id), eq(audiobookProgress.userId, userId)))
+      .innerJoin(
+        bookFiles,
+        and(
+          eq(bookFiles.id, audiobookProgress.currentFileId),
+          eq(bookFiles.bookId, books.id),
+          eq(bookFiles.role, 'content'),
+          inArray(bookFiles.format, AUDIO_FORMATS),
+        ),
+      )
+      .where(
+        and(
+          inArray(books.libraryId, accessibleLibraryIds),
+          eq(books.status, 'present'),
+          sql`${audiobookProgress.percentage} > 0 and ${audiobookProgress.percentage} < 100`,
+          ...cfClauses,
+        ),
+      );
+
+    return rows[0]?.value ?? 0;
+  }
+
+  async countWantToReadBooks(accessibleLibraryIds: number[], userId: number, contentFilters?: ContentFilterRules): Promise<number> {
+    if (accessibleLibraryIds.length === 0) return 0;
+    const cfClauses = contentFilters ? buildContentFilterClauses(contentFilters, this.db) : [];
+    const rows = await this.db
+      .select({ value: sql<number>`count(*)::int` })
+      .from(books)
+      .innerJoin(userBookStatus, and(eq(userBookStatus.bookId, books.id), eq(userBookStatus.userId, userId)))
+      .where(
+        and(inArray(books.libraryId, accessibleLibraryIds), eq(books.status, 'present'), eq(userBookStatus.status, 'want_to_read'), ...cfClauses),
+      );
+
+    return rows[0]?.value ?? 0;
   }
 
   async findWantToReadBookIds(accessibleLibraryIds: number[], userId: number, limit: number, contentFilters?: ContentFilterRules): Promise<number[]> {
@@ -134,9 +229,9 @@ export class DashboardRepository {
     const mergedProgress = sql<number>`
       coalesce(
         case
-          when ${readingProgress.updatedAt} is null then ${audiobookProgress.percentage}
+          when ${readingProgress.lastReadAt} is null then ${audiobookProgress.percentage}
           when ${audiobookProgress.updatedAt} is null then ${readingProgress.percentage}
-          when ${readingProgress.updatedAt} >= ${audiobookProgress.updatedAt} then ${readingProgress.percentage}
+          when ${readingProgress.lastReadAt} >= ${audiobookProgress.updatedAt} then ${readingProgress.percentage}
           else ${audiobookProgress.percentage}
         end,
         ${readingProgress.percentage},
@@ -144,11 +239,11 @@ export class DashboardRepository {
         0
       )
     `;
-    const mergedUpdatedAt = sql<Date | null>`
+    const mergedLastReadAt = sql<Date | null>`
       case
-        when ${readingProgress.updatedAt} is null then ${audiobookProgress.updatedAt}
-        when ${audiobookProgress.updatedAt} is null then ${readingProgress.updatedAt}
-        when ${readingProgress.updatedAt} >= ${audiobookProgress.updatedAt} then ${readingProgress.updatedAt}
+        when ${readingProgress.lastReadAt} is null then ${audiobookProgress.updatedAt}
+        when ${audiobookProgress.updatedAt} is null then ${readingProgress.lastReadAt}
+        when ${readingProgress.lastReadAt} >= ${audiobookProgress.updatedAt} then ${readingProgress.lastReadAt}
         else ${audiobookProgress.updatedAt}
       end
     `;
@@ -177,7 +272,7 @@ export class DashboardRepository {
             when ${completionPredicate}
               then greatest(
                 coalesce(${userBookStatus.updatedAt}, to_timestamp(0)),
-                coalesce(${mergedUpdatedAt}, to_timestamp(0))
+                coalesce(${mergedLastReadAt}, to_timestamp(0))
               )
             else null
           end as completion_updated_at
@@ -205,11 +300,13 @@ export class DashboardRepository {
           ssb.completion_updated_at,
           lag(ssb.is_completed) over (
 	            partition by ssb.library_id, ssb.series_id
-            order by ssb.series_index asc, ssb.added_at asc, ssb.id asc
+            order by ${seriesIndexSortKey(sql.raw('ssb.series_index'))} asc,
+              ssb.series_index collate "C" asc, ssb.added_at asc, ssb.id asc
           ) as previous_is_completed,
           lag(ssb.completion_updated_at) over (
 	            partition by ssb.library_id, ssb.series_id
-            order by ssb.series_index asc, ssb.added_at asc, ssb.id asc
+            order by ${seriesIndexSortKey(sql.raw('ssb.series_index'))} asc,
+              ssb.series_index collate "C" asc, ssb.added_at asc, ssb.id asc
           ) as previous_completion_updated_at
         from scoped_series_books ssb
       ),
@@ -221,7 +318,8 @@ export class DashboardRepository {
         where os.previous_is_completed = true
           and os.is_completed = false
           and os.current_progress = 0
-	        order by os.library_id, os.series_id, os.series_index asc, os.added_at asc, os.id asc
+	        order by os.library_id, os.series_id, ${seriesIndexSortKey(sql.raw('os.series_index'))} asc,
+            os.series_index collate "C" asc, os.added_at asc, os.id asc
       )
       select nc.id
       from next_candidates nc

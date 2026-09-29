@@ -1,14 +1,14 @@
 {
-  "totalRoutes": 372,
+  "totalRoutes": 614,
   "byPermission": {
-    "(none)": 166,
-    "Permission.ManageMetadataConfig": 32,
+    "(none)": 262,
+    "Permission.ManageMetadataConfig": 34,
     "Permission.EmailSend": 30,
-    "Permission.LibraryEditMetadata": 33,
-    "Permission.BookDockAccess": 16,
-    "Permission.ManageAppSettings": 22,
-    "Permission.ManageLibraries": 14,
-    "Permission.ManageUsers": 11,
+    "Permission.LibraryEditMetadata": 35,
+    "Permission.BookDockAccess": 17,
+    "Permission.ManageAppSettings": 62,
+    "Permission.ManageLibraries": 22,
+    "Permission.ManageUsers": 13,
     "Permission.ManageEmail": 8,
     "Permission.KoboSync": 7,
     "Permission.NotificationAccess": 6,
@@ -17,18 +17,27 @@
     "Permission.OpdsAccess": 4,
     "Permission.ViewAuditLog": 1,
     "Permission.ViewUserActivity": 6,
-    "Permission.LibraryDeleteBooks": 1,
-    "Permission.LibraryDownload": 1,
+    "Permission.LibraryDeleteBooks": 14,
+    "Permission.LibraryDownload": 4,
     "Permission.LibraryUpload": 2,
-    "Permission.ManageBookDock": 1,
+    "Permission.ManageBookDock": 3,
     "Permission.ManageIcons": 1,
     "Permission.HardcoverSync": 1,
     "Permission.ReadwiseSync": 1,
-    "Permission.StorygraphSync": 1
+    "Permission.StorygraphSync": 1,
+    "Permission.BookRequestAccess": 25,
+    "Permission.ManageBookRequests": 20,
+    "Permission.BookRequestSelfFulfill": 11,
+    "Permission.PodcastManageFeeds": 16,
+    "Permission.PodcastManageRetention": 1,
+    "Permission.PodcastEditMetadata": 5,
+    "Permission.PodcastPurge": 5,
+    "Permission.PodcastDownload": 4
   },
   "byLibraryAccess": {
-    "'viewer'": 3,
-    "'editor'": 1
+    "'viewer'": 9,
+    "'editor'": 15,
+    "'owner'": 4
   },
   "routeChunks": [
     "routes-01.json",
@@ -38,6 +47,8 @@
     "routes-05.json",
     "routes-06.json",
     "routes-07.json",
-    "routes-08.json"
+    "routes-08.json",
+    "routes-09.json",
+    "routes-10.json"
   ]
 }

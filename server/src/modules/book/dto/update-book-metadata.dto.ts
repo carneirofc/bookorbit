@@ -1,7 +1,8 @@
 import { IsArray, IsBoolean, IsIn, IsInt, IsNumber, IsOptional, IsString, Matches, Max, MaxLength, Min, ValidateNested } from 'class-validator';
 import { Transform, Type } from 'class-transformer';
-import { MetadataProviderKey } from '@bookorbit/types';
+import { MetadataProviderKey, SERIES_INDEX_MAX_LENGTH, SERIES_INDEX_PATTERN, type SeriesIndex } from '@bookorbit/types';
 import { MAX_SERIES_TOTAL_BOOKS } from '../../../common/utils/series-total-books.utils';
+import { PROVIDER_ID_MAX_LENGTHS } from '../../../common/utils/provider-id.utils';
 import { CustomMetadataValueDto } from '../../custom-metadata/dto/custom-metadata-value.dto';
 
 export class AudiobookChapterDto {
@@ -33,7 +34,7 @@ export class ComicMetadataDto {
 
 export class BookSeriesMembershipDto {
   @IsString() @MaxLength(500) seriesName!: string;
-  @IsOptional() @IsNumber() seriesIndex?: number | null;
+  @IsOptional() @IsString() @MaxLength(SERIES_INDEX_MAX_LENGTH) @Matches(SERIES_INDEX_PATTERN) seriesIndex?: SeriesIndex | null;
   // Series-level rather than book-level: writing it changes the total for every book in the
   // series and for every user. Bounds mirror the book_series range constraint.
   @IsOptional() @IsInt() @Min(1) @Max(MAX_SERIES_TOTAL_BOOKS) expectedBookCount?: number | null;
@@ -56,7 +57,7 @@ export class UpdateBookMetadataDto {
   // A provider page count of 0 (e.g. Google Books returns 0 when unknown) means "unknown"; normalize it to null instead of rejecting it (issue #329).
   @IsOptional() @Transform(({ value }) => (value === 0 ? null : value)) @IsInt() @Min(1) pageCount?: number | null;
   @IsOptional() @IsString() @MaxLength(500) seriesName?: string | null;
-  @IsOptional() @IsNumber() seriesIndex?: number | null;
+  @IsOptional() @IsString() @MaxLength(SERIES_INDEX_MAX_LENGTH) @Matches(SERIES_INDEX_PATTERN) seriesIndex?: SeriesIndex | null;
   @IsOptional() @IsArray() @ValidateNested({ each: true }) @Type(() => BookSeriesMembershipDto) seriesMemberships?: BookSeriesMembershipDto[] | null;
   @IsOptional() @IsString() @MaxLength(10) isbn10?: string | null;
   @IsOptional() @IsString() @MaxLength(13) isbn13?: string | null;
@@ -65,21 +66,21 @@ export class UpdateBookMetadataDto {
   @IsOptional() @IsArray() @IsString({ each: true }) authors?: string[];
   @IsOptional() @IsArray() @IsString({ each: true }) genres?: string[];
   @IsOptional() @IsArray() @IsString({ each: true }) tags?: string[];
-  @IsOptional() @IsString() @MaxLength(50) googleBooksId?: string | null;
-  @IsOptional() @IsString() @MaxLength(50) goodreadsId?: string | null;
-  @IsOptional() @IsString() @MaxLength(20) amazonId?: string | null;
-  @IsOptional() @IsString() @MaxLength(255) hardcoverId?: string | null;
-  @IsOptional() @IsString() @MaxLength(50) hardcoverEditionId?: string | null;
-  @IsOptional() @IsString() @MaxLength(50) openLibraryId?: string | null;
-  @IsOptional() @IsString() @MaxLength(50) itunesId?: string | null;
-  @IsOptional() @IsString() @MaxLength(20) audibleId?: string | null;
-  @IsOptional() @IsString() @MaxLength(50) librofmId?: string | null;
-  @IsOptional() @IsString() @MaxLength(255) koboId?: string | null;
+  @IsOptional() @IsString() @MaxLength(PROVIDER_ID_MAX_LENGTHS.googleBooksId) googleBooksId?: string | null;
+  @IsOptional() @IsString() @MaxLength(PROVIDER_ID_MAX_LENGTHS.goodreadsId) goodreadsId?: string | null;
+  @IsOptional() @IsString() @MaxLength(PROVIDER_ID_MAX_LENGTHS.amazonId) amazonId?: string | null;
+  @IsOptional() @IsString() @MaxLength(PROVIDER_ID_MAX_LENGTHS.hardcoverId) hardcoverId?: string | null;
+  @IsOptional() @IsString() @MaxLength(PROVIDER_ID_MAX_LENGTHS.hardcoverEditionId) hardcoverEditionId?: string | null;
+  @IsOptional() @IsString() @MaxLength(PROVIDER_ID_MAX_LENGTHS.openLibraryId) openLibraryId?: string | null;
+  @IsOptional() @IsString() @MaxLength(PROVIDER_ID_MAX_LENGTHS.itunesId) itunesId?: string | null;
+  @IsOptional() @IsString() @MaxLength(PROVIDER_ID_MAX_LENGTHS.audibleId) audibleId?: string | null;
+  @IsOptional() @IsString() @MaxLength(PROVIDER_ID_MAX_LENGTHS.librofmId) librofmId?: string | null;
+  @IsOptional() @IsString() @MaxLength(PROVIDER_ID_MAX_LENGTHS.koboId) koboId?: string | null;
   @IsOptional() @ValidateNested() @Type(() => AudioMetadataDto) audioMetadata?: AudioMetadataDto;
-  @IsOptional() @IsString() @MaxLength(50) comicvineId?: string | null;
-  @IsOptional() @IsString() @MaxLength(50) ranobedbId?: string | null;
-  @IsOptional() @IsString() @MaxLength(512) lubimyczytacId?: string | null;
-  @IsOptional() @IsString() @MaxLength(20) aladinId?: string | null;
+  @IsOptional() @IsString() @MaxLength(PROVIDER_ID_MAX_LENGTHS.comicvineId) comicvineId?: string | null;
+  @IsOptional() @IsString() @MaxLength(PROVIDER_ID_MAX_LENGTHS.ranobedbId) ranobedbId?: string | null;
+  @IsOptional() @IsString() @MaxLength(PROVIDER_ID_MAX_LENGTHS.lubimyczytacId) lubimyczytacId?: string | null;
+  @IsOptional() @IsString() @MaxLength(PROVIDER_ID_MAX_LENGTHS.aladinId) aladinId?: string | null;
   @IsOptional() @ValidateNested() @Type(() => ComicMetadataDto) comicMetadata?: ComicMetadataDto;
   @IsOptional() @IsArray() @ValidateNested({ each: true }) @Type(() => CustomMetadataValueDto) customMetadata?: CustomMetadataValueDto[];
 }

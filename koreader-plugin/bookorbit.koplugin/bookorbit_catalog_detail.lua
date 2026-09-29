@@ -134,11 +134,11 @@ function DetailDescriptionWidget:init()
         }
     end
 
-    self[1] = HorizontalGroup:new{
+    self[1] = CatalogWidgets.focusable(HorizontalGroup:new{
         HorizontalSpan:new{ width = DETAIL_INSET },
         box,
         HorizontalSpan:new{ width = DETAIL_INSET },
-    }
+    })
 end
 
 function DetailDescriptionWidget:onTapSelect()
@@ -184,11 +184,11 @@ function DetailOverviewWidget:init()
         }
     end
 
-    self[1] = HorizontalGroup:new{
+    self[1] = CatalogWidgets.focusable(HorizontalGroup:new{
         HorizontalSpan:new{ width = DETAIL_INSET },
         box,
         HorizontalSpan:new{ width = DETAIL_INSET },
-    }
+    })
 end
 
 function DetailOverviewWidget:onTapSelect()
@@ -212,7 +212,7 @@ function DetailPillWidget:init()
     self.ges_events = {
         TapSelect = { GestureRange:new{ ges = "tap", range = dimen } },
     }
-    self[1] = pill
+    self[1] = CatalogWidgets.focusable(pill)
 end
 
 function DetailPillWidget:onTapSelect()
@@ -244,7 +244,7 @@ function DetailTapLineWidget:init()
     self.ges_events = {
         TapSelect = { GestureRange:new{ ges = "tap", range = dimen } },
     }
-    self[1] = box
+    self[1] = CatalogWidgets.focusable(box)
 end
 
 function DetailTapLineWidget:onTapSelect()
@@ -299,8 +299,16 @@ function CatalogDetail.detailSeriesLine(detail)
     return text .. "  \u{203A}"
 end
 
-local function fileInfoLabel(file)
+local function fileFormatLabel(file)
     local label = string.upper(file.format or "file")
+    if file.downloadVariant == "audioless_epub" then
+        label = label .. " - " .. _("Read Along (audio removed)")
+    end
+    return label
+end
+
+local function fileInfoLabel(file)
+    local label = fileFormatLabel(file)
     local extras = {}
     local size = formatBytes(file.sizeBytes)
     if size ~= "" then table.insert(extras, size) end
@@ -865,17 +873,18 @@ function CatalogDetail:downloadButtonLabel(supported_files)
     local file = self:nextDownloadFile(supported_files)
     local format = cleanInlineText(file and file.format)
     if not format then return _("Download") end
+    local format_label = fileFormatLabel(file)
     -- Size is what decides whether a download is worth starting over a slow
     -- connection, so it rides the button when the server knows it.
     local size = formatBytes(file and file.sizeBytes)
     if size ~= "" then
-        return T(_("Download %1 - %2"), string.upper(format), size)
+        return T(_("Download %1 - %2"), format_label, size)
     end
-    return T(_("Download (%1)"), string.upper(format))
+    return T(_("Download (%1)"), format_label)
 end
 
 function CatalogDetail:fileLabel(file, show_support)
-    local label = string.upper(file.format or "file")
+    local label = fileFormatLabel(file)
     local extras = {}
     local size = formatBytes(file.sizeBytes)
     if size ~= "" then table.insert(extras, size) end
@@ -1169,6 +1178,7 @@ function CatalogDetail:buildDetailPillRow(items, width, title, more_button_key)
     local row = HorizontalGroup:new{ align = "center" }
     local used = 0
     local shown = 0
+    local first_pill
     if more_button_key then self[more_button_key] = nil end
 
     for i = 1, #items do
@@ -1199,6 +1209,7 @@ function CatalogDetail:buildDetailPillRow(items, width, title, more_button_key)
             used = used + DETAIL_GAP_S
         end
         table.insert(row, pill)
+        first_pill = first_pill or pill
         used = used + pill_w
         shown = shown + 1
     end
@@ -1217,6 +1228,13 @@ function CatalogDetail:buildDetailPillRow(items, width, title, more_button_key)
             table.insert(row, more)
             if more_button_key then self[more_button_key] = more end
         end
+    end
+    -- Every pill opens the same full list, so only one of them needs to be in the
+    -- focus layout, and the overflow "+N" pill is the natural pick. When nothing
+    -- overflowed there is no "+N", so fall back to the first pill: otherwise the
+    -- list has no reachable trigger at all on a device that cannot tap.
+    if more_button_key and not self[more_button_key] then
+        self[more_button_key] = first_pill
     end
     return row
 end
@@ -1604,6 +1622,37 @@ function CatalogDetail:buildDetailRelatedSection(section, width, height)
     }, focus_rows
 end
 
+-- The header is a stack of lines on screen - series, metadata, rating, genres,
+-- progress, action - so the cursor moves through it a line at a time. Left and
+-- Right are reserved for what genuinely sits side by side, which is only the
+-- rating stars. Packing the lot into one row meant up to eleven Right presses
+-- to reach the download button, along an axis the layout never suggested.
+function CatalogDetail:detailHeaderFocusRows()
+    local rows = {}
+    local function addRow(...)
+        local row = {}
+        for index = 1, select("#", ...) do
+            local widget = select(index, ...)
+            if widget then table.insert(row, widget) end
+        end
+        if #row == 0 then return nil end
+        table.insert(rows, row)
+        return row
+    end
+
+    addRow(self.detail_series_line)
+    addRow(self.detail_meta_line)
+    addRow(unpack(self.detail_rating_stars or {}))
+    addRow(self.detail_more_pills_button)
+    addRow(self.detail_status_button)
+    -- Read and Download are the same slot: a book on the device shows one, a
+    -- book still on the server the other. It is also why the page was opened,
+    -- so the cursor starts here instead of five rows above it.
+    local action_row = addRow(self.detail_read_button, self.detail_download_button)
+    if action_row then action_row.is_primary = true end
+    return rows
+end
+
 function CatalogDetail:updateDetailItems(select_number, no_recalculate_dimen)
     local old_dimen = self:prepareCustomUpdate(no_recalculate_dimen)
     local detail = self.current_context.detail
@@ -1621,19 +1670,7 @@ function CatalogDetail:updateDetailItems(select_number, no_recalculate_dimen)
     table.insert(self.item_group, header)
     local used = DETAIL_GAP_S + header:getSize().h
 
-    local focus_row = {}
-    if self.detail_series_line then table.insert(focus_row, self.detail_series_line) end
-    if self.detail_meta_line then table.insert(focus_row, self.detail_meta_line) end
-    for _, star in ipairs(self.detail_rating_stars or {}) do
-        table.insert(focus_row, star)
-    end
-    if self.detail_more_pills_button then
-        table.insert(focus_row, self.detail_more_pills_button)
-    end
-    if self.detail_status_button then table.insert(focus_row, self.detail_status_button) end
-    if self.detail_read_button then table.insert(focus_row, self.detail_read_button) end
-    if self.detail_download_button then table.insert(focus_row, self.detail_download_button) end
-    self.layout = { focus_row }
+    self.layout = self:detailHeaderFocusRows()
 
     if active_related then
         local desc_max = DETAIL_DESCRIPTION_HEIGHT

@@ -10,16 +10,17 @@ const BODY_METHODS = new Set(['DELETE', 'PATCH', 'POST', 'PUT']);
 const HSTS_MAX_AGE_SECONDS = 365 * 24 * 60 * 60;
 const HSTS_HEADER_VALUE = `max-age=${HSTS_MAX_AGE_SECONDS}; includeSubDomains`;
 
-export function parseTrustProxy(value: string | undefined): string | boolean | number {
+export function parseTrustProxy(value: string | undefined): string | boolean {
   const raw = value?.trim();
   if (!raw) return DEFAULT_TRUST_PROXY;
 
   const normalized = raw.toLowerCase();
-  if (['false', '0', 'no', 'off'].includes(normalized)) return false;
-  if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+  if (['false', 'no', 'off'].includes(normalized)) return false;
+  if (['true', 'yes', 'on'].includes(normalized)) return true;
 
-  const hopCount = Number(raw);
-  if (Number.isInteger(hopCount) && hopCount >= 0) return hopCount;
+  if (!Number.isNaN(Number(raw))) {
+    throw new Error('Numeric TRUST_PROXY hop counts are not supported; configure trusted proxy IP or CIDR ranges');
+  }
 
   return raw;
 }
@@ -84,6 +85,27 @@ export function buildHelmetOptions(options: CspOptions = {}) {
   };
 }
 
+/**
+ * Decides whether an unmatched request should be answered with the SPA shell.
+ *
+ * Serving `index.html` for everything means a hashed bundle that no longer exists after an upgrade
+ * answers `200 OK` with an HTML body under a `.js` URL. A 200 is storable, so both the browser HTTP
+ * cache and the Workbox precache keep it, dynamic imports of that chunk fail, and the broken state
+ * survives reloads until the user clears site data. Anything that names a file gets a real 404.
+ *
+ * Every BookOrbit route parameter is numeric, so "has an extension" reliably separates asset
+ * requests from client-side routes such as `/book/123/files`.
+ */
+export function isStaticAssetPath(url: string): boolean {
+  const pathname = url.split('?')[0].split('#')[0];
+  const lastSegment = pathname.slice(pathname.lastIndexOf('/') + 1);
+  return lastSegment.includes('.');
+}
+
+export function shouldServeSpaFallback(url: string): boolean {
+  return !isStaticAssetPath(url);
+}
+
 export function shouldInjectEmptyJsonBody(method: string, headers: IncomingHttpHeaders): boolean {
   const contentType = getHeaderValue(headers['content-type'])?.toLowerCase();
   if (!BODY_METHODS.has(method.toUpperCase()) || !contentType?.startsWith('application/json')) {
@@ -135,4 +157,18 @@ export function registerConditionalHsts(fastify: FastifyInstance): void {
     applyConditionalHsts(request, reply);
     done(null, payload);
   });
+}
+
+/**
+ * Nest's `@RouteConfig({ bodyLimit })` only reaches Fastify's user-space `config` object, while
+ * Fastify reads `bodyLimit` from the route options. Without copying it across, a route that asks
+ * for a larger body silently keeps the 1 MiB default and its DTO length limit is unreachable.
+ */
+export function applyDeclaredBodyLimit(route: { config?: unknown; bodyLimit?: number }): void {
+  const declared = (route.config as { bodyLimit?: unknown } | undefined)?.bodyLimit;
+  if (typeof declared === 'number' && Number.isInteger(declared) && declared > 0) route.bodyLimit = declared;
+}
+
+export function registerDeclaredBodyLimits(fastify: FastifyInstance): void {
+  fastify.addHook('onRoute', applyDeclaredBodyLimit);
 }

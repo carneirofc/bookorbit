@@ -10,9 +10,22 @@ function flattenSql(value: unknown): string {
   return [flattenSql(record.value), flattenSql(record.queryChunks)].join(' ');
 }
 
+/** Collects the primitives drizzle binds into a query, so tests can assert on parameters rather than SQL text. */
+function boundValues(node: unknown, out: unknown[] = [], seen = new Set<unknown>()): unknown[] {
+  if (node === null || node === undefined || seen.has(node)) return out;
+  if (typeof node === 'string' || typeof node === 'number' || node instanceof Date) {
+    out.push(node instanceof Date ? node.toISOString() : node);
+    return out;
+  }
+  if (typeof node !== 'object') return out;
+  seen.add(node);
+  for (const value of Object.values(node as Record<string, unknown>)) boundValues(value, out, seen);
+  return out;
+}
+
 function makeSelectChain(resolvedValue: unknown) {
   const chain: Record<string, ReturnType<typeof vi.fn>> = {};
-  const methods = ['from', 'where', 'orderBy', 'limit', 'groupBy', 'innerJoin', 'leftJoin', 'having', 'as', '$dynamic'];
+  const methods = ['from', 'where', 'orderBy', 'limit', 'groupBy', 'innerJoin', 'leftJoin', 'having', 'as', '$dynamic', 'for'];
   methods.forEach((m) => {
     chain[m] = vi.fn().mockReturnValue(chain);
   });
@@ -39,11 +52,81 @@ function makeDeleteChain() {
   return chain;
 }
 
+function makeUpdateChain(resolvedValue: unknown) {
+  const chain: Record<string, ReturnType<typeof vi.fn>> = {};
+  const methods = ['set', 'where', 'returning'];
+  methods.forEach((method) => {
+    chain[method] = vi.fn().mockReturnValue(chain);
+  });
+  (chain as unknown as { then: (resolve: (value: unknown) => unknown) => Promise<unknown> }).then = (resolve) =>
+    Promise.resolve(resolvedValue).then(resolve);
+  return chain;
+}
+
 function makeRepo(db: Record<string, unknown> = {}) {
   return new AchievementRepository(db as never);
 }
 
 describe('AchievementRepository', () => {
+  describe('celebration state', () => {
+    it('backfills existing awards once using a transactional marker', async () => {
+      const insertChain = makeInsertChain([{ key: 'achievement_celebration_backfill_v1' }]);
+      const updateChain = makeUpdateChain([{ id: 1 }, { id: 2 }]);
+      const tx = {
+        insert: vi.fn().mockReturnValue(insertChain),
+        update: vi.fn().mockReturnValue(updateChain),
+      };
+      const db = { transaction: vi.fn().mockImplementation((callback: (value: typeof tx) => unknown) => callback(tx)) };
+      const repo = makeRepo(db);
+
+      await expect(repo.backfillExistingCelebrations()).resolves.toBe(2);
+      expect(insertChain.onConflictDoNothing).toHaveBeenCalledOnce();
+      expect(updateChain.set).toHaveBeenCalledOnce();
+    });
+
+    it('does not repeat the backfill when the marker already exists', async () => {
+      const insertChain = makeInsertChain([]);
+      const tx = { insert: vi.fn().mockReturnValue(insertChain), update: vi.fn() };
+      const db = { transaction: vi.fn().mockImplementation((callback: (value: typeof tx) => unknown) => callback(tx)) };
+      const repo = makeRepo(db);
+
+      await expect(repo.backfillExistingCelebrations()).resolves.toBe(0);
+      expect(tx.update).not.toHaveBeenCalled();
+    });
+
+    it('claims one pending award with a skip-locked row lock', async () => {
+      const candidate = {
+        award: { id: 9, userId: 4, achievementKey: 'reader', awardedAt: new Date(), contextJson: null },
+        achievement: { key: 'reader', category: 'reading' },
+      };
+      const selectChain = makeSelectChain([candidate]);
+      const claimedAward = { ...candidate.award, celebrationClaimId: 'claim-id' };
+      const updateChain = makeUpdateChain([claimedAward]);
+      const tx = {
+        select: vi.fn().mockReturnValue(selectChain),
+        update: vi.fn().mockReturnValue(updateChain),
+      };
+      const db = { transaction: vi.fn().mockImplementation((callback: (value: typeof tx) => unknown) => callback(tx)) };
+      const repo = makeRepo(db);
+
+      const result = await repo.claimNextCelebration(4, 'claim-id', new Date(), new Date());
+
+      expect(result).toEqual({ award: claimedAward, achievement: candidate.achievement });
+      expect(selectChain.for).toHaveBeenCalledWith('update', expect.objectContaining({ skipLocked: true }));
+      expect(updateChain.set).toHaveBeenCalledWith(expect.objectContaining({ celebrationClaimId: 'claim-id' }));
+    });
+
+    it('rejects acknowledgement of another user claim', async () => {
+      const selectChain = makeSelectChain([{ id: 9, userId: 5 }]);
+      const tx = { select: vi.fn().mockReturnValue(selectChain), update: vi.fn() };
+      const db = { transaction: vi.fn().mockImplementation((callback: (value: typeof tx) => unknown) => callback(tx)) };
+      const repo = makeRepo(db);
+
+      await expect(repo.acknowledgeCelebration(4, 'claim-id', new Date())).resolves.toBe('foreign');
+      expect(tx.update).not.toHaveBeenCalled();
+    });
+  });
+
   describe('upsertCatalogue', () => {
     it('inserts seed rows and deletes stale ones when seed is non-empty', async () => {
       const insertChain = makeInsertChain(undefined);
@@ -618,7 +701,7 @@ describe('AchievementRepository', () => {
       const db = { execute: vi.fn().mockResolvedValue({ rows: [{ streak_length: '7' }] }) };
       const repo = makeRepo(db);
 
-      const result = await repo.getCurrentStreak(1);
+      const result = await repo.getCurrentStreak(1, 'UTC');
 
       expect(result).toBe(7);
     });
@@ -627,9 +710,85 @@ describe('AchievementRepository', () => {
       const db = { execute: vi.fn().mockResolvedValue({ rows: [] }) };
       const repo = makeRepo(db);
 
-      const result = await repo.getCurrentStreak(1);
+      const result = await repo.getCurrentStreak(1, 'UTC');
 
       expect(result).toBe(0);
+    });
+  });
+
+  describe('reader-timezone day bucketing', () => {
+    // user_reading_daily_stats.day and reading_sessions are bucketed in the reader's timezone,
+    // so every "in a day" query has to agree with that rather than with UTC or the database server.
+    it("getCurrentStreak cuts off at the reader's today, not the database server's CURRENT_DATE", async () => {
+      const db = { execute: vi.fn().mockResolvedValue({ rows: [{ streak_length: '4' }] }) };
+      const repo = makeRepo(db);
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-08-23T22:30:00.000Z'));
+
+      await repo.getCurrentStreak(1, 'Pacific/Auckland');
+
+      const sql = flattenSql(db.execute.mock.calls[0]![0]);
+      expect(sql).not.toContain('CURRENT_DATE');
+      // 22:30 UTC on the 23rd is already the 24th in Auckland.
+      expect(boundValues(db.execute.mock.calls[0]![0])).toContain('2026-08-24');
+      vi.useRealTimers();
+    });
+
+    it("getMaxPagesInADay groups by the reader's local day", async () => {
+      const db = { execute: vi.fn().mockResolvedValue({ rows: [{ max_pages: 10 }] }) };
+      const repo = makeRepo(db);
+
+      await repo.getMaxPagesInADay(1, 'Pacific/Auckland');
+
+      expect(flattenSql(db.execute.mock.calls[0]![0])).toContain('AT TIME ZONE');
+      expect(boundValues(db.execute.mock.calls[0]![0])).toContain('Pacific/Auckland');
+    });
+
+    it("getPagesOnDay windows the day in the reader's timezone", async () => {
+      const chain = makeSelectChain([{ value: 42 }]);
+      const repo = makeRepo({ select: vi.fn().mockReturnValue(chain) });
+
+      await repo.getPagesOnDay(1, new Date('2026-08-23T22:30:00.000Z'), 'Pacific/Auckland');
+
+      const bounds = boundValues(chain.where!.mock.calls[0]![0]);
+      // Auckland is UTC+12, so their 24th runs from 12:00 UTC on the 23rd to 12:00 UTC on the 24th.
+      expect(bounds).toContain('2026-08-23T12:00:00.000Z');
+      expect(bounds).toContain('2026-08-24T12:00:00.000Z');
+    });
+
+    it("countAnnotationsOnDay windows the day in the reader's timezone", async () => {
+      const chain = makeSelectChain([{ value: 3 }]);
+      const repo = makeRepo({ select: vi.fn().mockReturnValue(chain) });
+
+      await repo.countAnnotationsOnDay(1, new Date('2026-08-23T22:30:00.000Z'), 'Pacific/Auckland');
+
+      const bounds = boundValues(chain.where!.mock.calls[0]![0]);
+      expect(bounds).toContain('2026-08-23T12:00:00.000Z');
+      expect(bounds).toContain('2026-08-24T12:00:00.000Z');
+    });
+  });
+
+  describe('findUserTimeZone', () => {
+    it("returns the reader's configured timezone", async () => {
+      const chain = makeSelectChain([{ settings: { timezone: 'Europe/Stockholm' } }]);
+      const repo = makeRepo({ select: vi.fn().mockReturnValue(chain) });
+
+      await expect(repo.findUserTimeZone(1)).resolves.toBe('Europe/Stockholm');
+    });
+
+    it('falls back to UTC for a missing or unusable timezone', async () => {
+      for (const settings of [{}, { timezone: '' }, { timezone: 'Not/AZone' }, null]) {
+        const chain = makeSelectChain([{ settings }]);
+        const repo = makeRepo({ select: vi.fn().mockReturnValue(chain) });
+        await expect(repo.findUserTimeZone(1)).resolves.toBe('UTC');
+      }
+    });
+
+    it('falls back to UTC when the user row is missing', async () => {
+      const chain = makeSelectChain([]);
+      const repo = makeRepo({ select: vi.fn().mockReturnValue(chain) });
+
+      await expect(repo.findUserTimeZone(1)).resolves.toBe('UTC');
     });
   });
 
@@ -1786,7 +1945,7 @@ describe('AchievementRepository', () => {
       const db = { execute: vi.fn().mockResolvedValue({ rows: [{ max_pages: 203.7 }] }) };
       const repo = makeRepo(db);
 
-      const result = await repo.getMaxPagesInADay(1);
+      const result = await repo.getMaxPagesInADay(1, 'UTC');
 
       expect(result).toBe(203);
     });
@@ -1795,7 +1954,7 @@ describe('AchievementRepository', () => {
       const db = { execute: vi.fn().mockResolvedValue({ rows: [{ max_pages: 0 }] }) };
       const repo = makeRepo(db);
 
-      const result = await repo.getMaxPagesInADay(1);
+      const result = await repo.getMaxPagesInADay(1, 'UTC');
 
       expect(result).toBe(0);
     });
@@ -1804,7 +1963,7 @@ describe('AchievementRepository', () => {
       const db = { execute: vi.fn().mockResolvedValue({ rows: [] }) };
       const repo = makeRepo(db);
 
-      const result = await repo.getMaxPagesInADay(1);
+      const result = await repo.getMaxPagesInADay(1, 'UTC');
 
       expect(result).toBe(0);
     });
@@ -1989,29 +2148,18 @@ describe('AchievementRepository', () => {
   });
 
   describe('countDistinctSources', () => {
-    it('returns 3 when all sources are active', async () => {
-      const webChain = makeSelectChain([{ id: 1 }]);
-      const koreaderChain = makeSelectChain([{ id: 1 }]);
-      const koboChain = makeSelectChain([{ id: 1 }]);
-      let callCount = 0;
-      const db = {
-        select: vi.fn().mockImplementation(() => {
-          callCount++;
-          if (callCount === 1) return webChain;
-          if (callCount === 2) return koreaderChain;
-          return koboChain;
-        }),
-      };
+    it('returns the distinct source count from first-party sessions and external readers', async () => {
+      const db = { execute: vi.fn().mockResolvedValue({ rows: [{ source_count: 5 }] }) };
       const repo = makeRepo(db);
 
       const result = await repo.countDistinctSources(1);
 
-      expect(result).toBe(3);
+      expect(result).toBe(5);
+      expect(db.execute).toHaveBeenCalledOnce();
     });
 
     it('returns 0 when no sources active', async () => {
-      const emptyChain = makeSelectChain([]);
-      const db = { select: vi.fn().mockReturnValue(emptyChain) };
+      const db = { execute: vi.fn().mockResolvedValue({ rows: [{ source_count: 0 }] }) };
       const repo = makeRepo(db);
 
       const result = await repo.countDistinctSources(1);
@@ -2019,21 +2167,13 @@ describe('AchievementRepository', () => {
       expect(result).toBe(0);
     });
 
-    it('returns 1 when only web is active', async () => {
-      const webChain = makeSelectChain([{ id: 1 }]);
-      const emptyChain = makeSelectChain([]);
-      let callCount = 0;
-      const db = {
-        select: vi.fn().mockImplementation(() => {
-          callCount++;
-          return callCount === 1 ? webChain : emptyChain;
-        }),
-      };
+    it('returns 0 when the aggregate query returns no rows', async () => {
+      const db = { execute: vi.fn().mockResolvedValue({ rows: [] }) };
       const repo = makeRepo(db);
 
       const result = await repo.countDistinctSources(1);
 
-      expect(result).toBe(1);
+      expect(result).toBe(0);
     });
   });
 

@@ -1,4 +1,5 @@
 import type { HighlightOfTheDayWidgetData, ReadingGoalWidgetData, ReadingStreakWidgetData } from "./dashboard";
+import type { SeriesIndex } from "./series-index";
 
 export interface KoreaderCredentials {
   username: string;
@@ -11,6 +12,8 @@ export interface KoreaderDeviceInfo {
   deviceId: string;
   lastSyncAt: string;
   lastBookTitle: string | null;
+  /** Set when the device has been retired: its data is kept, but it is no longer treated as active. */
+  retiredAt: string | null;
   fileNamingPattern?: string | null;
   seriesFileNamingPattern?: string | null;
   standaloneFileNamingPattern?: string | null;
@@ -40,6 +43,7 @@ export interface KoreaderDeviceSweepInfo {
   lastSweepBooksMatched: number;
   lastSweepPageStats: number;
   lastSweepAnnotations: number;
+  retiredAt: string | null;
   fileNamingPattern?: string | null;
   seriesFileNamingPattern?: string | null;
   standaloneFileNamingPattern?: string | null;
@@ -76,6 +80,19 @@ export interface KoreaderBookSyncInfo {
   canonicalUpdatedAt: string;
   devices: KoreaderBookProgress[];
   fileModifiedSinceLastSync: boolean;
+  /**
+   * Devices sitting on a position the user reset away from. Their pushes are recorded but do
+   * not move the book until the device takes the reset, so this is the state behind a device
+   * and a book that visibly disagree.
+   */
+  heldByReset: KoreaderResetHeldDevice[];
+}
+
+export interface KoreaderResetHeldDevice {
+  device: string;
+  deviceId: string;
+  percentage: number;
+  updatedAt: string;
 }
 
 export interface KoreaderUnmatchedBook {
@@ -179,6 +196,7 @@ export interface KoreaderCatalogFile {
   id: number;
   format: string;
   role: string;
+  downloadVariant: "original" | "audioless_epub";
   sizeBytes: number | null;
   durationSeconds: number | null;
   downloadUrl: string;
@@ -198,7 +216,7 @@ export interface KoreaderCatalogBookListItem {
   authors: string[];
   seriesId: number | null;
   seriesName: string | null;
-  seriesIndex: number | null;
+  seriesIndex: SeriesIndex | null;
   progressPercentage: number | null;
   /** When reading progress was last recorded, so the plugin can show recency. */
   lastReadAt: string | null;
@@ -217,7 +235,7 @@ export interface KoreaderCatalogRelatedBook {
   id: number;
   title: string | null;
   authors: string[];
-  seriesIndex: number | null;
+  seriesIndex: SeriesIndex | null;
   hasCover: boolean;
   thumbnailUrl: string | null;
   detailUrl: string;
@@ -351,6 +369,7 @@ export interface KoreaderCatalogDashboardSectionResponse {
 export interface KoreaderCatalogManifestFile {
   id: number;
   format: string;
+  downloadVariant: "original" | "audioless_epub";
   sizeBytes: number | null;
   contentVersion: string;
   fileHash: string | null;
@@ -363,7 +382,7 @@ export interface KoreaderCatalogManifestBook {
   title: string;
   authors: string[];
   seriesName: string | null;
-  seriesIndex: number | null;
+  seriesIndex: SeriesIndex | null;
   formats: string[];
   files: KoreaderCatalogManifestFile[];
 }

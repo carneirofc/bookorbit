@@ -5,6 +5,7 @@ import type { RequestUser } from '../../common/types/request-user';
 import { DashboardService } from './dashboard.service';
 import { DashboardWidgetService } from './dashboard-widget.service';
 import { DashboardScrollerBatchDto } from './dto/dashboard-scroller-batch.dto';
+import { DashboardWidgetBatchDto } from './dto/dashboard-widget-batch.dto';
 import { ScrollerType } from './dto/scroller-type.enum';
 
 @Controller('dashboard')
@@ -28,6 +29,18 @@ export class DashboardController {
   @HttpCode(HttpStatus.OK)
   getScrollers(@CurrentUser() user: RequestUser, @Body() dto: DashboardScrollerBatchDto) {
     return this.dashboardService.getScrollers(dto, user);
+  }
+
+  @Post('widgets/batch')
+  @HttpCode(HttpStatus.OK)
+  getWidgets(@CurrentUser() user: RequestUser, @Body() dto: DashboardWidgetBatchDto) {
+    return this.widgetService.getWidgets([...new Set(dto.widgets)], user);
+  }
+
+  @Post('refresh')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  refresh(@CurrentUser() user: RequestUser) {
+    this.widgetService.clearCacheForUser(user.id);
   }
 
   @Get('widgets/reading-goal')

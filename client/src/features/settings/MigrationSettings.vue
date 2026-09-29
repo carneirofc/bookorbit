@@ -1,11 +1,13 @@
 <script setup lang="ts">
+import { Button } from '@/components/ui/button'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { formatDateTime } from '@/i18n/formatters'
-import { Eye, EyeOff, Loader2 } from '@lucide/vue'
+import { Loader2 } from '@lucide/vue'
 import { toast } from 'vue-sonner'
 import SettingsPageHeader from './SettingsPageHeader.vue'
 import MigrationStepper from '@/features/migration/components/MigrationStepper.vue'
+import MigrationSourceFields from '@/features/migration/components/MigrationSourceFields.vue'
 import SearchableUserSelect from '@/features/migration/components/SearchableUserSelect.vue'
 import type { StepDefinition } from '@/features/migration/components/MigrationStepper.vue'
 import { api } from '@/lib/api'
@@ -41,7 +43,13 @@ import {
 } from '@/features/migration/lib/migration-api'
 import { useMigrationPolling } from '@/features/migration/composables/useMigrationPolling'
 import { useMigrationProgress } from '@/features/migration/composables/useMigrationProgress'
-import { SECRET_INPUT_ATTRS } from '@/lib/secret-input'
+import {
+  buildMigrationSourceConnectionConfig,
+  createMigrationSourceDraft,
+  hydrateMigrationSourceDraft,
+  validateMigrationSourceDraft,
+  type MigrationSourceValidationError,
+} from '@/features/migration/lib/migration-source-config'
 
 const { t } = useI18n()
 
@@ -58,6 +66,7 @@ interface UserMappingDraft {
   sourceUserId: string
   username: string
   targetUserId: number | null
+  skip: boolean
 }
 
 interface PathMappingDraft {
@@ -89,17 +98,7 @@ const suggestionsLoadedAt = ref<string | null>(null)
 const userMappings = ref<UserMappingDraft[]>([])
 const pathMappings = ref<PathMappingDraft[]>([{ sourcePrefix: '', targetPrefix: '' }])
 
-const sourceDraft = reactive({
-  type: 'booklore',
-  name: 'Booklore',
-  host: '',
-  port: 3306,
-  user: '',
-  password: '',
-  database: '',
-  ssl: false,
-  mediaRootPath: '',
-})
+const sourceDraft = reactive(createMigrationSourceDraft())
 
 const busy = reactive({
   testingSource: false,
@@ -232,6 +231,7 @@ watch(activeStepIndex, (newVal) => {
 
 watch(
   () => [
+    sourceDraft.type,
     sourceDraft.mediaRootPath,
     sourceDraft.host,
     sourceDraft.port,
@@ -239,6 +239,8 @@ watch(
     sourceDraft.password,
     sourceDraft.database,
     sourceDraft.ssl,
+    sourceDraft.cwaAppDatabasePath,
+    sourceDraft.cwaMetadataDatabasePath,
   ],
   () => {
     mediaPathTestState.value = 'idle'
@@ -270,7 +272,7 @@ const stepTitles = computed(() => [
   t('settings.admin.migration.stepReportTitle'),
 ])
 const stepSubtitles = computed(() => [
-  t('settings.admin.migration.subtitleSource'),
+  t('settings.admin.migration.genericSubtitleSource'),
   t('settings.admin.migration.subtitleMappings'),
   t('settings.admin.migration.subtitleDryRun'),
   t('settings.admin.migration.subtitleRun'),
@@ -337,7 +339,8 @@ const duplicateTargetBookLabels = ref<Map<number, string>>(new Map())
 const duplicateGroupsRemaining = computed(() => duplicateMatches.value.filter((dup) => !duplicateResolutions.value.has(dup.targetBookId)).length)
 
 const STRATEGY_PRIORITY: Record<string, number> = {
-  isbn: 40,
+  isbn: 50,
+  asin: 40,
   file_hash: 30,
   path_mapping: 20,
   title_author: 10,
@@ -365,7 +368,7 @@ function sourceBookSecondary(dup: DuplicateBookMatch, sourceId: string): string 
   if (author) return t('settings.admin.migration.byAuthorWithId', { author, id: sourceId })
   const filePath = candidate?.filePath?.trim()
   if (filePath) return t('settings.admin.migration.filePathWithId', { path: filePath, id: sourceId })
-  return t('settings.admin.migration.bookloreSourceId', { id: sourceId })
+  return t('settings.admin.migration.sourceRecordId', { id: sourceId })
 }
 
 function recommendedSourceBookId(dup: DuplicateBookMatch): string | null {
@@ -628,16 +631,7 @@ async function refreshWorkflowState() {
 function hydrateSourceDraft() {
   const currentSource = source.value
   if (!currentSource) return
-  sourceDraft.type = currentSource.type || sourceDraft.type
-  sourceDraft.name = currentSource.name || sourceDraft.name
-  const cfg = asRecord(currentSource.connectionConfig)
-  sourceDraft.host = asString(cfg.host) ?? sourceDraft.host
-  sourceDraft.port = asNumber(cfg.port) ?? sourceDraft.port
-  sourceDraft.user = asString(cfg.user) ?? sourceDraft.user
-  sourceDraft.password = asString(cfg.password) ?? ''
-  sourceDraft.database = asString(cfg.database) ?? sourceDraft.database
-  sourceDraft.ssl = asBoolean(cfg.ssl) ?? sourceDraft.ssl
-  sourceDraft.mediaRootPath = asString(cfg.mediaRootPath) ?? ''
+  hydrateMigrationSourceDraft(sourceDraft, currentSource)
 }
 
 function hydratePathMappings() {
@@ -655,6 +649,7 @@ function hydrateUserMappingsFromProfile() {
     sourceUserId: row.sourceUserId,
     username: row.sourceUserId,
     targetUserId: row.targetUserId,
+    skip: row.targetUserId === null,
   }))
 }
 
@@ -672,7 +667,10 @@ async function hydrateUserMappingsFromSuggestions(showSuccessToast: boolean) {
     userMappings.value = response.suggestions.map((row) => ({
       sourceUserId: row.sourceUserId,
       username: row.username,
-      targetUserId: savedMappings.get(row.sourceUserId) ?? row.suggestedTargetUserId ?? fallbackSingleTargetUserId,
+      targetUserId: savedMappings.has(row.sourceUserId)
+        ? (savedMappings.get(row.sourceUserId) ?? null)
+        : (row.suggestedTargetUserId ?? fallbackSingleTargetUserId),
+      skip: savedMappings.has(row.sourceUserId) && savedMappings.get(row.sourceUserId) === null,
     }))
 
     if (showSuccessToast) {
@@ -692,19 +690,28 @@ async function hydrateUserMappingsFromSuggestions(showSuccessToast: boolean) {
 }
 
 function buildSourceConnectionConfig() {
-  return {
-    host: sourceDraft.host.trim(),
-    port: sourceDraft.port,
-    user: sourceDraft.user.trim(),
-    password: sourceDraft.password,
-    database: sourceDraft.database.trim(),
-    ssl: sourceDraft.ssl,
-    mediaRootPath: sourceDraft.mediaRootPath.trim(),
-  }
+  return buildMigrationSourceConnectionConfig(sourceDraft)
 }
 
 function hasValidSourceDraft() {
-  return !!sourceDraft.name.trim() && !!sourceDraft.host.trim() && !!sourceDraft.user.trim() && !!sourceDraft.database.trim()
+  return validateMigrationSourceDraft(sourceDraft) == null
+}
+
+function sourceDraftValidationMessage() {
+  const error = validateMigrationSourceDraft(sourceDraft)
+  const keyByError: Record<MigrationSourceValidationError, string> = {
+    nameRequired: 'migration.source.validation.nameRequired',
+    databaseFieldsRequired: 'migration.source.validation.databaseFieldsRequired',
+    apiFieldsRequired: 'migration.source.validation.apiFieldsRequired',
+    baseUrlInvalid: 'migration.source.validation.baseUrlInvalid',
+    backupPathRequired: 'migration.source.validation.backupPathRequired',
+    backupPathAbsolute: 'migration.source.validation.backupPathAbsolute',
+    cwaAppDatabasePathRequired: 'migration.source.validation.cwaAppDatabasePathRequired',
+    cwaAppDatabasePathAbsolute: 'migration.source.validation.cwaAppDatabasePathAbsolute',
+    cwaMetadataDatabasePathRequired: 'migration.source.validation.cwaMetadataDatabasePathRequired',
+    cwaMetadataDatabasePathAbsolute: 'migration.source.validation.cwaMetadataDatabasePathAbsolute',
+  }
+  return error ? t(keyByError[error]) : t('settings.admin.migration.requiredFields')
 }
 
 function extractWarningStrings(result: Record<string, unknown>): string[] {
@@ -717,7 +724,7 @@ function extractMediaPathWarnings(result: Record<string, unknown>): string[] {
 
 async function onTestSource() {
   if (!hasValidSourceDraft()) {
-    toast.error(t('settings.admin.migration.requiredFields'))
+    toast.error(sourceDraftValidationMessage())
     return
   }
 
@@ -754,7 +761,7 @@ async function onTestMediaPath() {
     return
   }
   if (!hasValidSourceDraft()) {
-    toast.error(t('settings.admin.migration.requiredFields'))
+    toast.error(sourceDraftValidationMessage())
     return
   }
   const mediaRootPath = sourceDraft.mediaRootPath.trim()
@@ -808,7 +815,7 @@ async function onSaveAndValidate() {
     return
   }
   if (!hasValidSourceDraft()) {
-    toast.error(t('settings.admin.migration.requiredFields'))
+    toast.error(sourceDraftValidationMessage())
     return
   }
 
@@ -877,9 +884,7 @@ function cleanedPathMappings() {
 }
 
 function cleanedUserMappings() {
-  return userMappings.value
-    .map((row) => ({ sourceUserId: row.sourceUserId, targetUserId: row.targetUserId }))
-    .filter((row): row is { sourceUserId: string; targetUserId: number } => !!row.targetUserId)
+  return userMappings.value.map((row) => ({ sourceUserId: row.sourceUserId, targetUserId: row.skip ? null : row.targetUserId }))
 }
 
 async function onSaveMappings() {
@@ -894,11 +899,11 @@ async function onSaveMappings() {
   }
 
   const mappings = cleanedUserMappings()
-  if (mappings.length === 0) {
+  if (!mappings.some((row) => row.targetUserId !== null)) {
     toast.error(t('settings.admin.migration.mapAtLeastOneUser'))
     return
   }
-  if (mappings.length !== userMappings.value.length) {
+  if (userMappings.value.some((row) => !row.skip && row.targetUserId === null)) {
     toast.error(t('settings.admin.migration.mapEveryUser'))
     return
   }
@@ -1156,8 +1161,10 @@ function friendlyUnresolvedReason(reason: string | null): string {
   if (reason === 'no_file_path_match') return t('settings.admin.migration.reasonNoFilePathMatch')
   if (reason === 'no_file_hash_match') return t('settings.admin.migration.reasonNoFileHashMatch')
   if (reason === 'no_isbn_match') return t('settings.admin.migration.reasonNoIsbnMatch')
+  if (reason === 'no_asin_match') return t('settings.admin.migration.reasonNoAsinMatch')
   if (reason === 'insufficient_source_data') return t('settings.admin.migration.reasonInsufficientSourceData')
   if (reason === 'ambiguous_isbn_match') return t('settings.admin.migration.reasonAmbiguousIsbnMatch')
+  if (reason === 'ambiguous_asin_match') return t('settings.admin.migration.reasonAmbiguousAsinMatch')
   if (reason === 'ambiguous_file_hash_match') return t('settings.admin.migration.reasonAmbiguousFileHashMatch')
   if (reason === 'ambiguous_file_path_match') return t('settings.admin.migration.reasonAmbiguousFilePathMatch')
   if (reason === 'ambiguous_title_author_match') return t('settings.admin.migration.reasonAmbiguousTitleAuthorMatch')
@@ -1166,6 +1173,7 @@ function friendlyUnresolvedReason(reason: string | null): string {
 
 function friendlyMatchStrategy(strategy: string | null): string {
   if (strategy === 'isbn') return t('settings.admin.migration.strategyIsbn')
+  if (strategy === 'asin') return t('settings.admin.migration.strategyAsin')
   if (strategy === 'file_hash') return t('settings.admin.migration.strategyFileHash')
   if (strategy === 'path_mapping') return t('settings.admin.migration.strategyPathMapping')
   if (strategy === 'title_author') return t('settings.admin.migration.strategyTitleAuthor')
@@ -1256,20 +1264,6 @@ function asString(value: unknown): string | null {
   return null
 }
 
-function asNumber(value: unknown): number | null {
-  if (typeof value === 'number' && Number.isFinite(value)) return value
-  if (typeof value === 'string') {
-    const parsed = Number(value)
-    return Number.isFinite(parsed) ? parsed : null
-  }
-  return null
-}
-
-function asBoolean(value: unknown): boolean | null {
-  if (typeof value === 'boolean') return value
-  return null
-}
-
 function formatSourceCountLabel(key: string) {
   return key
     .replace(/([A-Z])/g, ' $1')
@@ -1280,7 +1274,7 @@ function formatSourceCountLabel(key: string) {
 </script>
 
 <template>
-  <SettingsPageHeader :title="t('settings.admin.migration.title')" :subtitle="t('settings.admin.migration.subtitle')" />
+  <SettingsPageHeader :title="t('settings.admin.migration.title')" :subtitle="t('settings.admin.migration.genericSubtitle')" />
 
   <div v-if="loading" class="flex items-center justify-center py-16">
     <Loader2 class="size-5 animate-spin text-muted-foreground" />
@@ -1325,109 +1319,29 @@ function formatSourceCountLabel(key: string) {
         <div class="px-6 py-6">
           <!-- Step 0: Source Connection -->
           <div v-if="currentStep === 0" class="space-y-3">
-            <div class="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
-              <label class="block">
-                <span class="settings-hint">{{ t('settings.admin.migration.sourceType') }}</span>
-                <select v-model="sourceDraft.type" class="select-field mt-1 w-full" :disabled="hasActiveRun">
-                  <option v-for="type in supportedTypes" :key="type" :value="type">{{ type }}</option>
-                </select>
-              </label>
-              <label class="block">
-                <span class="settings-hint">{{ t('settings.admin.migration.sourceName') }}</span>
-                <input v-model="sourceDraft.name" class="input-field mt-1 w-full" placeholder="Booklore Import" :disabled="hasActiveRun" />
-              </label>
-              <label class="block">
-                <span class="settings-hint">{{ t('settings.admin.migration.host') }}</span>
-                <input v-model="sourceDraft.host" class="input-field mt-1 w-full" placeholder="127.0.0.1" :disabled="hasActiveRun" />
-              </label>
-              <label class="block">
-                <span class="settings-hint">{{ t('settings.admin.migration.port') }}</span>
-                <input v-model.number="sourceDraft.port" class="input-field mt-1 w-full" type="number" min="1" max="65535" :disabled="hasActiveRun" />
-              </label>
-              <label class="block">
-                <span class="settings-hint">{{ t('settings.admin.migration.user') }}</span>
-                <input v-model="sourceDraft.user" class="input-field mt-1 w-full" placeholder="booklore" :disabled="hasActiveRun" />
-              </label>
-              <label class="block">
-                <span class="settings-hint">{{ t('settings.admin.migration.password') }}</span>
-                <div class="relative mt-1">
-                  <input
-                    v-model="sourceDraft.password"
-                    v-bind="SECRET_INPUT_ATTRS"
-                    class="input-field w-full pr-9"
-                    :class="{ 'input-secret': !showPassword }"
-                    type="text"
-                    :placeholder="
-                      source ? t('settings.admin.migration.passwordSavedPlaceholder') : t('settings.admin.migration.passwordEmptyPlaceholder')
-                    "
-                    :disabled="hasActiveRun"
-                  />
-                  <button
-                    type="button"
-                    class="absolute inset-y-0 right-0 flex items-center px-2.5 text-muted-foreground hover:text-foreground"
-                    tabindex="-1"
-                    @click="onTogglePassword"
-                  >
-                    <EyeOff v-if="showPassword" class="size-4" />
-                    <Eye v-else class="size-4" />
-                  </button>
-                </div>
-              </label>
-              <label class="block">
-                <span class="settings-hint">{{ t('settings.admin.migration.database') }}</span>
-                <input v-model="sourceDraft.database" class="input-field mt-1 w-full" placeholder="booklore" :disabled="hasActiveRun" />
-              </label>
-              <label class="block md:col-span-2 xl:col-span-2">
-                <span class="settings-hint">{{ t('settings.admin.migration.mediaRootPath') }}</span>
-                <div class="mt-1 flex items-center gap-2">
-                  <input v-model="sourceDraft.mediaRootPath" class="input-field w-full" placeholder="/data/booklore/media" :disabled="hasActiveRun" />
-                  <button
-                    type="button"
-                    :disabled="busy.testingMediaPath || hasActiveRun"
-                    class="inline-flex h-9 items-center rounded-md border px-2.5 text-xs font-medium transition-colors disabled:opacity-50"
-                    :class="
-                      mediaPathTestState === 'pass'
-                        ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700 hover:bg-emerald-500/20'
-                        : mediaPathTestState === 'fail'
-                          ? 'border-amber-500/40 bg-amber-500/10 text-amber-700 hover:bg-amber-500/20'
-                          : 'border-border bg-background text-foreground hover:bg-muted'
-                    "
-                    @click="onTestMediaPath"
-                  >
-                    <Loader2 v-if="busy.testingMediaPath" class="size-3.5 animate-spin" />
-                    <span v-else>
-                      {{
-                        mediaPathTestState === 'pass'
-                          ? t('settings.admin.migration.pathOk')
-                          : mediaPathTestState === 'fail'
-                            ? t('settings.admin.migration.pathIssue')
-                            : t('settings.admin.migration.testPath')
-                      }}
-                    </span>
-                  </button>
-                </div>
-                <p class="mt-1 text-xs" :class="mediaRootPathHint.className">{{ mediaRootPathHint.text }}</p>
-                <p v-if="mediaPathTestMessage" class="mt-1 text-xs" :class="mediaPathTestState === 'pass' ? 'text-emerald-700' : 'text-amber-700'">
-                  {{ mediaPathTestMessage }}
-                </p>
-              </label>
-              <div class="flex items-center">
-                <label class="flex h-9 cursor-pointer items-center gap-2">
-                  <input v-model="sourceDraft.ssl" type="checkbox" class="size-4 rounded border-border" :disabled="hasActiveRun" />
-                  <span class="settings-hint">{{ t('settings.admin.migration.useTls') }}</span>
-                </label>
-              </div>
-            </div>
+            <MigrationSourceFields
+              :draft="sourceDraft"
+              :supported-types="supportedTypes"
+              :disabled="hasActiveRun"
+              :show-secret="showPassword"
+              :testing-media-path="busy.testingMediaPath"
+              :media-path-test-state="mediaPathTestState"
+              :media-path-test-message="mediaPathTestMessage"
+              :media-root-path-hint="mediaRootPathHint"
+              wide
+              @toggle-secret="onTogglePassword"
+              @test-media-path="onTestMediaPath"
+            />
 
             <div class="flex flex-wrap gap-2">
-              <button class="settings-btn-outline" :disabled="busy.testingSource || hasActiveRun" @click="onTestSource">
+              <Button variant="outline" size="sm" :disabled="busy.testingSource || hasActiveRun" @click="onTestSource" type="button">
                 <Loader2 v-if="busy.testingSource" class="size-3.5 animate-spin" />
                 {{ t('settings.admin.migration.testConnection') }}
-              </button>
-              <button class="settings-btn-primary" :disabled="busy.savingSource || hasActiveRun" @click="onSaveAndValidate">
+              </Button>
+              <Button size="sm" :disabled="busy.savingSource || hasActiveRun" @click="onSaveAndValidate" type="button">
                 <Loader2 v-if="busy.savingSource" class="size-3.5 animate-spin" />
                 {{ t('settings.admin.migration.saveAndValidate') }}
-              </button>
+              </Button>
             </div>
 
             <div
@@ -1458,15 +1372,17 @@ function formatSourceCountLabel(key: string) {
           <div v-else-if="currentStep === 1" class="space-y-5">
             <div class="flex items-center gap-2">
               <p class="text-xs text-muted-foreground">{{ t('settings.admin.migration.suggestionsAutoLoad') }}</p>
-              <button
+              <Button
+                variant="link"
+                size="sm"
                 v-if="source"
-                class="text-xs text-primary underline-offset-2 hover:underline disabled:opacity-50"
+                class="h-auto p-0"
                 :disabled="busy.loadingSuggestions || busy.loadingTargetUsers || hasActiveRun"
                 @click="onReloadSuggestions"
               >
                 <Loader2 v-if="busy.loadingSuggestions || busy.loadingTargetUsers" class="size-3 animate-spin inline" />
                 {{ t('settings.admin.migration.refresh') }}
-              </button>
+              </Button>
             </div>
 
             <div class="overflow-x-auto rounded border border-border">
@@ -1484,7 +1400,13 @@ function formatSourceCountLabel(key: string) {
                       <p class="text-xs text-muted-foreground">{{ row.sourceUserId }}</p>
                     </td>
                     <td class="px-3 py-2">
-                      <SearchableUserSelect v-model="row.targetUserId" :users="targetUsers" :disabled="hasActiveRun" />
+                      <div class="space-y-2">
+                        <SearchableUserSelect v-model="row.targetUserId" :users="targetUsers" :disabled="hasActiveRun || row.skip" />
+                        <label class="inline-flex items-center gap-2 text-xs text-muted-foreground">
+                          <input v-model="row.skip" type="checkbox" class="size-4 rounded border-input accent-primary" :disabled="hasActiveRun" />
+                          {{ t('settings.admin.migration.doNotImport') }}
+                        </label>
+                      </div>
                     </td>
                   </tr>
                   <tr v-if="userMappings.length === 0" class="border-t border-border">
@@ -1500,9 +1422,9 @@ function formatSourceCountLabel(key: string) {
             <div class="space-y-2">
               <div class="flex items-center justify-between">
                 <p class="settings-hint">{{ t('settings.admin.migration.pathPrefixMappings') }}</p>
-                <button class="settings-btn-outline" :disabled="hasActiveRun" @click="addPathMapping">
+                <Button variant="outline" size="sm" :disabled="hasActiveRun" @click="addPathMapping" type="button">
                   {{ t('settings.admin.migration.addMapping') }}
-                </button>
+                </Button>
               </div>
               <p class="text-xs text-muted-foreground">
                 {{ t('settings.admin.migration.pathMappingsHelp1') }} <code class="font-mono">/books/Large</code>
@@ -1529,9 +1451,9 @@ function formatSourceCountLabel(key: string) {
                   </option>
                 </select>
 
-                <button class="settings-btn-outline" :disabled="hasActiveRun" @click="removePathMapping(index)">
+                <Button variant="destructive-outline" size="sm" :disabled="hasActiveRun" @click="removePathMapping(index)" type="button">
                   {{ t('settings.admin.migration.remove') }}
-                </button>
+                </Button>
               </div>
             </div>
 
@@ -1553,18 +1475,18 @@ function formatSourceCountLabel(key: string) {
               </p>
             </div>
 
-            <button class="settings-btn-primary" :disabled="busy.savingProfile || source == null || hasActiveRun" @click="onSaveMappings">
+            <Button size="sm" :disabled="busy.savingProfile || source == null || hasActiveRun" @click="onSaveMappings" type="button">
               <Loader2 v-if="busy.savingProfile" class="size-3.5 animate-spin" />
               {{ t('settings.admin.migration.saveMappings') }}
-            </button>
+            </Button>
           </div>
 
           <!-- Step 2: Dry Run -->
           <div v-else-if="currentStep === 2" class="space-y-5">
-            <button class="settings-btn-primary" :disabled="busy.dryRun || profile == null || hasActiveRun" @click="onRunDryRun">
+            <Button size="sm" :disabled="busy.dryRun || profile == null || hasActiveRun" @click="onRunDryRun" type="button">
               <Loader2 v-if="busy.dryRun" class="size-3.5 animate-spin" />
               {{ t('settings.admin.migration.runDryRun') }}
-            </button>
+            </Button>
 
             <div v-if="plan" class="rounded border border-border bg-muted/30 p-3 space-y-2 text-sm">
               <p>
@@ -1609,7 +1531,7 @@ function formatSourceCountLabel(key: string) {
                             :value="sourceId"
                             :checked="duplicateResolutions.get(dup.targetBookId) === sourceId"
                             class="accent-primary"
-                            @change="() => handleDuplicateSelection(dup.targetBookId, sourceId)"
+                            @change="handleDuplicateSelection(dup.targetBookId, sourceId)"
                           />
                           <div class="min-w-0">
                             <p class="truncate">{{ sourceBookLabel(dup, sourceId) }}</p>
@@ -1631,14 +1553,15 @@ function formatSourceCountLabel(key: string) {
                     </div>
                   </div>
                 </div>
-                <button
-                  class="settings-btn-primary"
+                <Button
+                  size="sm"
                   :disabled="busy.resolvingDuplicates || duplicateResolutions.size < duplicateMatches.length"
                   @click="onResolveDuplicates"
+                  type="button"
                 >
                   <Loader2 v-if="busy.resolvingDuplicates" class="size-3.5 animate-spin" />
                   {{ t('settings.admin.migration.resolveDuplicatesButton', { count: duplicateMatches.length }) }}
-                </button>
+                </Button>
               </div>
             </div>
           </div>
@@ -1687,26 +1610,33 @@ function formatSourceCountLabel(key: string) {
             <div class="flex flex-wrap gap-2">
               <template v-if="confirmingMigrationStart">
                 <span class="text-xs text-amber-600 self-center">{{ t('settings.admin.migration.startConfirmPrompt') }}</span>
-                <button class="settings-btn-primary" :disabled="busy.startingRun" @click="onStartMigration">
+                <Button size="sm" :disabled="busy.startingRun" @click="onStartMigration" type="button">
                   <Loader2 v-if="busy.startingRun" class="size-3.5 animate-spin" />
                   {{ t('settings.admin.migration.confirmStart') }}
-                </button>
-                <button class="settings-btn-outline" @click="onCancelMigrationStart">{{ t('common.cancel') }}</button>
+                </Button>
+                <Button variant="outline" size="sm" @click="onCancelMigrationStart" type="button">{{ t('common.cancel') }}</Button>
               </template>
               <template v-else>
-                <button class="settings-btn-primary" :disabled="busy.startingRun || !preflight.ready" @click="onStartMigration">
+                <Button size="sm" :disabled="busy.startingRun || !preflight.ready" @click="onStartMigration" type="button">
                   <Loader2 v-if="busy.startingRun" class="size-3.5 animate-spin" />
                   {{ t('settings.admin.migration.startMigration') }}
-                </button>
+                </Button>
               </template>
-              <button v-if="run?.state === 'running'" class="settings-btn-outline text-red-600" :disabled="busy.cancellingRun" @click="onCancelRun">
+              <Button
+                variant="destructive"
+                size="sm"
+                v-if="run?.state === 'running'"
+                :disabled="busy.cancellingRun"
+                @click="onCancelRun"
+                type="button"
+              >
                 <Loader2 v-if="busy.cancellingRun" class="size-3.5 animate-spin" />
                 {{ t('settings.admin.migration.cancelRun') }}
-              </button>
-              <button class="settings-btn-outline" :disabled="busy.loadingProgress || run == null" @click="refreshRunProgress">
+              </Button>
+              <Button variant="outline" size="sm" :disabled="busy.loadingProgress || run == null" @click="refreshRunProgress" type="button">
                 <Loader2 v-if="busy.loadingProgress" class="size-3.5 animate-spin" />
                 {{ t('settings.admin.migration.refreshStatus') }}
-              </button>
+              </Button>
             </div>
 
             <div
@@ -1714,7 +1644,7 @@ function formatSourceCountLabel(key: string) {
               class="rounded border border-amber-500/20 bg-amber-500/10 px-3 py-2 flex items-center gap-2 text-xs text-amber-700"
             >
               <span>{{ t('settings.admin.migration.statusPollingStopped') }}</span>
-              <button class="underline font-medium" @click="onRetryPolling">{{ t('settings.admin.migration.retry') }}</button>
+              <Button variant="link" size="sm" class="h-auto p-0" @click="onRetryPolling">{{ t('settings.admin.migration.retry') }}</Button>
             </div>
 
             <div v-if="run" class="rounded border border-border bg-muted/30 px-4 py-3.5 flex items-center gap-3 text-xs">
@@ -1728,9 +1658,9 @@ function formatSourceCountLabel(key: string) {
                       : ''
                 }}
               </span>
-              <button v-if="run.state !== 'running'" class="text-xs text-primary underline-offset-2 hover:underline ml-auto" @click="goNext">
+              <Button variant="link" size="sm" v-if="run.state !== 'running'" class="h-auto p-0 ml-auto" @click="goNext">
                 {{ t('settings.admin.migration.viewReport') }}
-              </button>
+              </Button>
             </div>
 
             <div v-if="migrationProgress" class="space-y-1.5">
@@ -1765,16 +1695,16 @@ function formatSourceCountLabel(key: string) {
                   </p>
                 </div>
                 <div class="flex flex-wrap gap-2">
-                  <button class="settings-btn-outline" :disabled="busy.loadingReport" @click="onRefreshReport">
+                  <Button variant="outline" size="sm" :disabled="busy.loadingReport" @click="onRefreshReport" type="button">
                     <Loader2 v-if="busy.loadingReport" class="size-3.5 animate-spin" />
                     {{ runReport ? t('settings.admin.migration.reloadReport') : t('settings.admin.migration.loadFullReport') }}
-                  </button>
-                  <button class="settings-btn-outline" :disabled="busy.exporting" @click="onExportJson">
+                  </Button>
+                  <Button variant="outline" size="sm" :disabled="busy.exporting" @click="onExportJson" type="button">
                     {{ t('settings.admin.migration.exportJson') }}
-                  </button>
-                  <button class="settings-btn-outline" :disabled="busy.exporting" @click="onExportCsv">
+                  </Button>
+                  <Button variant="outline" size="sm" :disabled="busy.exporting" @click="onExportCsv" type="button">
                     {{ t('settings.admin.migration.exportCsv') }}
-                  </button>
+                  </Button>
                 </div>
               </div>
 
@@ -1784,10 +1714,10 @@ function formatSourceCountLabel(key: string) {
                   <p class="font-medium">{{ t('settings.admin.migration.migrationFailed') }}</p>
                   <p>{{ run.errorMessage }}</p>
                 </div>
-                <button v-if="run.state === 'failed'" class="settings-btn-outline text-xs" :disabled="busy.retryingRun" @click="onRetryRun">
+                <Button variant="outline" size="sm" v-if="run.state === 'failed'" :disabled="busy.retryingRun" @click="onRetryRun" type="button">
                   <Loader2 v-if="busy.retryingRun" class="size-3.5 animate-spin" />
                   {{ t('settings.admin.migration.retryFromLastStage') }}
-                </button>
+                </Button>
               </div>
 
               <!-- Stats grid — available from runProgress or full report -->
@@ -1957,10 +1887,10 @@ function formatSourceCountLabel(key: string) {
 
         <!-- Card footer -->
         <div class="px-6 py-4 border-t border-border bg-muted/30 flex items-center justify-between">
-          <button v-if="currentStep > 0" class="settings-btn-outline" @click="goPrev">{{ t('common.back') }}</button>
+          <Button v-if="currentStep > 0" type="button" variant="outline" size="sm" @click="goPrev">{{ t('common.back') }}</Button>
           <div v-else />
-          <button v-if="currentStep < 4" class="settings-btn-primary" @click="goNext">{{ continueLabel }}</button>
-          <button v-else class="settings-btn-outline" @click="goToSetup">{{ t('settings.admin.migration.backToSetup') }}</button>
+          <Button size="sm" v-if="currentStep < 4" @click="goNext" type="button">{{ continueLabel }}</Button>
+          <Button variant="outline" size="sm" v-else @click="goToSetup" type="button">{{ t('settings.admin.migration.backToSetup') }}</Button>
         </div>
       </div>
     </div>

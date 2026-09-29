@@ -2,15 +2,20 @@
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { Eye } from '@lucide/vue'
-import cronstrue from 'cronstrue'
+import { isFiveFieldCronExpression } from '@bookorbit/types'
 import ToggleSwitch from '@/components/ui/ToggleSwitch.vue'
+import { parseCronToHuman } from '@/features/library/utils/cron'
 
-const { t } = useI18n()
+const { t, locale } = useI18n()
 
-const props = defineProps<{
-  watch: boolean
-  autoScanCronExpression: string | null
-}>()
+const props = withDefaults(
+  defineProps<{
+    watch: boolean
+    autoScanCronExpression: string | null
+    showAutoScanSchedule?: boolean
+  }>(),
+  { showAutoScanSchedule: true },
+)
 
 const emit = defineEmits<{
   'update:watch': [value: boolean]
@@ -27,8 +32,6 @@ const presets = computed(() => [
   { label: t('library.creator.schedule.presets.custom'), value: '__custom__' },
 ])
 
-const CRON_REGEX = /^((\*|\d+(-\d+)?(,\d+(-\d+)?)*)(\/\d+)? ){4}(\*|\d+(-\d+)?(,\d+(-\d+)?)*)(\/\d+)?$/
-
 const isCustom = computed(() => {
   if (props.autoScanCronExpression === null) return false
   return !presets.value.some((p) => p.value === props.autoScanCronExpression)
@@ -36,7 +39,7 @@ const isCustom = computed(() => {
 
 const isCronValid = computed(() => {
   if (!isCustom.value || !props.autoScanCronExpression) return true
-  return CRON_REGEX.test(props.autoScanCronExpression)
+  return isFiveFieldCronExpression(props.autoScanCronExpression)
 })
 
 const selectedPreset = computed(() => {
@@ -71,11 +74,8 @@ function humanReadableCron(cron: string | null): string {
     '0 0 * * 1': t('library.creator.schedule.human.weeklyMonday'),
   }
   if (map[cron]) return map[cron]
-  try {
-    return cronstrue.toString(cron)
-  } catch {
-    return 'Enter a valid schedule to see a preview'
-  }
+  const description = parseCronToHuman(cron, locale.value)
+  return !description || description === cron ? t('library.creator.schedule.human.invalid') : description
 }
 </script>
 
@@ -96,8 +96,9 @@ function humanReadableCron(cron: string | null): string {
     </div>
 
     <!-- Auto-scan schedule -->
-    <div>
+    <div v-if="showAutoScanSchedule">
       <p class="text-[11px] font-semibold uppercase tracking-widest text-foreground mb-3">{{ t('library.creator.schedule.autoScanSchedule') }}</p>
+      <p class="mb-3 text-xs text-muted-foreground">{{ t('library.creator.schedule.timezoneHint') }}</p>
       <div class="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-3">
         <button
           v-for="preset in presets"

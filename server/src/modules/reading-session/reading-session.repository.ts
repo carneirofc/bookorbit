@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, lt, lte, max, min, sql } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lt, lte, max, min, notLike, sql } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 
 import type {
@@ -17,22 +17,77 @@ import {
   splitReadingSessionByDay,
   type ReadingDailyStatsSegment,
 } from '../../common/utils/reading-daily-stats.utils';
-import { toDateKeyInTimeZone } from '../../common/utils/timezone.utils';
+import { resolveTimeZone, toDateKeyInTimeZone } from '../../common/utils/timezone.utils';
 import { DB } from '../../db';
 import * as schema from '../../db/schema';
-import { bookFiles, books, readingSessions, userReadingDailyStats } from '../../db/schema';
+import { bookFiles, books, readingSessionSyncCursors, readingSessions, userReadingDailyStats } from '../../db/schema';
 
 type Db = NodePgDatabase<typeof schema>;
 type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
 
 const MIN_READING_SESSION_SECONDS = 10;
+const ESTIMATE_CLEANUP_PAGE_SIZE = 500;
+const CLEANUP_DAILY_STATS_MAX_SPAN_DAYS = 31;
+
+function groupDateKeysByMaxSpan(days: Iterable<string>): string[][] {
+  const sorted = [...new Set(days)].sort();
+  const groups: string[][] = [];
+  let group: string[] = [];
+  let firstDayNumber = 0;
+
+  for (const day of sorted) {
+    const dayNumber = Math.floor(Date.parse(`${day}T00:00:00.000Z`) / 86_400_000);
+    if (group.length === 0 || dayNumber - firstDayNumber < CLEANUP_DAILY_STATS_MAX_SPAN_DAYS) {
+      if (group.length === 0) firstDayNumber = dayNumber;
+      group.push(day);
+      continue;
+    }
+
+    groups.push(group);
+    group = [day];
+    firstDayNumber = dayNumber;
+  }
+
+  if (group.length > 0) groups.push(group);
+  return groups;
+}
 
 export type SaveReadingSessionResult =
   | { kind: 'saved' }
+  | { kind: 'superseded'; addedSeconds: number }
   | {
       kind: 'skipped';
       reason: 'duration_below_minimum' | 'book_file_not_found' | 'duplicate_session_id';
     };
+
+export type RecordCumulativeReadingSessionResult =
+  | { kind: 'baseline' | 'unchanged' | 'reset' | 'stale' }
+  | { kind: 'saved'; durationSeconds: number; sessionId: string }
+  | {
+      kind: 'skipped';
+      reason: 'book_file_not_found' | 'duplicate_session_id' | 'measured_session_present';
+    };
+
+export interface ReadingSessionSyncOptions {
+  sourceDeviceKey: string;
+  estimateSessionIdPrefix?: string;
+}
+
+export interface RecordCumulativeReadingSessionParams {
+  userId: number;
+  bookId: number;
+  bookFileId: number | null;
+  cursorSource: string;
+  sourceDeviceKey: string;
+  sessionIdPrefix: string;
+  buildSessionId: (bookFileId: number, generation: number, counter: number) => string;
+  counter: number;
+  endedAt: Date;
+  progressDelta: number | null;
+  endProgress: number | null;
+  source: ReadingSessionSource;
+  timeZone: string;
+}
 
 export interface InsertManualSessionParams {
   userId: number;
@@ -63,6 +118,8 @@ export class ReadingSessionRepository {
     endProgress: number | null,
     source: ReadingSessionSource = 'web',
     timeZone = 'UTC',
+    sync?: ReadingSessionSyncOptions,
+    sessionType: 'read' | 'tts' | 'listen' = 'read',
   ): Promise<SaveReadingSessionResult> {
     if (durationSeconds < MIN_READING_SESSION_SECONDS) {
       return { kind: 'skipped', reason: 'duration_below_minimum' };
@@ -82,6 +139,8 @@ export class ReadingSessionRepository {
     const { bookId, libraryId } = fileRow;
 
     return this.db.transaction(async (tx): Promise<SaveReadingSessionResult> => {
+      if (sync) await this.lockSyncSource(tx, userId, bookId, sync.sourceDeviceKey);
+
       const inserted = await tx
         .insert(readingSessions)
         .values({
@@ -91,6 +150,8 @@ export class ReadingSessionRepository {
           attemptId: sql`(select id from reading_attempts where user_id = ${userId} and book_id = ${bookId} and outcome is null and deleted_at is null limit 1)`,
           sessionId,
           source,
+          sourceDeviceKey: sync?.sourceDeviceKey ?? null,
+          sessionType,
           startedAt,
           endedAt,
           durationSeconds,
@@ -100,17 +161,210 @@ export class ReadingSessionRepository {
         .onConflictDoNothing({ target: [readingSessions.userId, readingSessions.sessionId] })
         .returning({ id: readingSessions.id });
 
+      let result: SaveReadingSessionResult;
+
       if (inserted.length === 0) {
-        return { kind: 'skipped', reason: 'duplicate_session_id' };
+        // A row already exists for this sessionId, and that is usually deliberate rather than a
+        // replay. Clients checkpoint a session mid-flight - the iOS player writes one when the app
+        // is backgrounded, because `willTerminate` is not delivered if it is then killed - and the
+        // later close carries the *same* id specifically to supersede that partial row.
+        //
+        // Dropping the second write capped every backgrounded session at whatever the checkpoint
+        // had captured. Measured on iOS: a 50s listen containing one backgrounding recorded 17s,
+        // and the client had correctly sent 56.
+        //
+        // Superseding only upward keeps this idempotent for the sync queue, which may retry the
+        // identical write: an equal or smaller duration is still a no-op, so a stale retry can
+        // never shrink a session.
+        const [existing] = await tx
+          .select({
+            id: readingSessions.id,
+            durationSeconds: readingSessions.durationSeconds,
+            progressDelta: readingSessions.progressDelta,
+          })
+          .from(readingSessions)
+          .where(and(eq(readingSessions.userId, userId), eq(readingSessions.sessionId, sessionId)))
+          .limit(1);
+
+        if (!existing || durationSeconds <= existing.durationSeconds) {
+          result = { kind: 'skipped', reason: 'duplicate_session_id' };
+        } else {
+          const addedSeconds = durationSeconds - existing.durationSeconds;
+          const addedProgress = progressDelta === null ? null : progressDelta - (existing.progressDelta ?? 0);
+
+          await tx.update(readingSessions).set({ endedAt, durationSeconds, progressDelta, endProgress }).where(eq(readingSessions.id, existing.id));
+
+          // Daily stats accumulate, so only add the portion beyond the checkpoint.
+          await this.upsertDailyStats(tx, {
+            userId,
+            libraryId,
+            startedAt,
+            endedAt,
+            durationSeconds: addedSeconds,
+            progressDelta: addedProgress,
+            timeZone,
+          });
+
+          result = { kind: 'superseded', addedSeconds };
+        }
+      } else {
+        result = { kind: 'saved' };
+        await this.upsertDailyStats(tx, { userId, libraryId, startedAt, endedAt, durationSeconds, progressDelta, timeZone });
       }
 
-      await this.upsertDailyStats(tx, { userId, libraryId, startedAt, endedAt, durationSeconds, progressDelta, timeZone });
+      if (result.kind !== 'saved' && sync) {
+        await tx
+          .update(readingSessions)
+          .set({ sourceDeviceKey: sync.sourceDeviceKey })
+          .where(
+            and(
+              eq(readingSessions.userId, userId),
+              eq(readingSessions.bookId, bookId),
+              eq(readingSessions.sessionId, sessionId),
+              eq(readingSessions.source, source),
+              isNull(readingSessions.sourceDeviceKey),
+            ),
+          );
+      }
 
-      return { kind: 'saved' };
+      if (sync?.estimateSessionIdPrefix) {
+        await this.deleteOverlappingSyncEstimates(tx, {
+          userId,
+          bookId,
+          libraryId,
+          source,
+          sourceDeviceKey: sync.sourceDeviceKey,
+          estimateSessionIdPrefix: sync.estimateSessionIdPrefix,
+          startedAt,
+          endedAt,
+          timeZone,
+        });
+      }
+
+      return result;
     });
   }
 
-  async insertManualSession(params: InsertManualSessionParams): Promise<{ id: number }> {
+  async recordCumulativeSyncedSession(params: RecordCumulativeReadingSessionParams): Promise<RecordCumulativeReadingSessionResult> {
+    return this.db.transaction(async (tx): Promise<RecordCumulativeReadingSessionResult> => {
+      await this.lockSyncSource(tx, params.userId, params.bookId, params.sourceDeviceKey);
+
+      const [cursor] = await tx
+        .select({
+          counter: readingSessionSyncCursors.counter,
+          generation: readingSessionSyncCursors.generation,
+          lastModified: readingSessionSyncCursors.lastModified,
+        })
+        .from(readingSessionSyncCursors)
+        .where(
+          and(
+            eq(readingSessionSyncCursors.userId, params.userId),
+            eq(readingSessionSyncCursors.bookId, params.bookId),
+            eq(readingSessionSyncCursors.source, params.cursorSource),
+            eq(readingSessionSyncCursors.sourceDeviceKey, params.sourceDeviceKey),
+          ),
+        )
+        .limit(1);
+
+      if (!cursor) {
+        await tx.insert(readingSessionSyncCursors).values({
+          userId: params.userId,
+          bookId: params.bookId,
+          source: params.cursorSource,
+          sourceDeviceKey: params.sourceDeviceKey,
+          counter: params.counter,
+          lastModified: params.endedAt,
+        });
+        return { kind: 'baseline' };
+      }
+
+      if (params.endedAt.getTime() < cursor.lastModified.getTime()) return { kind: 'stale' };
+
+      if (params.counter === cursor.counter) {
+        if (params.endedAt.getTime() > cursor.lastModified.getTime()) {
+          await this.updateSyncCursor(tx, params, cursor.generation);
+        }
+        return { kind: 'unchanged' };
+      }
+
+      if (params.counter < cursor.counter) {
+        await this.updateSyncCursor(tx, params, cursor.generation + 1);
+        return { kind: 'reset' };
+      }
+
+      const durationSeconds = (params.counter - cursor.counter) * 60;
+      const startedAt = new Date(params.endedAt.getTime() - durationSeconds * 1000);
+
+      const [measured] = await tx
+        .select({ id: readingSessions.id })
+        .from(readingSessions)
+        .where(
+          and(
+            eq(readingSessions.userId, params.userId),
+            eq(readingSessions.bookId, params.bookId),
+            eq(readingSessions.source, params.source),
+            eq(readingSessions.sourceDeviceKey, params.sourceDeviceKey),
+            notLike(readingSessions.sessionId, `${params.sessionIdPrefix}%`),
+            lt(readingSessions.startedAt, params.endedAt),
+            gt(readingSessions.endedAt, startedAt),
+          ),
+        )
+        .limit(1);
+
+      if (measured) {
+        await this.updateSyncCursor(tx, params, cursor.generation);
+        return { kind: 'skipped', reason: 'measured_session_present' };
+      }
+
+      if (params.bookFileId === null) return { kind: 'skipped', reason: 'book_file_not_found' };
+
+      const sessionId = params.buildSessionId(params.bookFileId, cursor.generation, params.counter);
+
+      const [fileRow] = await tx
+        .select({ bookId: books.id, libraryId: books.libraryId })
+        .from(bookFiles)
+        .innerJoin(books, eq(books.id, bookFiles.bookId))
+        .where(and(eq(bookFiles.id, params.bookFileId), eq(books.id, params.bookId)))
+        .limit(1);
+      if (!fileRow) return { kind: 'skipped', reason: 'book_file_not_found' };
+
+      const inserted = await tx
+        .insert(readingSessions)
+        .values({
+          userId: params.userId,
+          bookFileId: params.bookFileId,
+          bookId: params.bookId,
+          attemptId: sql`(select id from reading_attempts where user_id = ${params.userId} and book_id = ${params.bookId} and outcome is null and deleted_at is null limit 1)`,
+          sessionId,
+          source: params.source,
+          sourceDeviceKey: params.sourceDeviceKey,
+          startedAt,
+          endedAt: params.endedAt,
+          durationSeconds,
+          progressDelta: params.progressDelta,
+          endProgress: params.endProgress,
+        })
+        .onConflictDoNothing({ target: [readingSessions.userId, readingSessions.sessionId] })
+        .returning({ id: readingSessions.id });
+
+      await this.updateSyncCursor(tx, params, cursor.generation);
+      if (inserted.length === 0) return { kind: 'skipped', reason: 'duplicate_session_id' };
+
+      await this.upsertDailyStats(tx, {
+        userId: params.userId,
+        libraryId: fileRow.libraryId,
+        startedAt,
+        endedAt: params.endedAt,
+        durationSeconds,
+        progressDelta: params.progressDelta,
+        timeZone: params.timeZone,
+      });
+
+      return { kind: 'saved', durationSeconds, sessionId };
+    });
+  }
+
+  async insertManualSession(params: InsertManualSessionParams): Promise<{ id: number; attemptId: number | null }> {
     const { userId, bookId, libraryId, bookFileId, sessionId, startedAt, endedAt, durationSeconds, progressDelta, endProgress, timeZone } = params;
 
     return this.db.transaction(async (tx) => {
@@ -129,11 +383,11 @@ export class ReadingSessionRepository {
           progressDelta,
           endProgress,
         })
-        .returning({ id: readingSessions.id });
+        .returning({ id: readingSessions.id, attemptId: readingSessions.attemptId });
 
       await this.upsertDailyStats(tx, { userId, libraryId, startedAt, endedAt, durationSeconds, progressDelta, timeZone });
 
-      return { id: inserted.id };
+      return { id: inserted.id, attemptId: inserted.attemptId ?? null };
     });
   }
 
@@ -162,6 +416,19 @@ export class ReadingSessionRepository {
         ),
       )
       .orderBy(desc(readingSessions.startedAt))
+      .limit(1);
+
+    return row?.endProgress ?? null;
+  }
+
+  // Deliberately unscoped by the list filters: this feeds the book's progress ring, which
+  // must not move when the reading log is filtered by date range or format.
+  async findLatestEndProgress(userId: number, bookId: number): Promise<number | null> {
+    const [row] = await this.db
+      .select({ endProgress: readingSessions.endProgress })
+      .from(readingSessions)
+      .where(and(eq(readingSessions.userId, userId), eq(readingSessions.bookId, bookId), isNotNull(readingSessions.endProgress)))
+      .orderBy(desc(readingSessions.startedAt), desc(readingSessions.id))
       .limit(1);
 
     return row?.endProgress ?? null;
@@ -203,10 +470,11 @@ export class ReadingSessionRepository {
     const orderExpr = sortDir === 'asc' ? asc(orderCol) : desc(orderCol);
     const offset = (page - 1) * pageSize;
 
-    const [rows, countRows, statsRows, summaryRows, sourceRows] = await Promise.all([
+    const [rows, countRows, statsRows, summaryRows, sourceRows, latestEndProgress] = await Promise.all([
       this.db
         .select({
           id: readingSessions.id,
+          bookFileId: readingSessions.bookFileId,
           startedAt: readingSessions.startedAt,
           endedAt: readingSessions.endedAt,
           durationSeconds: readingSessions.durationSeconds,
@@ -214,6 +482,7 @@ export class ReadingSessionRepository {
           endProgress: readingSessions.endProgress,
           format: sql<string | null>`nullif(${bookFiles.format}, '')`,
           source: readingSessions.source,
+          attemptId: readingSessions.attemptId,
         })
         .from(readingSessions)
         .leftJoin(bookFiles, eq(bookFiles.id, readingSessions.bookFileId))
@@ -261,6 +530,8 @@ export class ReadingSessionRepository {
         .leftJoin(bookFiles, eq(bookFiles.id, readingSessions.bookFileId))
         .where(whereClause)
         .groupBy(readingSessions.source),
+
+      this.findLatestEndProgress(userId, bookId),
     ]);
 
     const total = countRows[0]?.total ?? 0;
@@ -292,6 +563,19 @@ export class ReadingSessionRepository {
       totalMinutes: Math.round((segment.readingSeconds / 60) * 10) / 10,
     }));
 
+    // summaryRows already covers every session in the window, so the two aggregates the client
+    // cannot derive from a single page cost nothing extra here.
+    let longestSessionSeconds = 0;
+    let longestSessionAt: string | null = null;
+    let backtrackCount = 0;
+    for (const row of summaryRows) {
+      if (row.durationSeconds > longestSessionSeconds) {
+        longestSessionSeconds = row.durationSeconds;
+        longestSessionAt = row.startedAt.toISOString();
+      }
+      if (row.progressDelta != null && row.progressDelta < -0.5) backtrackCount += 1;
+    }
+
     const progressByDay = new Map<string, { day: string; endProgress: number; endedAtMs: number }>();
     for (const row of summaryRows) {
       if (row.endProgress == null) continue;
@@ -316,11 +600,16 @@ export class ReadingSessionRepository {
       paceProgressDelta: statsRow?.paceProgressDelta ?? 0,
       paceDurationSeconds: statsRow?.paceDurationSeconds ?? 0,
       progressSummary,
+      latestEndProgress,
       bySource,
+      longestSessionSeconds,
+      longestSessionAt,
+      backtrackCount,
     };
 
     const items: BookReadingSession[] = rows.map((r) => ({
       id: r.id,
+      bookFileId: r.bookFileId ?? null,
       startedAt: (r.startedAt as Date).toISOString(),
       endedAt: (r.endedAt as Date).toISOString(),
       durationSeconds: r.durationSeconds,
@@ -328,6 +617,7 @@ export class ReadingSessionRepository {
       endProgress: r.endProgress ?? null,
       format: r.format ?? null,
       source: r.source ?? null,
+      attemptId: r.attemptId ?? null,
     }));
 
     return { items, total, page, pageSize, stats };
@@ -359,6 +649,69 @@ export class ReadingSessionRepository {
       await this.recomputeDailyStats(tx, userId, libraryId, affectedDays, timeZone);
 
       return { found: true };
+    });
+  }
+
+  async deleteLegacyKoreaderSyncEstimatesBatch(limit: number): Promise<{ deleted: number }> {
+    return this.db.transaction(async (tx) => {
+      // The exact id shape was reserved by the removed estimator. Plugin-measured sessions use
+      // the `kor:` namespace, so this cannot match supported KOReader telemetry.
+      const rows = await tx
+        .select({
+          id: readingSessions.id,
+          userId: readingSessions.userId,
+          libraryId: books.libraryId,
+          startedAt: readingSessions.startedAt,
+          endedAt: readingSessions.endedAt,
+          durationSeconds: readingSessions.durationSeconds,
+          progressDelta: readingSessions.progressDelta,
+          userSettings: schema.users.settings,
+        })
+        .from(readingSessions)
+        .innerJoin(books, eq(books.id, readingSessions.bookId))
+        .innerJoin(schema.users, eq(schema.users.id, readingSessions.userId))
+        .where(and(eq(readingSessions.source, 'koreader'), sql<boolean>`${readingSessions.sessionId} ~ ${'^ks-[0-9a-f]{12}-[0-9a-f]{32}$'}`))
+        .orderBy(readingSessions.id)
+        .limit(limit);
+
+      if (rows.length === 0) return { deleted: 0 };
+
+      const affected = new Map<string, { userId: number; libraryId: number; timeZone: string; days: Set<string> }>();
+      for (const row of rows) {
+        const timeZone = resolveTimeZone((row.userSettings as { timezone?: unknown } | null)?.timezone, 'UTC');
+        const key = `${row.userId}:${row.libraryId}`;
+        const group = affected.get(key) ?? { userId: row.userId, libraryId: row.libraryId, timeZone, days: new Set<string>() };
+        for (const day of getReadingSessionDayKeys(
+          {
+            startedAt: row.startedAt,
+            endedAt: row.endedAt,
+            durationSeconds: row.durationSeconds,
+            progressDelta: row.progressDelta ?? null,
+          },
+          timeZone,
+        )) {
+          group.days.add(day);
+        }
+        affected.set(key, group);
+      }
+
+      await tx.delete(readingSessions).where(
+        inArray(
+          readingSessions.id,
+          rows.map((row) => row.id),
+        ),
+      );
+
+      const groups = [...affected.values()].sort((left, right) => left.userId - right.userId || left.libraryId - right.libraryId);
+      for (const group of groups) {
+        // Keep each recompute's database range bounded even when one batch contains sparse
+        // sessions from years apart.
+        for (const days of groupDateKeysByMaxSpan(group.days)) {
+          await this.recomputeDailyStats(tx, group.userId, group.libraryId, days, group.timeZone);
+        }
+      }
+
+      return { deleted: rows.length };
     });
   }
 
@@ -428,6 +781,101 @@ export class ReadingSessionRepository {
       new Set(affectedDays),
     );
     await this.insertDailyStatsSegments(tx, userId, libraryId, segments, 'replace');
+  }
+
+  private async updateSyncCursor(tx: Tx, params: RecordCumulativeReadingSessionParams, generation: number): Promise<void> {
+    await tx
+      .update(readingSessionSyncCursors)
+      .set({ counter: params.counter, generation, lastModified: params.endedAt, updatedAt: new Date() })
+      .where(
+        and(
+          eq(readingSessionSyncCursors.userId, params.userId),
+          eq(readingSessionSyncCursors.bookId, params.bookId),
+          eq(readingSessionSyncCursors.source, params.cursorSource),
+          eq(readingSessionSyncCursors.sourceDeviceKey, params.sourceDeviceKey),
+        ),
+      );
+  }
+
+  private async lockSyncSource(tx: Tx, userId: number, bookId: number, sourceDeviceKey: string): Promise<void> {
+    await tx.execute(sql`select pg_advisory_xact_lock(${userId}::int, hashtext(${`${sourceDeviceKey}:${bookId}`})::int)`);
+  }
+
+  private async deleteOverlappingSyncEstimates(
+    tx: Tx,
+    params: {
+      userId: number;
+      bookId: number;
+      libraryId: number;
+      source: ReadingSessionSource;
+      sourceDeviceKey: string;
+      estimateSessionIdPrefix: string;
+      startedAt: Date;
+      endedAt: Date;
+      timeZone: string;
+    },
+  ): Promise<void> {
+    const affectedDays = new Set<string>();
+    let cursor = 0;
+
+    for (;;) {
+      const rows = await tx
+        .select({
+          id: readingSessions.id,
+          startedAt: readingSessions.startedAt,
+          endedAt: readingSessions.endedAt,
+          durationSeconds: readingSessions.durationSeconds,
+          progressDelta: readingSessions.progressDelta,
+        })
+        .from(readingSessions)
+        .where(
+          and(
+            eq(readingSessions.userId, params.userId),
+            eq(readingSessions.bookId, params.bookId),
+            eq(readingSessions.source, params.source),
+            eq(readingSessions.sourceDeviceKey, params.sourceDeviceKey),
+            like(readingSessions.sessionId, `${params.estimateSessionIdPrefix}%`),
+            lt(readingSessions.startedAt, params.endedAt),
+            gt(readingSessions.endedAt, params.startedAt),
+            gt(readingSessions.id, cursor),
+          ),
+        )
+        .orderBy(readingSessions.id)
+        .limit(ESTIMATE_CLEANUP_PAGE_SIZE);
+
+      if (rows.length === 0) break;
+      cursor = rows[rows.length - 1]!.id;
+
+      for (const row of rows) {
+        for (const day of getReadingSessionDayKeys(
+          {
+            startedAt: row.startedAt,
+            endedAt: row.endedAt,
+            durationSeconds: row.durationSeconds,
+            progressDelta: row.progressDelta ?? null,
+          },
+          params.timeZone,
+        )) {
+          affectedDays.add(day);
+        }
+      }
+
+      await tx.delete(readingSessions).where(
+        and(
+          eq(readingSessions.userId, params.userId),
+          inArray(
+            readingSessions.id,
+            rows.map((row) => row.id),
+          ),
+        ),
+      );
+
+      if (rows.length < ESTIMATE_CLEANUP_PAGE_SIZE) break;
+    }
+
+    if (affectedDays.size > 0) {
+      await this.recomputeDailyStats(tx, params.userId, params.libraryId, [...affectedDays], params.timeZone);
+    }
   }
 
   private async lockDailyStats(tx: Tx, userId: number, libraryId: number): Promise<void> {

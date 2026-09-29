@@ -73,11 +73,13 @@ function makeDb(state?: Partial<QueueState>) {
     execute: [...(state?.execute ?? [])],
   };
   const chains: ReturnType<typeof makeChain>[] = [];
+  const updateChains: ReturnType<typeof makeChain>[] = [];
   const transactionChains: ReturnType<typeof makeChain>[] = [];
   const transactionExecutes: ReturnType<typeof vi.fn>[] = [];
 
   return {
     __chains: chains,
+    __updateChains: updateChains,
     __transactionChains: transactionChains,
     __transactionExecutes: transactionExecutes,
     query: {
@@ -94,7 +96,11 @@ function makeDb(state?: Partial<QueueState>) {
       return chain;
     }),
     insert: vi.fn(() => makeChain(queue.insert.shift() ?? [])),
-    update: vi.fn(() => makeChain(queue.update.shift() ?? [])),
+    update: vi.fn(() => {
+      const chain = makeChain(queue.update.shift() ?? []);
+      updateChains.push(chain);
+      return chain;
+    }),
     delete: vi.fn(() => makeChain(queue.delete.shift() ?? [])),
     execute: vi.fn(() => Promise.resolve({ rows: queue.execute.shift() ?? [] })),
     transaction: vi.fn(
@@ -164,6 +170,9 @@ describe('KoboSyncService', () => {
   const smartScopeService = {
     findKoboSyncScopes: vi.fn(),
   };
+  const metadataExtractionService = {
+    detectFixedLayout: vi.fn(),
+  };
 
   function makeIdentity(bookId: number, needsLegacyNumericRemoval = false) {
     return {
@@ -187,6 +196,7 @@ describe('KoboSyncService', () => {
       bookIdentityService as never,
       queryBuilder as never,
       smartScopeService as never,
+      metadataExtractionService as never,
     );
   }
 
@@ -196,6 +206,7 @@ describe('KoboSyncService', () => {
     smartScopeService.findKoboSyncScopes.mockResolvedValue([]);
     readingStateService.getRawState.mockResolvedValue(null);
     contentFilterRepository.findByUserId.mockResolvedValue([]);
+    metadataExtractionService.detectFixedLayout.mockResolvedValue(null);
     bookIdentityService.ensureForBooks.mockImplementation((_userId: number, bookIds: number[], needsLegacyNumericRemoval: boolean) =>
       makeIdentityMap(bookIds, needsLegacyNumericRemoval),
     );
@@ -236,10 +247,10 @@ describe('KoboSyncService', () => {
 
     expect(createSpy).toHaveBeenNthCalledWith(1, 5, 101, eligible, new Set());
     expect(createSpy).toHaveBeenNthCalledWith(2, 5, 202, eligible, new Set());
-    expect((service as any).fetchEligibleSnapshotRows).toHaveBeenNthCalledWith(1, 5, false, expect.any(Map));
-    expect((service as any).fetchEligibleSnapshotRows).toHaveBeenNthCalledWith(2, 5, true, expect.any(Map));
-    expect(pageSpy).toHaveBeenNthCalledWith(1, 5, 11, 'device-a-token', 'https://reader.example.com', new Set([1]), expect.any(Map));
-    expect(pageSpy).toHaveBeenNthCalledWith(2, 5, 22, 'device-b-token', 'https://reader.example.com', new Set([1]), expect.any(Map));
+    expect((service as any).fetchEligibleSnapshotRows).toHaveBeenNthCalledWith(1, 5, false, expect.any(Map), true);
+    expect((service as any).fetchEligibleSnapshotRows).toHaveBeenNthCalledWith(2, 5, true, expect.any(Map), true);
+    expect(pageSpy).toHaveBeenNthCalledWith(1, 5, 11, 'device-a-token', 'https://reader.example.com', expect.any(Map), expect.any(Function));
+    expect(pageSpy).toHaveBeenNthCalledWith(2, 5, 22, 'device-b-token', 'https://reader.example.com', expect.any(Map), expect.any(Function));
   });
 
   it('reconciles only the caller device snapshot when it already exists', async () => {
@@ -254,7 +265,38 @@ describe('KoboSyncService', () => {
     await service.getDelta(5, 101, 'device-a-token', 'https://reader.example.com');
 
     expect(reconcileSpy).toHaveBeenCalledWith(9, eligible);
-    expect(pageSpy).toHaveBeenCalledWith(5, 9, 'device-a-token', 'https://reader.example.com', new Set([1]), expect.any(Map));
+    expect(pageSpy).toHaveBeenCalledWith(5, 9, 'device-a-token', 'https://reader.example.com', expect.any(Map), expect.any(Function));
+    await expect(pageSpy.mock.calls[0]![5]()).resolves.toEqual(new Set([1]));
+  });
+
+  it('serves the next page without reconciling while the device still has pending rows', async () => {
+    const db = makeDb({ select: [[{ bookId: 4 }]] });
+    const service = makeService(db);
+    vi.spyOn(service as any, 'findDeviceSnapshot').mockResolvedValue({ id: 9, userId: 5, deviceId: 101 });
+    const eligibleSpy = vi.spyOn(service as any, 'fetchEligibleSnapshotRows').mockResolvedValue([]);
+    const reconcileSpy = vi.spyOn(service as any, 'reconcileSnapshot').mockResolvedValue(undefined);
+    const pageSpy = vi.spyOn(service as any, 'getPageFromSnapshot').mockResolvedValue({ entitlements: [], hasMore: true, syncToken: 'PX.token' });
+
+    await service.getDelta(5, 101, 'device-a-token', 'https://reader.example.com');
+
+    expect(reconcileSpy).not.toHaveBeenCalled();
+    expect(eligibleSpy).not.toHaveBeenCalled();
+    expect(pageSpy).toHaveBeenCalledWith(5, 9, 'device-a-token', 'https://reader.example.com', expect.any(Map), expect.any(Function));
+  });
+
+  it('still resolves eligible ids for tag delivery when a pending page drains before it is served', async () => {
+    const db = makeDb({ select: [[{ bookId: 4 }]] });
+    const service = makeService(db);
+    vi.spyOn(service as any, 'findDeviceSnapshot').mockResolvedValue({ id: 9, userId: 5, deviceId: 101 });
+    const eligibleSpy = vi
+      .spyOn(service as any, 'fetchEligibleSnapshotRows')
+      .mockResolvedValue([{ bookId: 7, fileHash: 'h', deliveryHash: 'd', metadataHash: 'm', needsLegacyNumericRemoval: false }]);
+    const pageSpy = vi.spyOn(service as any, 'getPageFromSnapshot').mockResolvedValue({ entitlements: [], hasMore: false, syncToken: 'PX.token' });
+
+    await service.getDelta(5, 101, 'device-a-token', 'https://reader.example.com');
+
+    await expect(pageSpy.mock.calls[0]![5]()).resolves.toEqual(new Set([7]));
+    expect(eligibleSpy).toHaveBeenCalledWith(5, true, expect.any(Map));
   });
 
   it('getBookMetadata returns empty array when book is not eligible', async () => {
@@ -464,7 +506,7 @@ describe('KoboSyncService', () => {
     const service = makeService(db);
     vi.spyOn(service as any, 'buildTagItems').mockResolvedValue([{ ChangedTag: {} }]);
 
-    const result = await (service as any).getPageFromSnapshot(7, 1, 'tok', 'https://base', new Set([1]), new Map());
+    const result = await (service as any).getPageFromSnapshot(7, 1, 'tok', 'https://base', new Map(), () => Promise.resolve(new Set([1])));
 
     expect(result).toEqual({
       entitlements: [{ ChangedTag: {} }],
@@ -491,7 +533,7 @@ describe('KoboSyncService', () => {
     );
     readingStateService.getRawState.mockResolvedValue(null);
 
-    const result = await (service as any).getPageFromSnapshot(7, 22, 'tok', 'https://base', new Set([1, 2, 3]), new Map());
+    const result = await (service as any).getPageFromSnapshot(7, 22, 'tok', 'https://base', new Map(), () => Promise.resolve(new Set([1, 2, 3])));
 
     expect(result.hasMore).toBe(false);
     expect(result.entitlements).toHaveLength(3);
@@ -510,7 +552,7 @@ describe('KoboSyncService', () => {
     vi.spyOn(service as any, 'fetchEligibleBooksByIds').mockResolvedValue(new Map([[3, makeBook(3)]]));
     readingStateService.getRawState.mockResolvedValue({ EntitlementId: 'entitlement-3', CurrentBookmark: { ProgressPercent: 61 } });
 
-    const result = await (service as any).getPageFromSnapshot(7, 22, 'tok', 'https://base', new Set([3]), new Map());
+    const result = await (service as any).getPageFromSnapshot(7, 22, 'tok', 'https://base', new Map(), () => Promise.resolve(new Set([3])));
 
     expect(result.entitlements).toHaveLength(2);
     expect(result.entitlements[0]).toHaveProperty('ChangedProductMetadata');
@@ -530,7 +572,7 @@ describe('KoboSyncService', () => {
     bookIdentityService.findByBookIds.mockResolvedValue(new Map([[3, makeIdentity(3, false)]]));
     readingStateService.getRawState.mockResolvedValue({ EntitlementId: 'entitlement-3', CurrentBookmark: { ProgressPercent: 61 } });
 
-    const result = await (service as any).getPageFromSnapshot(7, 22, 'tok', 'https://base', new Set([3]), new Map());
+    const result = await (service as any).getPageFromSnapshot(7, 22, 'tok', 'https://base', new Map(), () => Promise.resolve(new Set([3])));
 
     expect(result.entitlements).toHaveLength(2);
     expect(result.entitlements[0]).toHaveProperty('ChangedEntitlement');
@@ -550,7 +592,7 @@ describe('KoboSyncService', () => {
     vi.spyOn(service as any, 'fetchEligibleBooksByIds').mockResolvedValue(new Map());
     bookIdentityService.findByBookIds.mockResolvedValue(new Map([[3, makeIdentity(3, true)]]));
 
-    const result = await (service as any).getPageFromSnapshot(7, 22, 'tok', 'https://base', new Set(), new Map());
+    const result = await (service as any).getPageFromSnapshot(7, 22, 'tok', 'https://base', new Map(), () => Promise.resolve(new Set()));
     const removedIds = result.entitlements.map(
       (entry: Record<string, { BookEntitlement: { Id: string } }>) => entry.ChangedEntitlement.BookEntitlement.Id,
     );
@@ -596,7 +638,7 @@ describe('KoboSyncService', () => {
     });
     db.query.collections.findMany.mockResolvedValue([]);
     const filter = { type: 'group', join: 'AND', rules: [] };
-    smartScopeService.findKoboSyncScopes.mockResolvedValue([{ id: 5, name: 'To Read', filter, syncToKobo: true }]);
+    smartScopeService.findKoboSyncScopes.mockResolvedValue([{ id: 5, name: 'To Read', mediaType: 'books', filter, syncToKobo: true }]);
     bookAccessService.getAccessibleLibraryIds.mockResolvedValue([1, 2]);
     queryBuilder.buildWhere.mockReturnValue('WHERE_CLAUSE');
     const service = makeService(db);
@@ -622,7 +664,7 @@ describe('KoboSyncService', () => {
   it('buildTagItems excludes synced smart scopes without a filter instead of matching everything', async () => {
     const db = makeDb();
     db.query.collections.findMany.mockResolvedValue([]);
-    smartScopeService.findKoboSyncScopes.mockResolvedValue([{ id: 6, name: 'Empty Scope', filter: null, syncToKobo: true }]);
+    smartScopeService.findKoboSyncScopes.mockResolvedValue([{ id: 6, name: 'Empty Scope', mediaType: 'books', filter: null, syncToKobo: true }]);
     bookAccessService.getAccessibleLibraryIds.mockResolvedValue([1]);
     const service = makeService(db);
 
@@ -643,8 +685,8 @@ describe('KoboSyncService', () => {
     const filterA = { type: 'group', join: 'AND', rules: [] };
     const filterB = { type: 'group', join: 'OR', rules: [] };
     smartScopeService.findKoboSyncScopes.mockResolvedValue([
-      { id: 1, name: 'Scope A', filter: filterA, syncToKobo: true },
-      { id: 2, name: 'Scope B', filter: filterB, syncToKobo: true },
+      { id: 1, name: 'Scope A', mediaType: 'books', filter: filterA, syncToKobo: true },
+      { id: 2, name: 'Scope B', mediaType: 'books', filter: filterB, syncToKobo: true },
     ]);
     queryBuilder.buildWhere.mockReturnValue('WHERE_CLAUSE');
     const service = makeService(db);
@@ -663,7 +705,9 @@ describe('KoboSyncService', () => {
     const filter = { type: 'group', join: 'AND', rules: [] };
     // A shared scope: owned by user 1, opted into by user 9. Ownership and opt-in are the
     // smart scope module's rules, so sync must not re-filter by owner (issue #795).
-    smartScopeService.findKoboSyncScopes.mockResolvedValue([{ id: 7, userId: 1, name: 'Book Club', filter, isPublic: true, syncToKobo: false }]);
+    smartScopeService.findKoboSyncScopes.mockResolvedValue([
+      { id: 7, userId: 1, name: 'Book Club', mediaType: 'books', filter, isPublic: true, syncToKobo: false },
+    ]);
     bookAccessService.getAccessibleLibraryIds.mockResolvedValue([1]);
     queryBuilder.buildWhere.mockReturnValue('WHERE_CLAUSE');
     const service = makeService(db);
@@ -687,7 +731,7 @@ describe('KoboSyncService', () => {
   it('fetches synced smart scope book ids with the metadata join required by metadata-backed filters', async () => {
     const db = makeDb({ select: [[{ id: 10 }]] });
     const filter = { type: 'group', join: 'AND', rules: [{ type: 'rule', field: 'title', operator: 'contains', value: 'Dune' }] };
-    smartScopeService.findKoboSyncScopes.mockResolvedValue([{ id: 1, name: 'Dune Scope', filter, syncToKobo: true }]);
+    smartScopeService.findKoboSyncScopes.mockResolvedValue([{ id: 1, name: 'Dune Scope', mediaType: 'books', filter, syncToKobo: true }]);
     queryBuilder.buildWhere.mockReturnValue(sql`${schema.bookMetadata.title} ilike ${'%Dune%'}`);
     const service = makeService(db);
 
@@ -1054,6 +1098,214 @@ describe('KoboSyncService', () => {
     expect(nativeKepub.hash).toBe(kepub.hash);
   });
 
+  describe('fixed-layout (comic) delivery', () => {
+    const settings = { convertToKepub: true, forceEnableHyphenation: false, kepubConversionLimitMb: 1 };
+
+    it('announces a fixed-layout epub as EPUB3FL so the device renders it full screen', () => {
+      const service = makeService(makeDb());
+
+      expect((service as any).getDeliveryInfo('epub', 1024, settings, true).format).toBe('EPUB3FL');
+    });
+
+    it('announces a natively fixed-layout kepub as EPUB3FL', () => {
+      const service = makeService(makeDb());
+
+      expect((service as any).getDeliveryInfo('kepub', 1024, settings, true).format).toBe('EPUB3FL');
+    });
+
+    it('still announces EPUB3FL when kepub conversion is disabled or the file is over the limit', () => {
+      const service = makeService(makeDb());
+
+      expect((service as any).getDeliveryInfo('epub', 1024, { ...settings, convertToKepub: false }, true).format).toBe('EPUB3FL');
+      expect((service as any).getDeliveryInfo('epub', 2 * 1024 * 1024, settings, true).format).toBe('EPUB3FL');
+    });
+
+    it('leaves a PDF alone, because the fixed-layout format only applies to EPUB', () => {
+      const service = makeService(makeDb());
+
+      expect((service as any).getDeliveryInfo('pdf', 1024, settings, true).format).toBe('PDF');
+    });
+
+    it('falls back to the reflowable formats when the flag is false or not yet known', () => {
+      const service = makeService(makeDb());
+
+      expect((service as any).getDeliveryInfo('epub', 1024, settings, false).format).toBe('KEPUB');
+      expect((service as any).getDeliveryInfo('epub', 1024, settings, null).format).toBe('KEPUB');
+      expect((service as any).getDeliveryInfo('epub', 1024, { ...settings, convertToKepub: false }, null).format).toBe('EPUB3');
+    });
+
+    it('separates hyphenated from plain kepub bytes even though both announce EPUB3FL', () => {
+      const service = makeService(makeDb());
+
+      const plain = (service as any).getDeliveryInfo('epub', 1024, settings, true);
+      const hyphenated = (service as any).getDeliveryInfo('epub', 1024, { ...settings, forceEnableHyphenation: true }, true);
+
+      expect(plain.format).toBe('EPUB3FL');
+      expect(hyphenated.format).toBe('EPUB3FL');
+      expect(hyphenated.hash).not.toBe(plain.hash);
+    });
+
+    it('ignores hyphenation in the hash when no conversion runs, because the bytes are identical', () => {
+      const service = makeService(makeDb());
+
+      const noConversion = { ...settings, convertToKepub: false };
+      const plain = (service as any).getDeliveryInfo('epub', 1024, noConversion, true);
+      const hyphenated = (service as any).getDeliveryInfo('epub', 1024, { ...noConversion, forceEnableHyphenation: true }, true);
+
+      expect(hyphenated.hash).toBe(plain.hash);
+    });
+
+    it('changes the delivery hash so an already-synced comic is re-announced to the device', () => {
+      const service = makeService(makeDb());
+
+      const before = (service as any).getDeliveryInfo('epub', 1024, settings, null);
+      const after = (service as any).getDeliveryInfo('epub', 1024, settings, true);
+
+      expect(after.hash).not.toBe(before.hash);
+    });
+  });
+
+  describe('fixed-layout backfill', () => {
+    function candidate(fileId: number, overrides: Record<string, unknown> = {}) {
+      return {
+        fileId,
+        fileAbsolutePath: `/books/${fileId}.epub`,
+        fileFormat: 'epub',
+        isFixedLayout: null,
+        ...overrides,
+      };
+    }
+
+    it('detects, returns, and persists the flag for files that have never been checked', async () => {
+      const db = makeDb();
+      const service = makeService(db);
+      metadataExtractionService.detectFixedLayout.mockImplementation((path: string) => Promise.resolve(path === '/books/1.epub'));
+
+      const resolved = await (service as any).backfillFixedLayout([candidate(1), candidate(2)]);
+
+      expect(resolved).toEqual(
+        new Map([
+          [1, true],
+          [2, false],
+        ]),
+      );
+      expect(metadataExtractionService.detectFixedLayout).toHaveBeenCalledTimes(2);
+      // One grouped write per distinct value, never one per file.
+      expect(db.update).toHaveBeenCalledTimes(2);
+      expect(db.__updateChains[0]!.set).toHaveBeenCalledWith({ isFixedLayout: true });
+      expect(db.__updateChains[1]!.set).toHaveBeenCalledWith({ isFixedLayout: false });
+    });
+
+    it('never re-reads a file whose flag is already stored', async () => {
+      const db = makeDb();
+      const service = makeService(db);
+
+      const resolved = await (service as any).backfillFixedLayout([candidate(1, { isFixedLayout: true }), candidate(2, { isFixedLayout: false })]);
+
+      expect(resolved.size).toBe(0);
+      expect(metadataExtractionService.detectFixedLayout).not.toHaveBeenCalled();
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it('ignores formats that cannot declare a layout', async () => {
+      const db = makeDb();
+      const service = makeService(db);
+
+      await (service as any).backfillFixedLayout([
+        candidate(1, { fileFormat: 'pdf' }),
+        candidate(2, { fileFormat: 'cbz' }),
+        candidate(3, { fileFormat: null }),
+      ]);
+
+      expect(metadataExtractionService.detectFixedLayout).not.toHaveBeenCalled();
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it('checks kepub files too, since a native kepub carries the same OPF', async () => {
+      const service = makeService(makeDb());
+      metadataExtractionService.detectFixedLayout.mockResolvedValue(true);
+
+      const resolved = await (service as any).backfillFixedLayout([candidate(1, { fileFormat: 'kepub' })]);
+
+      expect(resolved.get(1)).toBe(true);
+    });
+
+    it('caps how many files one sync opens, leaving the rest for the next sync', async () => {
+      const db = makeDb();
+      const service = makeService(db);
+      metadataExtractionService.detectFixedLayout.mockResolvedValue(false);
+
+      const resolved = await (service as any).backfillFixedLayout(Array.from({ length: 600 }, (_unused, index) => candidate(index + 1)));
+
+      expect(metadataExtractionService.detectFixedLayout).toHaveBeenCalledTimes(500);
+      expect(resolved.size).toBe(500);
+    });
+
+    it('leaves an unreadable file unresolved instead of recording it as reflowable', async () => {
+      const db = makeDb();
+      const service = makeService(db);
+      metadataExtractionService.detectFixedLayout.mockResolvedValue(null);
+
+      const resolved = await (service as any).backfillFixedLayout([candidate(1)]);
+
+      expect(resolved.size).toBe(0);
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it('treats a thrown detection as unknown and keeps processing the rest', async () => {
+      const db = makeDb();
+      const service = makeService(db);
+      metadataExtractionService.detectFixedLayout.mockImplementation((path: string) =>
+        path === '/books/1.epub' ? Promise.reject(new Error('permission denied')) : Promise.resolve(true),
+      );
+
+      const resolved = await (service as any).backfillFixedLayout([candidate(1), candidate(2)]);
+
+      expect(resolved).toEqual(new Map([[2, true]]));
+      expect(db.__updateChains[0]!.set).toHaveBeenCalledWith({ isFixedLayout: true });
+    });
+
+    it('still announces the right format for this sync when the flag cannot be persisted', async () => {
+      const db = makeDb();
+      db.update.mockImplementationOnce(() => {
+        throw new Error('database is read only');
+      });
+      const service = makeService(db);
+      metadataExtractionService.detectFixedLayout.mockResolvedValue(true);
+
+      const resolved = await (service as any).backfillFixedLayout([candidate(1)]);
+
+      expect(resolved.get(1)).toBe(true);
+    });
+
+    it('does nothing at all once every eligible file has been checked', async () => {
+      const db = makeDb();
+      const service = makeService(db);
+
+      await (service as any).backfillFixedLayout([]);
+
+      expect(metadataExtractionService.detectFixedLayout).not.toHaveBeenCalled();
+      expect(db.update).not.toHaveBeenCalled();
+    });
+  });
+
+  // Delivery hashes are stored per device: any drift re-marks every book as changed and makes
+  // every device re-download its whole library. These are the values the pre-EPUB3FL
+  // implementation produced and they must not move.
+  it('keeps delivery hashes for non-comic books byte-identical to the previous implementation', () => {
+    const service = makeService(makeDb());
+    const base = { convertToKepub: true, forceEnableHyphenation: false, kepubConversionLimitMb: 1 };
+
+    expect((service as any).getDeliveryInfo('pdf', 1024, base, null).hash).toBe('6c4931d80e7cbf0d');
+    expect((service as any).getDeliveryInfo('kepub', 1024, base, null).hash).toBe('2f55f4d028ef859c');
+    expect((service as any).getDeliveryInfo('epub', 1024, base, null).hash).toBe('2f55f4d028ef859c');
+    expect((service as any).getDeliveryInfo('epub', 1024, { ...base, forceEnableHyphenation: true }, null).hash).toBe('990477a32a0f0d75');
+    expect((service as any).getDeliveryInfo('epub', 1024, { ...base, convertToKepub: false }, null).hash).toBe('90fb0bb55cca2fd2');
+    expect((service as any).getDeliveryInfo('epub', 2 * 1024 * 1024, base, null).hash).toBe('90fb0bb55cca2fd2');
+    // Hyphenation must not leak into the hash of a book that is never converted.
+    expect((service as any).getDeliveryInfo('epub', 2 * 1024 * 1024, { ...base, forceEnableHyphenation: true }, null).hash).toBe('90fb0bb55cca2fd2');
+  });
+
   it('fetchEligibleSnapshotRows and fetchEligibleBooksByIds map DB rows into sync payload objects', async () => {
     const db = makeDb({
       select: [
@@ -1126,5 +1378,103 @@ describe('KoboSyncService', () => {
       }),
     );
     expect(books.get(5)?.metadataHash).toBe(snapshotRows[0].metadataHash);
+  });
+
+  describe('fixed-layout books end to end', () => {
+    function comicRows(isFixedLayout: boolean | null) {
+      const shared = {
+        bookId: 5,
+        title: 'Manga Vol. 1',
+        language: 'English',
+        isbn10: null,
+        isbn13: null,
+        seriesName: null,
+        seriesIndex: null,
+        metadataUpdatedAt: new Date('2026-01-01T00:00:00.000Z'),
+        fileFormat: 'epub',
+        fileSizeBytes: 1234,
+        fileHash: 'file-hash',
+        isFixedLayout,
+      };
+      return {
+        select: [
+          [{ ...shared, fileId: 77, fileAbsolutePath: '/books/manga.epub', authorNamesCsv: 'Mangaka' }],
+          [{ ...shared, description: null, publisher: null, publishedYear: null, addedAt: new Date(), updatedAt: new Date() }],
+          [{ bookId: 5, name: 'Mangaka' }],
+          [],
+        ],
+      };
+    }
+
+    it('announces a read-along EPUB by its size without audio, as the download converts it', async () => {
+      const rows = comicRows(false);
+      for (const batch of rows.select.slice(0, 2)) {
+        for (const row of batch as Array<Record<string, unknown>>) {
+          row.fileSizeBytes = 900 * 1024 * 1024;
+          row.fileMediaOverlayAvailable = true;
+        }
+      }
+      const service = makeService(makeDb(rows));
+      vi.spyOn(service as any, 'buildEligibleBooksWhereClause').mockResolvedValue({ where: true });
+      vi.spyOn(service as any, 'getDeliverySettings').mockResolvedValue({
+        convertToKepub: true,
+        forceEnableHyphenation: false,
+        kepubConversionLimitMb: 100,
+      });
+
+      await (service as any).fetchEligibleSnapshotRows(8, false, new Map());
+      const books = await (service as any).fetchEligibleBooksByIds(8, [5], false, new Map());
+
+      expect(books.get(5)?.deliveryFormat).toBe('KEPUB');
+    });
+
+    it('announces a stored fixed-layout book as EPUB3FL in the payload the device receives', async () => {
+      const db = makeDb(comicRows(true));
+      const service = makeService(db);
+      vi.spyOn(service as any, 'buildEligibleBooksWhereClause').mockResolvedValue({ where: true });
+
+      await (service as any).fetchEligibleSnapshotRows(8, false, new Map());
+      const books = await (service as any).fetchEligibleBooksByIds(8, [5], false, new Map());
+      const metadata = (service as any).buildBookMetadata(books.get(5), 'tok', 'https://base') as Record<string, unknown>;
+
+      expect((metadata.DownloadUrls as Array<Record<string, unknown>>)[0]!.Format).toBe('EPUB3FL');
+    });
+
+    it('backfills an unchecked comic during the reconcile pass and hashes it as EPUB3FL immediately', async () => {
+      const db = makeDb(comicRows(null));
+      const service = makeService(db);
+      vi.spyOn(service as any, 'buildEligibleBooksWhereClause').mockResolvedValue({ where: true });
+      metadataExtractionService.detectFixedLayout.mockResolvedValue(true);
+
+      const rows = await (service as any).fetchEligibleSnapshotRows(8, false, new Map(), true);
+
+      expect(metadataExtractionService.detectFixedLayout).toHaveBeenCalledWith('/books/manga.epub', 'epub');
+      expect(db.__updateChains[0]!.set).toHaveBeenCalledWith({ isFixedLayout: true });
+      // The same pass that learns the flag also stores the EPUB3FL hash, so the device is told
+      // about the comic on this sync rather than the next one.
+      expect(rows[0].deliveryHash).toBe('6a8354534ee2c5c8');
+    });
+
+    it('does no filesystem work on the mid-page pass that only needs eligible ids', async () => {
+      const db = makeDb(comicRows(null));
+      const service = makeService(db);
+      vi.spyOn(service as any, 'buildEligibleBooksWhereClause').mockResolvedValue({ where: true });
+
+      await (service as any).fetchEligibleSnapshotRows(8, false, new Map());
+
+      expect(metadataExtractionService.detectFixedLayout).not.toHaveBeenCalled();
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it('does not open files for a book whose flag is already stored', async () => {
+      const db = makeDb(comicRows(false));
+      const service = makeService(db);
+      vi.spyOn(service as any, 'buildEligibleBooksWhereClause').mockResolvedValue({ where: true });
+
+      const rows = await (service as any).fetchEligibleSnapshotRows(8, false, new Map(), true);
+
+      expect(metadataExtractionService.detectFixedLayout).not.toHaveBeenCalled();
+      expect(rows[0].deliveryHash).toBe('2f55f4d028ef859c');
+    });
   });
 });

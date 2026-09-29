@@ -92,10 +92,44 @@ describe('candidate-relevance', () => {
       expect(result[0].authors).toContain('Andy Weir');
     });
 
+    it('keeps only matching authors for an author-only search', () => {
+      const candidates = [candidate('Dune', 'Frank Herbert'), candidate('The Hobbit', 'J.R.R. Tolkien')];
+
+      const result = filterAndRank(candidates, { author: 'Frank Herbert' });
+
+      expect(result.map((entry) => entry.title)).toEqual(['Dune']);
+    });
+
     it('drops candidates with zero score', () => {
       const candidates = [candidate('Unrelated Book')];
       const params: MetadataSearchParams = { title: 'Different Title' };
       const result = filterAndRank(candidates, params);
+      expect(result).toHaveLength(0);
+    });
+
+    it('drops an unrelated book that shares only stopwords with the query', () => {
+      const candidates = [candidate('The Girl on the Train', 'Paula Hawkins'), candidate('The Silence of the Lambs', 'Thomas Harris')];
+      const params: MetadataSearchParams = { title: 'The Hobbit', author: 'J.R.R. Tolkien' };
+      expect(filterAndRank(candidates, params)).toHaveLength(0);
+    });
+
+    it('drops a book sharing a minority of the meaningful words', () => {
+      const result = filterAndRank([candidate('The Way We Were')], { title: 'The Way of Kings' });
+      expect(result).toHaveLength(0);
+    });
+
+    it('drops a candidate that merely contains the query inside a longer word', () => {
+      expect(filterAndRank([candidate('Rubik Cube Solutions')], { title: 'Ubik' })).toHaveLength(0);
+      expect(filterAndRank([candidate('Italian Cooking Basics')], { title: 'It' })).toHaveLength(0);
+    });
+
+    it('keeps a book actually titled with a stopword', () => {
+      const result = filterAndRank([candidate('It', 'Stephen King')], { title: 'It', author: 'Stephen King' });
+      expect(result).toHaveLength(1);
+    });
+
+    it('keeps a matching author from boosting an otherwise unrelated title', () => {
+      const result = filterAndRank([candidate('The Girl on the Train', 'J.R.R. Tolkien')], { title: 'The Hobbit', author: 'J.R.R. Tolkien' });
       expect(result).toHaveLength(0);
     });
 

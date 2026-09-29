@@ -15,6 +15,13 @@ const backgroundClass = computed(() => BACKGROUND_OPTIONS.find((b) => b.id === t
 
 const BOOK_ROUTE_NAMES = new Set(['book-detail'])
 
+/**
+ * The request drawer is a child route of the list, so the list has to stay mounted while the URL
+ * moves under it. Keying on the path would remount it, re-fetch the rows and run the page
+ * transition every time a drawer opened.
+ */
+const REQUEST_ROUTE_NAMES = new Set(['book-requests', 'book-request-detail', 'book-request-releases'])
+
 // Grid views are kept alive so scroll position and virtual list state survive
 // round-trips to the book detail / metadata editor page.
 const GRID_VIEW_NAMES = [
@@ -26,6 +33,9 @@ const GRID_VIEW_NAMES = [
   'SeriesDetailView',
   'AuthorDetailView',
   'LibrariesView',
+  'PodcastLibrariesView',
+  'PodcastCollectionView',
+  'PodcastScopeView',
   'SmartScopesView',
   'CollectionsView',
 ]
@@ -33,6 +43,7 @@ const GRID_VIEW_NAMES = [
 const viewKey = computed(() => {
   const name = String(route.name)
   if (BOOK_ROUTE_NAMES.has(name)) return name
+  if (REQUEST_ROUTE_NAMES.has(name)) return 'requests'
   if (name.startsWith('settings-')) return 'settings'
   if (name.startsWith('tools-')) return 'tools'
   return route.path
@@ -46,9 +57,13 @@ const viewKey = computed(() => {
       <!-- 1. Global App Header: Fixed at the top, independent of views -->
       <AppHeader />
 
-      <!-- 2. Independent View Area: Everything below the header scrolls here -->
+      <!--
+        2. Independent View Area: Everything below the header scrolls here. The bottom padding is the
+        floating podcast player's measured height, so scrolled-to-bottom content clears it without a
+        document-level scrollbar.
+      -->
       <div
-        class="app-shell-scroll px-(--shell-content-gutter) pt-(--shell-gap) flex-1 overflow-y-auto overflow-x-hidden relative scroll-smooth bg-transparent"
+        class="app-shell-scroll px-(--shell-content-gutter) pt-(--shell-gap) pb-[var(--podcast-mini-player-clearance,0px)] flex-1 overflow-y-auto overflow-x-hidden relative scroll-smooth bg-transparent"
       >
         <router-view v-slot="{ Component }">
           <Transition name="page" mode="out-in">

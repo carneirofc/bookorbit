@@ -29,11 +29,13 @@ const emptyStats = {
   paceProgressDelta: 0,
   paceDurationSeconds: 0,
   progressSummary: [],
+  latestEndProgress: null,
 }
 
 function makeSession(id: number, overrides?: Record<string, unknown>) {
   return {
     id,
+    bookFileId: null,
     startedAt: '2026-04-15T10:00:00.000Z',
     endedAt: '2026-04-15T10:30:00.000Z',
     durationSeconds: 1800,

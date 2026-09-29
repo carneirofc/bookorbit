@@ -95,7 +95,7 @@ describe('mergeBookCardWithDetail', () => {
       providerIds: { hardcover: 'new-book-slug' },
       hardcoverEditionId: '8941973',
       seriesName: 'My Series',
-      seriesIndex: 2,
+      seriesIndex: '2',
       rating: 8,
       metadataScore: 95,
     })
@@ -114,7 +114,7 @@ describe('mergeBookCardWithDetail', () => {
     expect(result.hardcoverId).toBe('new-book-slug')
     expect(result.hardcoverEditionId).toBe('8941973')
     expect(result.seriesName).toBe('My Series')
-    expect(result.seriesIndex).toBe(2)
+    expect(result.seriesIndex).toBe('2')
     expect(result.rating).toBe(8)
     expect(result.metadataScore).toBe(95)
   })
@@ -156,6 +156,35 @@ describe('mergeBookCardWithDetail', () => {
     expect(result.files[0]).toEqual({ id: 10, format: 'epub', role: 'primary', sizeBytes: 1024 })
     expect(result.files[0]).not.toHaveProperty('absolutePath')
     expect(result.files[0]).not.toHaveProperty('filename')
+  })
+
+  it('preserves mediaOverlay capability when mapping files', () => {
+    const book = makeBook()
+    const detail = makeDetail({
+      files: [
+        {
+          id: 10,
+          format: 'epub',
+          role: 'primary',
+          sizeBytes: 1024,
+          absolutePath: '/some/path.epub',
+          createdAt: '2024-01-01T00:00:00.000Z',
+          filename: 'book.epub',
+          durationSeconds: null,
+          mediaOverlay: { available: true, durationSeconds: 42 },
+        },
+      ],
+    })
+
+    const result = mergeBookCardWithDetail(book, detail)
+
+    expect(result.files[0]).toEqual({
+      id: 10,
+      format: 'epub',
+      role: 'primary',
+      sizeBytes: 1024,
+      mediaOverlay: { available: true, durationSeconds: 42 },
+    })
   })
 
   it('sets hasCover = true when coverSource is non-null', () => {

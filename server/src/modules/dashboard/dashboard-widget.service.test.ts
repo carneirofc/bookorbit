@@ -112,6 +112,67 @@ describe('DashboardWidgetService', () => {
       expect(widgetRepo.getCurrentlyReadingBooks).toHaveBeenCalledWith(7, [3, 5], EMPTY_CONTENT_FILTER_RULES);
       expect(result).toEqual(mockData);
     });
+
+    it('intersects widget queries with the saved dashboard library selection', async () => {
+      const { service, widgetRepo, libraryService } = makeService();
+      const user = makeUser({ id: 7, settings: { dashboardConfig: { libraryIds: [5, 99] } } });
+      libraryService.findAccessibleLibraryIds.mockResolvedValue([3, 5]);
+      widgetRepo.getCurrentlyReadingBooks.mockResolvedValue({ books: [] });
+
+      await service.getCurrentlyReading(user);
+
+      expect(widgetRepo.getCurrentlyReadingBooks).toHaveBeenCalledWith(7, [5], EMPTY_CONTENT_FILTER_RULES);
+    });
+
+    it('does not reuse cached widget data after the dashboard library selection changes', async () => {
+      const { service, widgetRepo, libraryService } = makeService();
+      const firstUser = makeUser({ id: 7, settings: { dashboardConfig: { libraryIds: [3] } } });
+      const secondUser = makeUser({ id: 7, settings: { dashboardConfig: { libraryIds: [5] } } });
+      libraryService.findAccessibleLibraryIds.mockResolvedValue([3, 5]);
+      widgetRepo.getCurrentlyReadingBooks.mockResolvedValueOnce({ books: [{ bookId: 3 }] }).mockResolvedValueOnce({ books: [{ bookId: 5 }] });
+
+      const first = await service.getCurrentlyReading(firstUser);
+      const second = await service.getCurrentlyReading(secondUser);
+
+      expect(first.books).toEqual([{ bookId: 3 }]);
+      expect(second.books).toEqual([{ bookId: 5 }]);
+      expect(widgetRepo.getCurrentlyReadingBooks).toHaveBeenCalledTimes(2);
+      expect(widgetRepo.getCurrentlyReadingBooks).toHaveBeenNthCalledWith(1, 7, [3], EMPTY_CONTENT_FILTER_RULES);
+      expect(widgetRepo.getCurrentlyReadingBooks).toHaveBeenNthCalledWith(2, 7, [5], EMPTY_CONTENT_FILTER_RULES);
+    });
+
+    it('does not reuse cached widget data after library access is revoked', async () => {
+      const { service, widgetRepo, libraryService } = makeService();
+      const user = makeUser({ id: 7, settings: { dashboardConfig: { libraryIds: [3, 5] } } });
+      libraryService.findAccessibleLibraryIds.mockResolvedValueOnce([3, 5]).mockResolvedValueOnce([3]);
+      widgetRepo.getCurrentlyReadingBooks.mockResolvedValueOnce({ books: [{ bookId: 5 }] }).mockResolvedValueOnce({ books: [] });
+
+      const beforeRevocation = await service.getCurrentlyReading(user);
+      const afterRevocation = await service.getCurrentlyReading(user);
+
+      expect(beforeRevocation.books).toEqual([{ bookId: 5 }]);
+      expect(afterRevocation.books).toEqual([]);
+      expect(widgetRepo.getCurrentlyReadingBooks).toHaveBeenCalledTimes(2);
+      expect(widgetRepo.getCurrentlyReadingBooks).toHaveBeenNthCalledWith(1, 7, [3, 5], EMPTY_CONTENT_FILTER_RULES);
+      expect(widgetRepo.getCurrentlyReadingBooks).toHaveBeenNthCalledWith(2, 7, [3], EMPTY_CONTENT_FILTER_RULES);
+    });
+
+    it('loads fresh data after the user cache is cleared', async () => {
+      const { service, widgetRepo, libraryService } = makeService();
+      const user = makeUser({ id: 7 });
+      libraryService.findAccessibleLibraryIds.mockResolvedValue([3]);
+      widgetRepo.getCurrentlyReadingBooks
+        .mockResolvedValueOnce({ books: [{ bookId: 10, title: 'First', authors: [], progress: 10, hasCover: false }] })
+        .mockResolvedValueOnce({ books: [{ bookId: 10, title: 'First', authors: [], progress: 25, hasCover: false }] });
+
+      const initial = await service.getCurrentlyReading(user);
+      service.clearCacheForUser(user.id);
+      const refreshed = await service.getCurrentlyReading(user);
+
+      expect(initial.books[0]?.progress).toBe(10);
+      expect(refreshed.books[0]?.progress).toBe(25);
+      expect(widgetRepo.getCurrentlyReadingBooks).toHaveBeenCalledTimes(2);
+    });
   });
 
   describe('getReadingStreak', () => {
@@ -442,6 +503,60 @@ describe('DashboardWidgetService', () => {
       await service.getLibraryOverview(userA);
       await service.getLibraryOverview(userB);
       expect(widgetRepo.getLibraryOverview).toHaveBeenCalledTimes(2);
+    });
+
+    it('clearing a user cache invalidates both live and stale widgets', async () => {
+      const { service, widgetRepo, libraryService } = makeService();
+      const user = makeUser();
+      libraryService.findAccessibleLibraryIds.mockResolvedValue([1]);
+      widgetRepo.getReadingStreak.mockResolvedValue({ currentStreak: 5, longestStreak: 10, lastSevenDays: [] });
+      widgetRepo.getLibraryOverview.mockResolvedValue({
+        totalBooks: 100,
+        totalAuthors: 25,
+        totalSeries: 10,
+        totalStorageBytes: 1_000,
+        booksAddedThisYear: 8,
+      });
+
+      await service.getReadingStreak(user);
+      await service.getLibraryOverview(user);
+      service.clearCacheForUser(user.id);
+      await service.getReadingStreak(user);
+      await service.getLibraryOverview(user);
+
+      expect(widgetRepo.getReadingStreak).toHaveBeenCalledTimes(2);
+      expect(widgetRepo.getLibraryOverview).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('getWidgets', () => {
+    it('resolves several widgets in one call', async () => {
+      const { service, widgetRepo, libraryService } = makeService();
+      libraryService.findAccessibleLibraryIds.mockResolvedValue([1]);
+      widgetRepo.getCompletedBooksThisYear.mockResolvedValue(4);
+      widgetRepo.getLibraryOverview.mockResolvedValue({ totalBooks: 100, formats: [] });
+
+      const response = await service.getWidgets(['reading-goal', 'library-overview'], makeUser());
+
+      expect(response.items).toHaveLength(2);
+      expect(response.items.map((item) => item.type)).toEqual(['reading-goal', 'library-overview']);
+      expect(response.items.every((item) => item.failed)).toBe(false);
+      expect(response.items[0]?.data).toMatchObject({ completedBooks: 4 });
+    });
+
+    it('isolates a failing widget so the rest of the dashboard still loads', async () => {
+      const { service, widgetRepo, libraryService } = makeService();
+      libraryService.findAccessibleLibraryIds.mockResolvedValue([1]);
+      widgetRepo.getCompletedBooksThisYear.mockRejectedValue(new Error('statement timeout'));
+      widgetRepo.getLibraryOverview.mockResolvedValue({ totalBooks: 100, formats: [] });
+
+      const response = await service.getWidgets(['reading-goal', 'library-overview'], makeUser());
+
+      const readingGoal = response.items.find((item) => item.type === 'reading-goal');
+      const libraryOverview = response.items.find((item) => item.type === 'library-overview');
+      expect(readingGoal).toMatchObject({ failed: true, data: null });
+      expect(libraryOverview?.failed).toBe(false);
+      expect(libraryOverview?.data).toBeTruthy();
     });
   });
 });

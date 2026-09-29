@@ -2,17 +2,23 @@ import { BadRequestException, Logger } from '@nestjs/common';
 import { Readable } from 'stream';
 import { mkdir, realpath, stat } from 'fs/promises';
 
-import { UploadValidatorService } from '../upload/upload-validator.service';
 import { BookDockIngestService } from './book-dock-ingest.service';
-
-/** A real ZIP signature, so the assembled-file content check passes. */
-const EPUB_HEAD = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
+import { buildSingleBookCandidate } from '../scanner/lib/walk';
 
 vi.mock('fs/promises', () => ({
   mkdir: vi.fn().mockResolvedValue(undefined),
   realpath: vi.fn().mockImplementation((p: string) => Promise.resolve(p)),
   stat: vi.fn(),
 }));
+
+// Only the folder read is mocked; the interpreter is left real, because what this covers is
+// exactly whether its grouping is applied to the folder's files.
+vi.mock('../scanner/lib/walk', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../scanner/lib/walk')>()),
+  buildSingleBookCandidate: vi.fn(),
+}));
+
+vi.mock('../../common/utils/fs-stability.utils', () => ({ waitForDirectoryStability: vi.fn().mockResolvedValue(undefined) }));
 
 const mockedStat = vi.mocked(stat);
 
@@ -26,6 +32,9 @@ function makeService(bookDockPath = '/books/book-dock') {
 
   const repo = {
     create: vi.fn(),
+    findByUnitDirectory: vi.fn().mockResolvedValue(undefined),
+    findClaimedPaths: vi.fn().mockResolvedValue(new Set()),
+    createUnit: vi.fn().mockImplementation((data: Record<string, unknown>) => Promise.resolve({ id: 900, ...data })),
     findById: vi.fn(),
     findByAbsolutePath: vi.fn().mockResolvedValue(null),
     findSelectionBatch: vi.fn(),
@@ -33,13 +42,8 @@ function makeService(bookDockPath = '/books/book-dock') {
     countsByStatus: vi.fn().mockResolvedValue({}),
   };
 
-  // Format and signature checks are real; only filename sanitizing is stubbed, since
-  // these tests drive the destination path through it.
-  const realValidator = new UploadValidatorService();
   const validator = {
     sanitizeFilename: vi.fn(),
-    validateBookFormat: vi.fn((name: string) => realValidator.validateBookFormat(name)),
-    assertHeadMatchesExtension: vi.fn((head: Buffer, ext: string) => realValidator.assertHeadMatchesExtension(head, ext)),
   };
 
   const storage = {
@@ -58,7 +62,6 @@ function makeService(bookDockPath = '/books/book-dock') {
 
   const appSettings = {
     isBookDockAutoFetchEnabled: vi.fn().mockResolvedValue(false),
-    getMaxUploadSizeMb: vi.fn().mockResolvedValue(500),
   };
 
   const metadataFetchPipeline = {};
@@ -72,12 +75,6 @@ function makeService(bookDockPath = '/books/book-dock') {
     emitChanged: vi.fn(),
   };
 
-  const uploadSessions = {
-    getUploadDir: vi.fn().mockReturnValue('/books/book-dock/.uploads'),
-    writeChunk: vi.fn(),
-    abort: vi.fn().mockResolvedValue(undefined),
-  };
-
   const service = new BookDockIngestService(
     config as never,
     repo as never,
@@ -89,10 +86,9 @@ function makeService(bookDockPath = '/books/book-dock') {
     metadataFetchPipeline as never,
     processingState as never,
     gateway as never,
-    uploadSessions as never,
   );
 
-  return { service, repo, validator, storage, metadataService, events, appSettings, metadataFetchPipeline, processingState, gateway, uploadSessions };
+  return { service, repo, validator, storage, metadataService, events, appSettings, metadataFetchPipeline, processingState, gateway };
 }
 
 describe('BookDockIngestService', () => {
@@ -141,7 +137,7 @@ describe('BookDockIngestService', () => {
 
       validator.sanitizeFilename.mockReturnValue('book.epub');
       mockedStat.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
-      storage.streamToTemp.mockResolvedValue({ tempPath: '/tmp/upload.bin', sizeBytes: 1024, sha256: 'abc123', head: EPUB_HEAD });
+      storage.streamToTemp.mockResolvedValue({ tempPath: '/tmp/upload.bin', sizeBytes: 1024 });
       storage.moveToPath.mockResolvedValue(undefined);
       repo.create.mockResolvedValue({ id: 42 });
 
@@ -153,7 +149,6 @@ describe('BookDockIngestService', () => {
         fileName: 'book.epub',
         absolutePath: '/books/book-dock/book.epub',
         fileSize: 1024,
-        sha256: 'abc123',
         format: 'epub',
         status: 'pending',
         uploadedBy: null,
@@ -177,7 +172,7 @@ describe('BookDockIngestService', () => {
 
       validator.sanitizeFilename.mockReturnValue('book.epub');
       mockedStat.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
-      storage.streamToTemp.mockResolvedValue({ tempPath: '/tmp/upload.bin', sizeBytes: 1024, sha256: 'abc123', head: EPUB_HEAD });
+      storage.streamToTemp.mockResolvedValue({ tempPath: '/tmp/upload.bin', sizeBytes: 1024 });
       storage.moveToPath.mockResolvedValue(undefined);
       repo.create.mockRejectedValue(new Error('insert failed'));
 
@@ -193,7 +188,7 @@ describe('BookDockIngestService', () => {
 
       validator.sanitizeFilename.mockReturnValue('book.epub');
       mockedStat.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
-      storage.streamToTemp.mockResolvedValue({ tempPath: '/tmp/upload.bin', sizeBytes: 1024, sha256: 'abc123', head: EPUB_HEAD });
+      storage.streamToTemp.mockResolvedValue({ tempPath: '/tmp/upload.bin', sizeBytes: 1024 });
       storage.moveToPath.mockRejectedValue(new Error('move failed'));
 
       await expect(service.ingestUpload('raw.epub', new Readable({ read() {} }))).rejects.toThrow('move failed');
@@ -208,7 +203,7 @@ describe('BookDockIngestService', () => {
 
       validator.sanitizeFilename.mockReturnValue('book.epub');
       mockedStat.mockResolvedValue({ size: 100 } as never);
-      storage.streamToTemp.mockResolvedValue({ tempPath: '/tmp/upload.bin', sizeBytes: 1024, sha256: 'abc123', head: EPUB_HEAD });
+      storage.streamToTemp.mockResolvedValue({ tempPath: '/tmp/upload.bin', sizeBytes: 1024 });
       storage.moveToPath.mockResolvedValue(undefined);
       repo.create.mockResolvedValue({ id: 7 });
 
@@ -217,171 +212,6 @@ describe('BookDockIngestService', () => {
       expect(result).toBe(7);
       const destArg = storage.moveToPath.mock.calls[0][1] as string;
       expect(destArg).toMatch(/\/books\/book-dock\/book-\d+-[a-z0-9]+\.epub$/);
-    });
-  });
-
-  describe('ingestAssembledFile', () => {
-    function assembled(overrides: Record<string, unknown> = {}) {
-      return {
-        tempPath: '/books/book-dock/.uploads/abc.part',
-        fileName: 'dune.epub',
-        ext: 'epub',
-        sizeBytes: 4096,
-        sha256: 'f'.repeat(64),
-        head: EPUB_HEAD,
-        uploadId: 'abc-123',
-        startedAt: Date.now(),
-        release: vi.fn().mockResolvedValue(undefined),
-        ...overrides,
-      };
-    }
-
-    it('moves the assembled file into place without re-streaming it', async () => {
-      const { service, storage, repo } = makeService();
-      mockedStat.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
-      storage.moveToPath.mockResolvedValue(undefined);
-      repo.create.mockResolvedValue({ id: 91 });
-
-      const result = await service.ingestAssembledFile(assembled() as never, 5);
-
-      expect(result).toBe(91);
-      // The whole point of the assembled path: one write during chunking, then a move.
-      expect(storage.streamToTemp).not.toHaveBeenCalled();
-      expect(storage.moveToPath).toHaveBeenCalledWith('/books/book-dock/.uploads/abc.part', '/books/book-dock/dune.epub');
-    });
-
-    it('records the content hash and uploader', async () => {
-      const { service, storage, repo } = makeService();
-      mockedStat.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
-      storage.moveToPath.mockResolvedValue(undefined);
-      repo.create.mockResolvedValue({ id: 92 });
-
-      await service.ingestAssembledFile(assembled() as never, 5);
-
-      expect(repo.create).toHaveBeenCalledWith(expect.objectContaining({ sha256: 'f'.repeat(64), fileSize: 4096, uploadedBy: 5 }));
-    });
-
-    it('rejects a file whose bytes contradict its extension, before it reaches the dock', async () => {
-      const { service, storage, repo } = makeService();
-      const pdfHead = Buffer.from('%PDF-1.7');
-
-      await expect(service.ingestAssembledFile(assembled({ head: pdfHead }) as never, 5)).rejects.toMatchObject({ status: 422 });
-
-      expect(storage.moveToPath).not.toHaveBeenCalled();
-      expect(repo.create).not.toHaveBeenCalled();
-      expect(storage.cleanup).toHaveBeenCalledWith('/books/book-dock/.uploads/abc.part');
-    });
-  });
-
-  describe('ingestChunk', () => {
-    it('reports progress while chunks are outstanding', async () => {
-      const { service, uploadSessions, storage } = makeService();
-      uploadSessions.writeChunk.mockResolvedValue({ status: 'partial', receivedChunks: 2, totalChunks: 5, finalizing: false });
-
-      const result = await service.ingestChunk({
-        uploadId: 'abc-123',
-        userId: 5,
-        rawFilename: 'dune.epub',
-        chunkIndex: 1,
-        totalChunks: 5,
-        chunkSize: 1024,
-        totalSize: 5000,
-        chunkStream: new Readable({ read() {} }),
-      });
-
-      expect(result).toEqual({ complete: false, fileId: null, receivedChunks: 2, totalChunks: 5, finalizing: false });
-      expect(storage.moveToPath).not.toHaveBeenCalled();
-    });
-
-    it('passes the configured limit down as the ceiling on the declared file size', async () => {
-      const { service, uploadSessions, appSettings } = makeService();
-      appSettings.getMaxUploadSizeMb = vi.fn().mockResolvedValue(250);
-      uploadSessions.writeChunk.mockResolvedValue({ status: 'partial', receivedChunks: 1, totalChunks: 5, finalizing: false });
-
-      await service.ingestChunk({
-        uploadId: 'abc-123',
-        userId: 5,
-        rawFilename: 'dune.epub',
-        chunkIndex: 0,
-        totalChunks: 5,
-        chunkSize: 1024,
-        totalSize: 5000,
-        chunkStream: new Readable({ read() {} }),
-      });
-
-      expect(uploadSessions.writeChunk).toHaveBeenCalledWith(expect.objectContaining({ maxTotalBytes: 250 * 1024 * 1024 }));
-    });
-
-    it('releases the temp file once the assembled upload has been ingested', async () => {
-      const { service, uploadSessions, storage, repo } = makeService();
-      const release = vi.fn().mockResolvedValue(undefined);
-      mockedStat.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
-      storage.moveToPath.mockResolvedValue(undefined);
-      repo.create.mockResolvedValue({ id: 77 });
-      uploadSessions.writeChunk.mockResolvedValue({
-        status: 'assembled',
-        assembled: {
-          tempPath: '/books/book-dock/.uploads/abc.part',
-          fileName: 'dune.epub',
-          ext: 'epub',
-          sizeBytes: 4096,
-          sha256: 'f'.repeat(64),
-          head: EPUB_HEAD,
-          uploadId: 'abc-123',
-          startedAt: Date.now(),
-          release,
-        },
-      });
-
-      const result = await service.ingestChunk({
-        uploadId: 'abc-123',
-        userId: 5,
-        rawFilename: 'dune.epub',
-        chunkIndex: 4,
-        totalChunks: 5,
-        chunkSize: 1024,
-        totalSize: 5000,
-        chunkStream: new Readable({ read() {} }),
-      });
-
-      expect(result).toMatchObject({ complete: true, fileId: 77 });
-      expect(release).toHaveBeenCalledTimes(1);
-    });
-
-    it('still releases the temp file when ingesting the assembled upload fails', async () => {
-      const { service, uploadSessions, storage } = makeService();
-      const release = vi.fn().mockResolvedValue(undefined);
-      mockedStat.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
-      storage.moveToPath.mockRejectedValue(new Error('move failed'));
-      uploadSessions.writeChunk.mockResolvedValue({
-        status: 'assembled',
-        assembled: {
-          tempPath: '/books/book-dock/.uploads/abc.part',
-          fileName: 'dune.epub',
-          ext: 'epub',
-          sizeBytes: 4096,
-          sha256: 'f'.repeat(64),
-          head: EPUB_HEAD,
-          uploadId: 'abc-123',
-          startedAt: Date.now(),
-          release,
-        },
-      });
-
-      await expect(
-        service.ingestChunk({
-          uploadId: 'abc-123',
-          userId: 5,
-          rawFilename: 'dune.epub',
-          chunkIndex: 4,
-          totalChunks: 5,
-          chunkSize: 1024,
-          totalSize: 5000,
-          chunkStream: new Readable({ read() {} }),
-        }),
-      ).rejects.toThrow('move failed');
-
-      expect(release).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -471,6 +301,77 @@ describe('BookDockIngestService', () => {
     });
   });
 
+  describe('ingestUnitDirectory', () => {
+    function candidateFile(absolutePath: string, format: string, role = 'content') {
+      return { absolutePath, relPath: absolutePath, ino: 1n, sizeBytes: 10, mtime: new Date(), format, role };
+    }
+
+    /**
+     * The bug this replaced: `walkAndIngest` created one row per file, so a 31-track audiobook
+     * became 31 books, each resolving its destination from its own chapter-named ID3 tags.
+     */
+    it('makes one unit out of a multipart audiobook folder, anchored on track one', async () => {
+      const { service, repo } = makeService();
+      vi.mocked(buildSingleBookCandidate).mockResolvedValue({
+        folderPath: '/books/book-dock/Neuromancer',
+        files: [
+          candidateFile('/books/book-dock/Neuromancer/Chapter 1.mp3', 'mp3'),
+          candidateFile('/books/book-dock/Neuromancer/Chapter 2.mp3', 'mp3'),
+          candidateFile('/books/book-dock/Neuromancer/cover.jpg', 'jpg', 'cover'),
+        ],
+      } as never);
+
+      await expect(service.ingestUnitDirectory('/books/book-dock/Neuromancer')).resolves.toMatchObject({ created: 1 });
+
+      expect(repo.createUnit).toHaveBeenCalledTimes(1);
+      const [anchor, files] = repo.createUnit.mock.calls[0];
+      expect(anchor).toMatchObject({ fileName: 'Chapter 1.mp3', unitDirectory: '/books/book-dock/Neuromancer', format: 'mp3' });
+      expect(files.map((file: { fileName: string; sortOrder: number | null }) => [file.fileName, file.sortOrder])).toEqual([
+        ['Chapter 1.mp3', 0],
+        ['Chapter 2.mp3', 1],
+        ['cover.jpg', null],
+      ]);
+    });
+
+    /**
+     * `buildSingleBookCandidate` returns one candidate for any folder, so without the interpreter
+     * a dropped comic run would become a single book of sixty files.
+     */
+    it('makes one unit per issue out of a dropped comic run', async () => {
+      const { service, repo } = makeService();
+      vi.mocked(buildSingleBookCandidate).mockResolvedValue({
+        folderPath: '/books/book-dock/Saga',
+        files: [candidateFile('/books/book-dock/Saga/Saga 001.cbz', 'cbz'), candidateFile('/books/book-dock/Saga/Saga 002.cbz', 'cbz')],
+      } as never);
+
+      await expect(service.ingestUnitDirectory('/books/book-dock/Saga')).resolves.toMatchObject({ created: 2 });
+
+      // None of them owns the folder: claiming it would hide the others from the watcher, and
+      // deleting one would take the whole folder with it.
+      for (const [anchor] of repo.createUnit.mock.calls) expect(anchor.unitDirectory).toBeNull();
+    });
+
+    it('ignores a folder with no supported book file', async () => {
+      const { service, repo } = makeService();
+      vi.mocked(buildSingleBookCandidate).mockResolvedValue(null as never);
+
+      await expect(service.ingestUnitDirectory('/books/book-dock/empty')).resolves.toMatchObject({ created: 0 });
+      expect(repo.createUnit).not.toHaveBeenCalled();
+    });
+
+    it('skips a unit whose primary file already has a row', async () => {
+      const { service, repo } = makeService();
+      repo.findClaimedPaths.mockResolvedValue(new Set(['/books/book-dock/Dune/Dune.epub']));
+      vi.mocked(buildSingleBookCandidate).mockResolvedValue({
+        folderPath: '/books/book-dock/Dune',
+        files: [candidateFile('/books/book-dock/Dune/Dune.epub', 'epub')],
+      } as never);
+
+      await expect(service.ingestUnitDirectory('/books/book-dock/Dune')).resolves.toMatchObject({ created: 0 });
+      expect(repo.createUnit).not.toHaveBeenCalled();
+    });
+  });
+
   describe('retryFetch', () => {
     it('ignores missing, non-error, or formatless rows', async () => {
       const { service, repo } = makeService();
@@ -499,6 +400,63 @@ describe('BookDockIngestService', () => {
     });
   });
 
+  describe('refetchMetadata', () => {
+    it.each(['ready', 'error'])('queues a %s row and forces a provider fetch', async (status) => {
+      const { service, repo } = makeService();
+      const dockRow = {
+        id: 4,
+        status,
+        format: 'epub',
+        absolutePath: '/bucket/4.epub',
+        errorMessage: status === 'error' ? 'failed' : null,
+      };
+      repo.findById.mockResolvedValueOnce(dockRow).mockResolvedValueOnce({ ...dockRow, status: 'pending' });
+      repo.update.mockResolvedValue(dockRow);
+      const autoFetchSpy = vi.spyOn(service as any, 'autoFetchMetadataAsync').mockResolvedValue(undefined);
+
+      await expect(service.refetchMetadata(4)).resolves.toBe(true);
+      await (service as any).metadataQueue.waitForIdle();
+
+      expect(repo.update).toHaveBeenCalledWith(4, { status: 'pending', errorMessage: null });
+      expect(autoFetchSpy).toHaveBeenCalledWith(4, true);
+      expect((service as any).forcedAutoFetchFileIds.has(4)).toBe(false);
+    });
+
+    it('ignores missing, active, and unsupported rows', async () => {
+      const { service, repo } = makeService();
+      repo.findById
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({ id: 5, status: 'fetching', format: 'epub' })
+        .mockResolvedValueOnce({ id: 6, status: 'ready', format: null, absolutePath: '/bucket/6' });
+
+      await expect(service.refetchMetadata(4)).resolves.toBe(false);
+      await expect(service.refetchMetadata(5)).resolves.toBe(false);
+      await expect(service.refetchMetadata(6)).resolves.toBe(false);
+
+      expect(repo.update).not.toHaveBeenCalled();
+    });
+
+    it('restores the previous state when the work queue rejects the file', async () => {
+      const { service, repo } = makeService();
+      const dockRow = {
+        id: 7,
+        status: 'ready',
+        format: 'epub',
+        absolutePath: '/bucket/7.epub',
+        errorMessage: null,
+      };
+      repo.findById.mockResolvedValue(dockRow);
+      repo.update.mockResolvedValue(dockRow);
+      vi.spyOn(service as any, 'extractMetadataAsync').mockReturnValue(false);
+
+      await expect(service.refetchMetadata(7)).resolves.toBe(false);
+
+      expect(repo.update).toHaveBeenNthCalledWith(1, 7, { status: 'pending', errorMessage: null });
+      expect(repo.update).toHaveBeenNthCalledWith(2, 7, { status: 'ready', errorMessage: null });
+      expect((service as any).forcedAutoFetchFileIds.has(7)).toBe(false);
+    });
+  });
+
   describe('autoFetchMetadataAsync', () => {
     it('returns early when auto-fetch is disabled', async () => {
       const { service, appSettings, repo } = makeService();
@@ -508,6 +466,34 @@ describe('BookDockIngestService', () => {
 
       expect(repo.findById).not.toHaveBeenCalled();
       expect(repo.update).not.toHaveBeenCalled();
+    });
+
+    it('forces an explicit refetch when automatic fetching is disabled', async () => {
+      const { service, appSettings, repo, metadataFetchPipeline } = makeService();
+      appSettings.isBookDockAutoFetchEnabled.mockResolvedValue(false);
+      repo.findById.mockResolvedValue({
+        id: 8,
+        fileName: 'dune.epub',
+        status: 'ready',
+        embeddedMetadata: { title: 'Dune' },
+      });
+      (metadataFetchPipeline as any).runWithSources = vi.fn().mockResolvedValue({
+        resolved: { title: 'Dune' },
+        sources: { title: 'google' },
+      });
+
+      await (service as any).autoFetchMetadataAsync(8, true);
+
+      expect(appSettings.isBookDockAutoFetchEnabled).not.toHaveBeenCalled();
+      expect(metadataFetchPipeline.runWithSources).toHaveBeenCalledTimes(1);
+      expect(repo.update).toHaveBeenLastCalledWith(
+        8,
+        expect.objectContaining({
+          status: 'ready',
+          fetchedMetadata: { title: 'Dune' },
+          fetchedMetadataSources: { title: 'google' },
+        }),
+      );
     });
 
     it.each([
@@ -583,6 +569,26 @@ describe('BookDockIngestService', () => {
       await (service as any).autoFetchMetadataAsync(8);
 
       expect(metadataFetchPipeline.runWithSources).toHaveBeenCalledWith(expect.objectContaining({ isAudiobook: true }), {});
+    });
+
+    it('stages the audiobook cover as the cover of a docked audio file', async () => {
+      const { service, appSettings, repo, metadataFetchPipeline } = makeService();
+      appSettings.isBookDockAutoFetchEnabled.mockResolvedValue(true);
+      repo.findById.mockResolvedValue({ id: 8, fileName: 'dune.m4b', format: 'm4b', status: 'ready', embeddedMetadata: { title: 'Dune' } });
+      (metadataFetchPipeline as any).runWithSources = vi.fn().mockResolvedValue({
+        resolved: { title: 'Dune', audioCoverUrl: 'https://audible/dune.jpg' },
+        sources: { title: 'audible', audioCoverUrl: 'audible' },
+      });
+
+      await (service as any).autoFetchMetadataAsync(8);
+
+      expect(repo.update).toHaveBeenLastCalledWith(
+        8,
+        expect.objectContaining({
+          fetchedMetadata: { title: 'Dune', coverUrl: 'https://audible/dune.jpg' },
+          fetchedMetadataSources: { title: 'audible', coverUrl: 'audible' },
+        }),
+      );
     });
 
     it('updates fetched metadata and confidence after pipeline resolution', async () => {
@@ -755,6 +761,31 @@ describe('BookDockIngestService', () => {
       expect(repo.update).toHaveBeenNthCalledWith(2, 13, { status: 'ready' });
     });
 
+    it('clears stale provider metadata when an explicit refetch finds no result', async () => {
+      const { service, appSettings, repo, metadataFetchPipeline } = makeService();
+      appSettings.isBookDockAutoFetchEnabled.mockResolvedValue(false);
+      repo.findById.mockResolvedValue({
+        id: 15,
+        fileName: 'known-title.epub',
+        status: 'ready',
+        embeddedMetadata: { title: 'Known Title' },
+        fetchedMetadata: { title: 'Stale Title' },
+        fetchedMetadataSources: { title: 'google' },
+        confidence: 90,
+      });
+      (metadataFetchPipeline as any).runWithSources = vi.fn().mockResolvedValue({ resolved: {}, sources: {} });
+
+      await (service as any).autoFetchMetadataAsync(15, true);
+
+      expect(repo.update).toHaveBeenNthCalledWith(1, 15, { status: 'fetching' });
+      expect(repo.update).toHaveBeenNthCalledWith(2, 15, {
+        status: 'ready',
+        fetchedMetadata: null,
+        confidence: null,
+        fetchedMetadataSources: null,
+      });
+    });
+
     it('emits a summary refresh before provider fetching starts', async () => {
       const { service, appSettings, repo, metadataFetchPipeline } = makeService();
       appSettings.isBookDockAutoFetchEnabled.mockResolvedValue(true);
@@ -786,7 +817,7 @@ describe('BookDockIngestService', () => {
     await (service as any).metadataQueue.waitForIdle();
 
     expect(metadataService.extractAndSave).toHaveBeenCalledWith(12, '/bucket/12.epub', 'epub', '/books/book-dock/covers');
-    expect(autoFetchSpy).toHaveBeenCalledWith(12);
+    expect(autoFetchSpy).toHaveBeenCalledWith(12, false);
     expect(repo.update).toHaveBeenCalledWith(12, { status: 'extracting' });
     expect(emitSummarySpy).toHaveBeenCalledTimes(2);
     expect(events.emit).toHaveBeenCalledWith('book-dock.file.ingested', 12);

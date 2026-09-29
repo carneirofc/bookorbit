@@ -1,26 +1,21 @@
-import { Injectable, Logger, PayloadTooLargeException } from '@nestjs/common';
-import { copyFile, mkdir, rename, stat, unlink } from 'fs/promises';
-import { createWriteStream } from 'fs';
+import { Injectable, Logger } from '@nestjs/common';
+import { mkdir, open, rename, stat, unlink } from 'fs/promises';
+import { createReadStream, createWriteStream } from 'fs';
 import { tmpdir } from 'os';
 import { dirname, join } from 'path';
 import { Readable, Transform } from 'stream';
 import { pipeline } from 'stream/promises';
-import { createHash, randomUUID } from 'crypto';
+import { randomUUID } from 'crypto';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 
-import { SIGNATURE_HEAD_BYTES } from '../../common/file-signature';
 import { AppSettingsService } from '../app-settings/app-settings.service';
+import { HARD_MAX_UPLOAD_BYTES } from '../../common/constants/upload.constants';
+import { uploadError } from './upload-errors';
 
 // Hard ceiling applied at the multipart level. The service enforces a lower configurable limit.
-export const MAX_UPLOAD_BYTES = 500 * 1024 * 1024; // 500 MB
+export const MAX_UPLOAD_BYTES = HARD_MAX_UPLOAD_BYTES;
 
-export interface StoredUpload {
-  tempPath: string;
-  sizeBytes: number;
-  sha256: string;
-  /** First `SIGNATURE_HEAD_BYTES` of the file, for magic-byte validation. */
-  head: Buffer;
-}
+export class UploadDestinationExistsError extends Error {}
 
 @Injectable()
 export class UploadStorageService {
@@ -29,55 +24,49 @@ export class UploadStorageService {
   constructor(private readonly appSettings: AppSettingsService) {}
 
   /**
-   * Streams the multipart file to a temp path on disk, hashing it and capturing its
-   * leading bytes on the way through so no caller has to read the file back.
-   *
-   * `targetDir` should be on the same filesystem as the eventual destination -
-   * `moveToPath` can then rename instead of copying. It defaults to the OS temp
-   * dir, which in a container is usually a different device.
+   * Streams the multipart file to a temp path on disk.
    */
-  async streamToTemp(source: Readable, targetDir?: string): Promise<StoredUpload> {
-    const dir = targetDir ?? tmpdir();
-    await mkdir(dir, { recursive: true });
-
-    const tempPath = join(dir, `bookorbit-upload-${randomUUID()}`);
-    const hash = createHash('sha256');
-    const headChunks: Buffer[] = [];
-    let headBytes = 0;
-
-    const meter = new Transform({
+  async streamToTemp(source: Readable, requestedLimitBytes?: number): Promise<{ tempPath: string; sizeBytes: number }> {
+    const tempPath = join(tmpdir(), `bookorbit-upload-${randomUUID()}`);
+    const writeStream = createWriteStream(tempPath);
+    const configuredMb = await this.appSettings.getMaxUploadSizeMb();
+    const configuredBytes = Math.min(HARD_MAX_UPLOAD_BYTES, configuredMb * 1_024 * 1_024);
+    const limitBytes = Math.min(configuredBytes, requestedLimitBytes ?? configuredBytes);
+    let totalBytes = 0;
+    const limiter = new Transform({
       transform(chunk: Buffer, _encoding, callback) {
-        hash.update(chunk);
-        if (headBytes < SIGNATURE_HEAD_BYTES) {
-          const slice = chunk.subarray(0, SIGNATURE_HEAD_BYTES - headBytes);
-          headChunks.push(Buffer.from(slice));
-          headBytes += slice.length;
+        totalBytes += chunk.length;
+        if (totalBytes > limitBytes) {
+          callback(uploadError.tooLarge(`File exceeds the ${Math.floor(limitBytes / 1_024 / 1_024)} MB upload limit`));
+          return;
         }
         callback(null, chunk);
       },
     });
 
     try {
-      await pipeline(source, meter, createWriteStream(tempPath));
+      await pipeline(source, limiter, writeStream);
     } catch (err) {
       await this.cleanup(tempPath);
+      if ((err as NodeJS.ErrnoException).code === 'ENOSPC') {
+        throw uploadError.storageFull('The server does not have enough storage for this upload');
+      }
       throw err;
     }
 
     if ((source as Readable & { truncated?: boolean }).truncated) {
       await this.cleanup(tempPath);
-      const limitMb = await this.appSettings.getMaxUploadSizeMb();
-      throw new PayloadTooLargeException(`File exceeds the ${limitMb} MB upload limit`);
+      throw uploadError.tooLarge(`File exceeds the ${Math.floor(limitBytes / 1_024 / 1_024)} MB upload limit`);
     }
 
     const { size } = await stat(tempPath);
-    return { tempPath, sizeBytes: size, sha256: hash.digest('hex'), head: Buffer.concat(headChunks) };
+    return { tempPath, sizeBytes: size };
   }
 
   /**
    * Moves the temp file to an already-resolved absolute destination path.
    * Creates parent directories as needed.
-   * Uses rename() and falls back to copy+unlink for cross-device moves.
+   * Uses rename() and stages cross-device copies on the destination filesystem.
    */
   async moveToPath(tempPath: string, absolutePath: string): Promise<void> {
     await mkdir(dirname(absolutePath), { recursive: true });
@@ -85,13 +74,35 @@ export class UploadStorageService {
     try {
       await rename(tempPath, absolutePath);
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'EXDEV') {
-        await copyFile(tempPath, absolutePath);
-        await this.cleanup(tempPath);
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'EXDEV') {
+        await this.copyAcrossDevices(tempPath, absolutePath);
+      } else if (code === 'EEXIST') {
+        throw new UploadDestinationExistsError('Upload destination already exists');
+      } else if (code === 'ENOSPC') {
+        throw uploadError.storageFull('The server does not have enough storage for this upload');
       } else {
         throw err;
       }
     }
+  }
+
+  private async copyAcrossDevices(sourcePath: string, destinationPath: string): Promise<void> {
+    const stagingPath = join(dirname(destinationPath), `.bookorbit-upload-${randomUUID()}.tmp`);
+    const stagingFile = await open(stagingPath, 'wx');
+
+    try {
+      // copyFile also copies permissions, which ACL-backed shares may forbid despite allowing writes.
+      // Stage without a book extension so scanners cannot ingest a partially written file.
+      await pipeline(createReadStream(sourcePath), stagingFile.createWriteStream());
+      await rename(stagingPath, destinationPath);
+    } catch (err) {
+      await stagingFile.close().catch(() => {});
+      await this.cleanup(stagingPath);
+      throw err;
+    }
+
+    await this.cleanup(sourcePath);
   }
 
   async cleanup(tempPath: string): Promise<void> {

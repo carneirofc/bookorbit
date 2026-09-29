@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import {
   ArrowLeft,
@@ -8,16 +9,20 @@ import {
   BookmarkCheck,
   CircleHelp,
   Clock3,
+  Columns3,
   FileText,
+  Headphones,
   Maximize,
   Minimize,
+  Pin,
+  PinOff,
   Search,
   Settings,
 } from '@lucide/vue'
 import { useMediaQuery } from '@vueuse/core'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
-import { Sheet, SheetContent } from '@/components/ui/sheet'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import ReaderSettingsSheet from '@/features/reader/shared/components/ReaderSettingsSheet.vue'
 import { useFullscreen } from '../../shared/composables/useFullscreen'
 
 const { t } = useI18n()
@@ -28,6 +33,11 @@ const props = defineProps<{
   settingsOpen: boolean
   footerMode: 0 | 1 | 2
   peekMode?: boolean
+  isTtsActive?: boolean
+  isTtsAvailable?: boolean
+  isMediaOverlay?: boolean
+  isPinned?: boolean
+  showTapZones?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -40,6 +50,9 @@ const emit = defineEmits<{
   toggleHelp: []
   cycleFooterMode: []
   startReading: []
+  startTts: []
+  togglePin: []
+  toggleTapZones: []
 }>()
 
 const { isFullscreen } = useFullscreen()
@@ -48,12 +61,18 @@ const { isFullscreen } = useFullscreen()
 // is room beside the text, a bottom sheet where the thumb is and the page must stay visible.
 const isCompact = useMediaQuery('(max-width: 639px)')
 
+const ttsTooltip = computed(() => {
+  if (props.isTtsActive) return props.isMediaOverlay ? t('reader.header.narrationPlaying') : t('reader.header.ttsPlaying')
+  return props.isMediaOverlay ? t('reader.header.listenWithNarrationShort') : t('reader.header.listen')
+})
+
 function onSettingsOpenChange(open: boolean) {
   emit('update:settingsOpen', open)
 }
 
-function openSettings() {
-  emit('update:settingsOpen', true)
+/** Mirrors PopoverTrigger on the wide path, so the icon means the same thing in both containers. */
+function toggleSettings() {
+  emit('update:settingsOpen', !props.settingsOpen)
 }
 
 function getFooterModeIcon(mode: 0 | 1 | 2) {
@@ -128,6 +147,20 @@ function getFooterModeTooltip(mode: 0 | 1 | 2): string {
         </button>
       </div>
 
+      <Tooltip v-if="props.isTtsAvailable !== false">
+        <TooltipTrigger as-child>
+          <button
+            class="viewer-btn"
+            :class="props.isTtsActive ? '!text-primary' : ''"
+            :aria-label="props.isMediaOverlay ? t('reader.header.listenWithNarration') : t('reader.header.listenWithTts')"
+            @click="emit('startTts')"
+          >
+            <Headphones :size="18" :class="{ 'animate-pulse': props.isTtsActive }" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent>{{ ttsTooltip }}</TooltipContent>
+      </Tooltip>
+
       <Tooltip>
         <TooltipTrigger as-child>
           <button class="viewer-btn" :aria-label="t('common.search')" @click="emit('toggleSearch')">
@@ -169,29 +202,48 @@ function getFooterModeTooltip(mode: 0 | 1 | 2): string {
         <TooltipContent>{{ isFullscreen ? t('reader.header.exitFullscreen') : t('reader.header.enterFullscreen') }}</TooltipContent>
       </Tooltip>
 
+      <Tooltip>
+        <TooltipTrigger as-child>
+          <button
+            class="viewer-btn hidden sm:flex"
+            :class="props.showTapZones ? '!bg-muted !text-primary' : ''"
+            aria-label="Toggle tap zones"
+            @click="emit('toggleTapZones')"
+          >
+            <Columns3 :size="18" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent>Show tap zones</TooltipContent>
+      </Tooltip>
+
+      <Tooltip>
+        <TooltipTrigger as-child>
+          <button
+            class="viewer-btn hidden sm:flex"
+            :class="props.isPinned ? '!bg-muted !text-primary' : ''"
+            :aria-label="props.isPinned ? 'Unpin menu' : 'Pin menu'"
+            @click="emit('togglePin')"
+          >
+            <PinOff v-if="props.isPinned" :size="18" />
+            <Pin v-else :size="18" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent>{{ props.isPinned ? 'Unpin menu' : 'Pin menu' }}</TooltipContent>
+      </Tooltip>
+
       <template v-if="isCompact">
         <button
           class="viewer-btn"
           :class="props.settingsOpen ? '!bg-muted !text-foreground' : ''"
           :title="t('reader.settings.title')"
           :aria-label="t('reader.settings.ariaLabel')"
-          @click="openSettings"
+          @click="toggleSettings"
         >
           <Settings :size="18" />
         </button>
-        <Sheet :open="props.settingsOpen" @update:open="onSettingsOpenChange">
-          <SheetContent
-            side="bottom"
-            hide-close
-            class="max-h-[85vh] gap-0 rounded-t-2xl border-border bg-card p-0"
-            :aria-label="t('reader.settings.ariaLabel')"
-          >
-            <div class="flex shrink-0 justify-center pt-2.5 pb-1">
-              <div class="h-1 w-9 rounded-full bg-border" />
-            </div>
-            <slot name="settingsPanel" />
-          </SheetContent>
-        </Sheet>
+        <ReaderSettingsSheet :open="props.settingsOpen" @update:open="onSettingsOpenChange">
+          <slot name="settingsPanel" />
+        </ReaderSettingsSheet>
       </template>
 
       <Popover v-else :open="props.settingsOpen" @update:open="onSettingsOpenChange">

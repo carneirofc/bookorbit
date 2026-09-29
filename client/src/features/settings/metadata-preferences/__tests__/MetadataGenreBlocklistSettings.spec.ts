@@ -1,7 +1,7 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { MetadataFetchPreferences } from '@bookorbit/types'
+import type { MetadataFetchOptions, MetadataFetchPreferences } from '@bookorbit/types'
 import MetadataGenreBlocklistSettings from '../MetadataGenreBlocklistSettings.vue'
 
 const apiMock = vi.hoisted(() => vi.fn<(...args: unknown[]) => Promise<{ ok: boolean; json?: () => Promise<unknown> }>>())
@@ -34,7 +34,11 @@ function response(data: unknown, ok = true) {
   }
 }
 
-function makePrefs(blocklist: string[], marker = 'initial'): MetadataFetchPreferences {
+function makePrefs(
+  blocklist: string[],
+  marker = 'initial',
+  providerIdMode: MetadataFetchOptions['providerIdMode'] = 'preferExisting',
+): MetadataFetchPreferences {
   return {
     fields: {
       title: {
@@ -50,6 +54,7 @@ function makePrefs(blocklist: string[], marker = 'initial'): MetadataFetchPrefer
         maxCount: 3,
       },
       saveProviderIds: true,
+      providerIdMode,
     },
   } as unknown as MetadataFetchPreferences
 }
@@ -72,20 +77,20 @@ describe('MetadataGenreBlocklistSettings', () => {
       .mockResolvedValueOnce(response(makePrefs(['Audiobook'])))
       .mockReturnValueOnce(latestFetch.promise)
       .mockResolvedValueOnce(response({}))
-      .mockResolvedValueOnce(response(makePrefs(['Audiobook', 'Adult'], 'latest')))
+      .mockResolvedValueOnce(response(makePrefs(['Audiobook', 'Adult'], 'latest', 'existingOnly')))
 
     const wrapper = mount(MetadataGenreBlocklistSettings)
     await flushPromises()
 
     const input = wrapper.get<HTMLInputElement>('#genre-blocklist-entry')
     await input.setValue(' Adult ')
-    await wrapper.get('button.settings-btn-primary').trigger('click')
+    await wrapper.get('button[data-slot="button"]').trigger('click')
     await nextTick()
 
     expect(input.element.value).toBe('')
     expect(wrapper.text()).not.toContain('This genre is already blocked.')
 
-    latestFetch.resolve(response(makePrefs(['Audiobook'], 'latest')))
+    latestFetch.resolve(response(makePrefs(['Audiobook'], 'latest', 'existingOnly')))
     await flushPromises()
 
     expect(apiMock).toHaveBeenCalledTimes(4)
@@ -94,6 +99,7 @@ describe('MetadataGenreBlocklistSettings', () => {
     expect(body.fields.title.providers).toEqual(['latest'])
     expect(body.options?.genres.blocklist).toEqual(['Audiobook', 'Adult'])
     expect(body.options?.genres.maxCount).toBe(3)
+    expect(body.options?.providerIdMode).toBe('existingOnly')
   })
 
   it('does not submit duplicate genre values', async () => {
@@ -105,7 +111,7 @@ describe('MetadataGenreBlocklistSettings', () => {
     await wrapper.get('#genre-blocklist-entry').setValue('audiobook')
 
     expect(wrapper.text()).toContain('This genre is already blocked.')
-    expect(wrapper.get('button.settings-btn-primary').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('button[data-slot="button"]').attributes('disabled')).toBeDefined()
     expect(apiMock).toHaveBeenCalledTimes(1)
   })
 
@@ -141,6 +147,6 @@ describe('MetadataGenreBlocklistSettings', () => {
 
     expect(wrapper.text()).toContain('Audiobook')
     expect(wrapper.text()).toContain('Adult')
-    expect(toastError).toHaveBeenCalledWith('Failed to save preferences')
+    expect(toastError).toHaveBeenCalledWith('Could not save metadata preferences. Check your connection and try again.')
   })
 })

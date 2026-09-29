@@ -28,6 +28,8 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Auditable } from '../../common/decorators/auditable.decorator';
 import { ForbidPermission } from '../../common/decorators/forbid-permission.decorator';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
+import { AuthorMetadataPreferencesService } from './author-metadata-preferences.service';
+import { UpdateAuthorMetadataPreferencesDto } from './dto/update-author-metadata-preferences.dto';
 import { imageContentTypeFromPath } from '../../common/image-content-type';
 import type { MultipartRequest } from '../../common/types/multipart-request';
 import type { RequestUser } from '../../common/types/request-user';
@@ -38,7 +40,7 @@ import { BulkAuthorIdsDto } from './dto/bulk-author-ids.dto';
 import { DeleteAuthorsDto } from './dto/delete-authors.dto';
 import { ListAuthorBooksDto } from './dto/list-author-books.dto';
 import { ListAuthorMetadataDto } from './dto/list-author-metadata.dto';
-import { ListAuthorsDto } from './dto/list-authors.dto';
+import { ListAuthorLettersDto, ListAuthorsDto } from './dto/list-authors.dto';
 import { LookupAuthorMetadataDto } from './dto/lookup-author-metadata.dto';
 import { MergeAuthorsDto } from './dto/merge-authors.dto';
 import { PreviewAuthorEnrichmentCountDto } from './dto/preview-author-enrichment-count.dto';
@@ -54,11 +56,18 @@ export class AuthorsController {
     private readonly enrichmentOrchestrator: AuthorEnrichmentOrchestratorService,
     private readonly enrichmentConfig: AuthorEnrichmentConfigService,
     private readonly queueRepo: AuthorEnrichmentRepository,
+    private readonly metadataPreferences: AuthorMetadataPreferencesService,
   ) {}
 
   @Get()
   findAll(@CurrentUser() user: RequestUser, @Query() dto: ListAuthorsDto) {
     return this.authorsService.findAll(user, dto);
+  }
+
+  // Declared before ':id' so the literal path is not captured as an author id.
+  @Get('jump-buckets')
+  findJumpBuckets(@CurrentUser() user: RequestUser, @Query() dto: ListAuthorLettersDto) {
+    return this.authorsService.findJumpBuckets(user, dto);
   }
 
   @Get('metadata/providers')
@@ -121,6 +130,20 @@ export class AuthorsController {
   async setEnrichmentConfig(@Body() config: AuthorAutoEnrichmentConfigDto) {
     await this.enrichmentConfig.setConfig(config);
     return this.enrichmentConfig.getConfig();
+  }
+
+  @Get('metadata/preferences')
+  @RequirePermission(Permission.ManageMetadataConfig)
+  getMetadataPreferences() {
+    return this.metadataPreferences.getPreferences();
+  }
+
+  @Put('metadata/preferences')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission(Permission.ManageMetadataConfig)
+  @Auditable({ action: AuditAction.AuthorEnrichmentConfigUpdate, description: 'Updated author metadata preferences' })
+  setMetadataPreferences(@Body() preferences: UpdateAuthorMetadataPreferencesDto) {
+    return this.metadataPreferences.setPreferences(preferences);
   }
 
   @Post('enrichment/preview-count')

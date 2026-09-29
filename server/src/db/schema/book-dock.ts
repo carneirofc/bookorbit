@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { bigint, check, index, integer, jsonb, pgTable, serial, text, timestamp, varchar } from 'drizzle-orm/pg-core';
+import { bigint, boolean, check, index, integer, jsonb, pgTable, serial, text, timestamp, varchar } from 'drizzle-orm/pg-core';
 import type { BookDockMetadata } from '@bookorbit/types';
 
 import { libraries, libraryFolders } from './libraries';
@@ -12,9 +12,17 @@ export const bookDockFiles = pgTable(
     fileName: varchar('file_name', { length: 500 }).notNull(),
     absolutePath: text('absolute_path').notNull().unique(),
     fileSize: bigint('file_size', { mode: 'number' }),
-    // Null for rows that predate hashing and for watched-folder ingests, which never stream through upload.
-    sha256: varchar('sha256', { length: 64 }),
     format: varchar('format', { length: 20 }),
+    /**
+     * Set when this row owns a directory of files rather than a single loose one. The row's own
+     * `absolutePath`, `format` and `fileSize` keep describing the unit's **primary** file, because
+     * metadata and cover extraction on a 31-track audiobook should read exactly one of them.
+     *
+     * Null means no exclusive directory ownership; a row may still have unit files when
+     * several books share a folder. Watched books may be nested at any depth. Imports with
+     * autoFinalizeSuppressed claim their directory before copying, so discovery skips its tree.
+     */
+    unitDirectory: text('unit_directory').unique(),
     status: varchar('status', { length: 20 }).notNull().default('pending'),
     embeddedMetadata: jsonb('embedded_metadata').$type<BookDockMetadata>(),
     selectedMetadata: jsonb('selected_metadata').$type<BookDockMetadata>(),
@@ -27,6 +35,12 @@ export const bookDockFiles = pgTable(
     errorMessage: text('error_message'),
     metadataEditedAt: timestamp('metadata_edited_at', { withTimezone: true }),
     uploadedBy: integer('uploaded_by').references(() => users.id, { onDelete: 'set null' }),
+    /**
+     * Another module owns finalization for this row and will call it explicitly once its own
+     * checks pass. Generic auto-finalize skips it so the two paths never race for the same file.
+     * The dock deliberately does not learn which module, only that it is not its call to make.
+     */
+    autoFinalizeSuppressed: boolean('auto_finalize_suppressed').notNull().default(false),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true })
       .notNull()
@@ -37,7 +51,6 @@ export const bookDockFiles = pgTable(
     index('book_dock_files_status_idx').on(t.status),
     index('book_dock_files_target_library_id_idx').on(t.targetLibraryId),
     index('book_dock_files_uploaded_by_idx').on(t.uploadedBy),
-    index('book_dock_files_sha256_idx').on(t.sha256),
     check('book_dock_files_status_chk', sql`${t.status} in ('pending', 'extracting', 'fetching', 'ready', 'error')`),
     check('book_dock_files_confidence_range_chk', sql`${t.confidence} is null or (${t.confidence} >= 0 and ${t.confidence} <= 100)`),
   ],
@@ -45,3 +58,34 @@ export const bookDockFiles = pgTable(
 
 export type BookDockFileRow = typeof bookDockFiles.$inferSelect;
 export type NewBookDockFileRow = typeof bookDockFiles.$inferInsert;
+
+/**
+ * The files a dock unit is made of, in playback or format order. Holds **every** file including
+ * the primary, so the primary's path appears here and on the anchor row too. That duplication is
+ * the cheaper half of the trade: placement, rollback, discard and delete iterate one list rather
+ * than a union, and the anchor stays a plain "which file do I read metadata from" pointer.
+ */
+export const bookDockUnitFiles = pgTable(
+  'book_dock_unit_files',
+  {
+    id: serial('id').primaryKey(),
+    dockFileId: integer('dock_file_id')
+      .notNull()
+      .references(() => bookDockFiles.id, { onDelete: 'cascade' }),
+    absolutePath: text('absolute_path').notNull().unique(),
+    fileName: varchar('file_name', { length: 500 }).notNull(),
+    fileSize: bigint('file_size', { mode: 'number' }),
+    format: varchar('format', { length: 20 }),
+    role: varchar('role', { length: 20 }).notNull().default('content'),
+    /** Content files only. Natural order within the unit, so track 10 follows track 9. */
+    sortOrder: integer('sort_order'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('book_dock_unit_files_dock_file_id_sort_order_idx').on(t.dockFileId, t.sortOrder),
+    check('book_dock_unit_files_role_chk', sql`${t.role} in ('content', 'cover', 'metadata', 'supplement')`),
+  ],
+);
+
+export type BookDockUnitFileRow = typeof bookDockUnitFiles.$inferSelect;
+export type NewBookDockUnitFileRow = typeof bookDockUnitFiles.$inferInsert;

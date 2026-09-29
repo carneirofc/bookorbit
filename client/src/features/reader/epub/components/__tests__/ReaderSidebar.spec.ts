@@ -161,6 +161,7 @@ describe('ReaderSidebar', () => {
             origin: 'web',
             positionStatus: 'exact',
             chapterIndex: null,
+            highlightedAt: '2026-02-14T12:00:00.000Z',
             createdAt: '2026-02-14T12:00:00.000Z',
           },
           {
@@ -177,6 +178,7 @@ describe('ReaderSidebar', () => {
             origin: 'web',
             positionStatus: 'exact',
             chapterIndex: null,
+            highlightedAt: '2026-02-15T12:00:00.000Z',
             createdAt: '2026-02-15T12:00:00.000Z',
           },
         ],
@@ -237,6 +239,7 @@ describe('ReaderSidebar', () => {
             origin: 'web',
             positionStatus: 'exact',
             chapterIndex: null,
+            highlightedAt: '2026-02-13T12:00:00.000Z',
             createdAt: '2026-02-13T12:00:00.000Z',
           },
           {
@@ -253,6 +256,7 @@ describe('ReaderSidebar', () => {
             origin: 'web',
             positionStatus: 'exact',
             chapterIndex: null,
+            highlightedAt: '2026-02-16T12:00:00.000Z',
             createdAt: '2026-02-16T12:00:00.000Z',
           },
         ],
@@ -283,6 +287,29 @@ describe('ReaderSidebar', () => {
     await selects[0]?.setValue('oldest')
     const visibleRows = wrapper.findAll('li')
     expect(visibleRows[0]?.text()).toContain('Beta insight')
+  })
+
+  it('does not navigate chapters when navigation is locked', async () => {
+    const wrapper = mount(ReaderSidebar, {
+      props: {
+        ...makeBaseProps(),
+        chapters: [
+          {
+            label: 'Chapter 1',
+            href: 'ch1.xhtml#start',
+            subitems: [],
+          },
+        ],
+        navigationLocked: true,
+      },
+      global,
+    })
+
+    const chapterButton = wrapper.findAll('button').find((btn) => btn.text().includes('Chapter 1'))
+    await chapterButton?.trigger('click')
+
+    expect(chapterButton?.attributes('disabled')).toBeDefined()
+    expect(wrapper.emitted('navigateChapter')).toBeUndefined()
   })
 
   it('filters bookmarks, sorts by date, and skips bookmark navigation when CFI is missing', async () => {
@@ -348,6 +375,7 @@ describe('ReaderSidebar', () => {
             origin: 'web',
             positionStatus: 'exact',
             chapterIndex: null,
+            highlightedAt: '2026-02-11T12:00:00.000Z',
             createdAt: '2026-02-11T12:00:00.000Z',
           },
         ],

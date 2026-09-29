@@ -1,11 +1,12 @@
 vi.mock('bcryptjs', () => ({ hash: vi.fn() }));
 vi.mock('crypto', () => ({ randomBytes: vi.fn() }));
 
-import { BadRequestException, ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Logger, NotFoundException } from '@nestjs/common';
 import { hash } from 'bcryptjs';
 import { randomBytes } from 'crypto';
 import { Permission } from '@bookorbit/types';
 
+import { USER_DELETING, UserEventsService, type UserDeletingEvent } from './user-events.service';
 import { UserService } from './user.service';
 
 const mockHash = hash as MockedFunction<typeof hash>;
@@ -35,8 +36,10 @@ describe('UserService', () => {
     findAll: vi.fn(),
     findAssignable: vi.fn(),
     update: vi.fn(),
+    updateManagedUser: vi.fn(),
     countOtherSuperusers: vi.fn(),
     delete: vi.fn(),
+    deleteManagedUser: vi.fn(),
     setSuperuser: vi.fn(),
     assignViewerLibraries: vi.fn(),
     findLibraryIdsByUserId: vi.fn(),
@@ -49,20 +52,37 @@ describe('UserService', () => {
     replaceFilters: vi.fn(),
   };
 
-  const config = { get: vi.fn() };
+  const appConfiguration = { appUrl: '' };
   const appSettingsService = {
     getDefaultLibraryAccessLibraryIds: vi.fn(),
   };
+  const userStatistics = {
+    rebuildDailyStatsForUser: vi.fn(),
+  };
 
   let service: UserService;
+  let events: UserEventsService;
 
   beforeEach(() => {
     vi.resetAllMocks();
-    service = new UserService(userRepo as any, config as any, contentFilterRepo as any, appSettingsService as any);
+    vi.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    events = new UserEventsService();
+    service = new UserService(
+      userRepo as any,
+      appConfiguration as any,
+      contentFilterRepo as any,
+      appSettingsService as any,
+      userStatistics as any,
+      events,
+      {
+        assertPasswordLoginEnabled: vi.fn(),
+      } as any,
+    );
 
     mockHash.mockResolvedValue('hashed-secret');
     mockRandomBytes.mockReturnValue(Buffer.from('abcd', 'hex'));
-    config.get.mockReturnValue('https://app.example.com');
+    appConfiguration.appUrl = 'https://app.example.com';
     appSettingsService.getDefaultLibraryAccessLibraryIds.mockResolvedValue([]);
 
     userRepo.create.mockResolvedValue({ id: 10, username: 'newuser', name: 'New User' });
@@ -70,6 +90,9 @@ describe('UserService', () => {
     userRepo.findByEmail.mockResolvedValue(null);
     userRepo.generateResetToken.mockResolvedValue('reset-token');
     userRepo.findExistingLibraryIds.mockImplementation((ids: number[]) => Promise.resolve(ids));
+    userRepo.updateManagedUser.mockResolvedValue({ status: 'updated', user: { id: 2 } });
+    userRepo.deleteManagedUser.mockResolvedValue('updated');
+    userRepo.setSuperuser.mockResolvedValue('updated');
   });
 
   it('createUser rejects duplicate usernames', async () => {
@@ -181,7 +204,6 @@ describe('UserService', () => {
 
   it('createUser skips permission/library writes when lists are empty', async () => {
     userRepo.findByUsername.mockResolvedValue(null);
-    config.get.mockReturnValue(undefined);
 
     const result = await service.createUser({
       username: 'newuser',
@@ -193,7 +215,7 @@ describe('UserService', () => {
 
     expect(userRepo.setPermissions).not.toHaveBeenCalled();
     expect(userRepo.assignViewerLibraries).not.toHaveBeenCalled();
-    expect(result.resetUrl).toBe('http://localhost:5173/reset-password?token=reset-token');
+    expect(result.resetUrl).toBe('https://app.example.com/reset-password?token=reset-token');
   });
 
   it('findById returns user and throws when missing', async () => {
@@ -221,7 +243,7 @@ describe('UserService', () => {
 
   it('updateUser prevents deactivating the last administrator', async () => {
     userRepo.findByIdWithPermissions.mockResolvedValue({ id: 2, isSuperuser: true });
-    userRepo.countOtherSuperusers.mockResolvedValue(0);
+    userRepo.updateManagedUser.mockResolvedValue({ status: 'last_superuser' });
 
     await expect(service.updateUser(2, { active: false }, reqUser({ isSuperuser: true }))).rejects.toBeInstanceOf(ConflictException);
   });
@@ -235,7 +257,7 @@ describe('UserService', () => {
 
   it('updateUser throws if repository update returns null after checks', async () => {
     userRepo.findByIdWithPermissions.mockResolvedValue({ id: 2, isSuperuser: false });
-    userRepo.update.mockResolvedValue(null);
+    userRepo.updateManagedUser.mockResolvedValue({ status: 'updated' });
 
     await expect(service.updateUser(2, { name: 'x' }, reqUser({ isSuperuser: true }))).rejects.toBeInstanceOf(NotFoundException);
   });
@@ -277,6 +299,100 @@ describe('UserService', () => {
     await service.updateMySettings(5, { settings });
 
     expect(userRepo.update).toHaveBeenCalledWith(5, { settings });
+  });
+
+  it('rebuilds daily reading stats when the timezone actually changes', async () => {
+    userRepo.findSettingsById.mockResolvedValue({ timezone: 'UTC' });
+    userRepo.update.mockResolvedValue({ id: 5, settings: { timezone: 'America/Halifax' } });
+    userStatistics.rebuildDailyStatsForUser.mockResolvedValue({ deleted: 12, inserted: 9, libraries: 1 });
+
+    await service.updateMySettings(5, { settings: { timezone: 'America/Halifax' } });
+
+    expect(userStatistics.rebuildDailyStatsForUser).toHaveBeenCalledWith(5, 'America/Halifax');
+  });
+
+  it('rebuilds again when the same timezone is submitted, which is the only retry a user has', async () => {
+    // The setting saves even when the rebuild fails, so a retry looks like no change at all.
+    userStatistics.rebuildDailyStatsForUser.mockResolvedValue({ deleted: 0, inserted: 0, libraries: 0 });
+    userRepo.findSettingsById.mockResolvedValue({ timezone: 'America/Halifax' });
+    userRepo.update.mockResolvedValue({ id: 5, settings: { timezone: 'America/Halifax' } });
+
+    await service.updateMySettings(5, { settings: { timezone: 'America/Halifax' } });
+
+    expect(userStatistics.rebuildDailyStatsForUser).toHaveBeenCalledWith(5, 'America/Halifax');
+  });
+
+  it('recovers from a failed rebuild when the user saves the timezone a second time', async () => {
+    userRepo.findSettingsById.mockResolvedValue({ timezone: 'UTC' });
+    userRepo.update.mockResolvedValue({ id: 5, settings: { timezone: 'America/Halifax' } });
+    userStatistics.rebuildDailyStatsForUser.mockRejectedValueOnce(new Error('deadlock detected'));
+
+    await service.updateMySettings(5, { settings: { timezone: 'America/Halifax' } });
+
+    userStatistics.rebuildDailyStatsForUser.mockResolvedValue({ deleted: 4, inserted: 3, libraries: 1 });
+    userRepo.findSettingsById.mockResolvedValue({ timezone: 'America/Halifax' });
+
+    await service.updateMySettings(5, { settings: { timezone: 'America/Halifax' } });
+
+    expect(userStatistics.rebuildDailyStatsForUser).toHaveBeenCalledTimes(2);
+  });
+
+  it('answers the settings write without waiting for the rebuild to finish', async () => {
+    // The rebuild walks the reader's whole history and its result is never returned, so holding
+    // the response open for it only costs a long library its settings save.
+    userRepo.findSettingsById.mockResolvedValue({ timezone: 'UTC' });
+    userRepo.update.mockResolvedValue({ id: 5, settings: { timezone: 'America/Halifax' } });
+
+    let finishRebuild!: () => void;
+    userStatistics.rebuildDailyStatsForUser.mockReturnValue(
+      new Promise((resolve) => {
+        finishRebuild = () => resolve({ deleted: 0, inserted: 0, libraries: 0 });
+      }),
+    );
+
+    await expect(service.updateMySettings(5, { settings: { timezone: 'America/Halifax' } })).resolves.toEqual({
+      id: 5,
+      settings: { timezone: 'America/Halifax' },
+    });
+
+    expect(userStatistics.rebuildDailyStatsForUser).toHaveBeenCalledWith(5, 'America/Halifax');
+    finishRebuild();
+  });
+
+  it('leaves stats alone for a settings write that does not touch the timezone', async () => {
+    userRepo.update.mockResolvedValue({ id: 5, settings: { timezone: 'America/Halifax', theme: 'dark' } });
+
+    await service.updateMySettings(5, { settings: { theme: 'dark' } });
+
+    // Reading the stored settings is only worth a query when this write can replace the zone.
+    expect(userRepo.findSettingsById).not.toHaveBeenCalled();
+    expect(userStatistics.rebuildDailyStatsForUser).not.toHaveBeenCalled();
+  });
+
+  it('treats first-time and unusable timezones as a move away from the UTC default', async () => {
+    userStatistics.rebuildDailyStatsForUser.mockResolvedValue({ deleted: 0, inserted: 0, libraries: 0 });
+    userRepo.findSettingsById.mockResolvedValue({});
+    userRepo.update.mockResolvedValue({ id: 5, settings: { timezone: 'Europe/Berlin' } });
+
+    await service.updateMySettings(5, { settings: { timezone: 'Europe/Berlin' } });
+    expect(userStatistics.rebuildDailyStatsForUser).toHaveBeenCalledWith(5, 'Europe/Berlin');
+
+    userStatistics.rebuildDailyStatsForUser.mockClear();
+    userStatistics.rebuildDailyStatsForUser.mockResolvedValue({ deleted: 0, inserted: 0, libraries: 0 });
+    userRepo.findSettingsById.mockResolvedValue({ timezone: 'Europe/Berlin' });
+    userRepo.update.mockResolvedValue({ id: 5, settings: { timezone: 'Not/AZone' } });
+
+    await service.updateMySettings(5, { settings: { timezone: 'Not/AZone' } });
+    expect(userStatistics.rebuildDailyStatsForUser).toHaveBeenCalledWith(5, 'UTC');
+  });
+
+  it('still saves the setting when the stats rebuild fails', async () => {
+    userRepo.findSettingsById.mockResolvedValue({ timezone: 'UTC' });
+    const updated = { id: 5, settings: { timezone: 'America/Halifax' } };
+    userRepo.update.mockResolvedValue(updated);
+    userStatistics.rebuildDailyStatsForUser.mockRejectedValue(new Error('deadlock detected'));
+
+    await expect(service.updateMySettings(5, { settings: { timezone: 'America/Halifax' } })).resolves.toEqual(updated);
   });
 
   it('caches an explicit achievement preference when settings are updated', async () => {
@@ -342,32 +458,72 @@ describe('UserService', () => {
   });
 
   it('deleteUser throws when target user does not exist', async () => {
-    userRepo.findByIdWithPermissions.mockResolvedValue(null);
-    userRepo.countOtherSuperusers.mockResolvedValue(0);
+    userRepo.deleteManagedUser.mockResolvedValue('target_not_found');
 
     await expect(service.deleteUser(88, reqUser({ isSuperuser: true }))).rejects.toBeInstanceOf(NotFoundException);
   });
 
   it('deleteUser blocks non-superusers from deleting superuser accounts', async () => {
-    userRepo.findByIdWithPermissions.mockResolvedValue({ id: 2, isSuperuser: true });
-    userRepo.countOtherSuperusers.mockResolvedValue(1);
+    userRepo.deleteManagedUser.mockResolvedValue('requester_not_superuser');
 
     await expect(service.deleteUser(2, reqUser({ isSuperuser: false }))).rejects.toBeInstanceOf(ForbiddenException);
   });
 
   it('deleteUser blocks deleting the last superuser', async () => {
-    userRepo.findByIdWithPermissions.mockResolvedValue({ id: 2, isSuperuser: true });
-    userRepo.countOtherSuperusers.mockResolvedValue(0);
+    userRepo.deleteManagedUser.mockResolvedValue('last_superuser');
 
     await expect(service.deleteUser(2, reqUser({ isSuperuser: true }))).rejects.toBeInstanceOf(ConflictException);
   });
 
   it('deleteUser deletes non-superuser targets', async () => {
-    userRepo.findByIdWithPermissions.mockResolvedValue({ id: 2, isSuperuser: false });
-    userRepo.countOtherSuperusers.mockResolvedValue(3);
+    await expect(service.deleteUser(2, reqUser({ isSuperuser: false }))).resolves.toBeUndefined();
+    expect(userRepo.deleteManagedUser).toHaveBeenCalledWith(1, 2, expect.any(Function));
+  });
+
+  /**
+   * The cascade removes the only rows saying a torrent or a staged file belonged to this account,
+   * so anything holding work on their behalf has to be able to stop it while it is still findable.
+   */
+  it("deleteUser lets listeners stop the account's work before the row goes", async () => {
+    const order: string[] = [];
+    userRepo.deleteManagedUser.mockImplementation(async (_requestingUserId: number, _targetUserId: number, beforeDelete: () => Promise<void>) => {
+      await beforeDelete();
+      order.push('delete');
+      return 'updated';
+    });
+    events.on(USER_DELETING, (event: UserDeletingEvent) => {
+      event.waitFor(Promise.resolve().then(() => void order.push('detach')));
+    });
+
+    await service.deleteUser(2, reqUser({ isSuperuser: false }));
+
+    expect(order).toEqual(['detach', 'delete']);
+  });
+
+  /** An account the operator asked to remove has to go, whatever a listener makes of it. */
+  it('deleteUser deletes anyway when stopping that work fails', async () => {
+    userRepo.deleteManagedUser.mockImplementation(async (_requestingUserId: number, _targetUserId: number, beforeDelete: () => Promise<void>) => {
+      await beforeDelete();
+      return 'updated';
+    });
+    events.on(USER_DELETING, (event: UserDeletingEvent) => event.waitFor(Promise.reject(new Error('the client is unreachable'))));
 
     await expect(service.deleteUser(2, reqUser({ isSuperuser: false }))).resolves.toBeUndefined();
-    expect(userRepo.delete).toHaveBeenCalledWith(2);
+    expect(userRepo.deleteManagedUser).toHaveBeenCalledWith(1, 2, expect.any(Function));
+  });
+
+  /** A listener throwing before it registers anything reaches the emit call itself. */
+  it('deleteUser deletes anyway when a listener throws outright', async () => {
+    userRepo.deleteManagedUser.mockImplementation(async (_requestingUserId: number, _targetUserId: number, beforeDelete: () => Promise<void>) => {
+      await beforeDelete();
+      return 'updated';
+    });
+    events.on(USER_DELETING, () => {
+      throw new Error('the listener is broken');
+    });
+
+    await expect(service.deleteUser(2, reqUser({ isSuperuser: false }))).resolves.toBeUndefined();
+    expect(userRepo.deleteManagedUser).toHaveBeenCalledWith(1, 2, expect.any(Function));
   });
 
   it('setPermissions blocks modifying own permissions', async () => {
@@ -409,32 +565,48 @@ describe('UserService', () => {
   });
 
   it('setSuperuser throws when target user does not exist', async () => {
-    userRepo.findByIdWithPermissions.mockResolvedValue(null);
+    userRepo.setSuperuser.mockResolvedValue('target_not_found');
 
     await expect(service.setSuperuser(22, false, reqUser({ isSuperuser: true }))).rejects.toBeInstanceOf(NotFoundException);
   });
 
   it('setSuperuser prevents removing the last administrator', async () => {
-    userRepo.findByIdWithPermissions.mockResolvedValue({ id: 2, isSuperuser: true });
-    userRepo.countOtherSuperusers.mockResolvedValue(0);
+    userRepo.setSuperuser.mockResolvedValue('last_superuser');
 
     await expect(service.setSuperuser(2, false, reqUser({ isSuperuser: true }))).rejects.toBeInstanceOf(ConflictException);
   });
 
-  it('setSuperuser writes the target superuser flag when allowed', async () => {
-    userRepo.findByIdWithPermissions.mockResolvedValue({ id: 2, isSuperuser: false });
+  it('setSuperuser rejects promotion without an enabled OIDC identity in SSO-only mode', async () => {
+    userRepo.setSuperuser.mockResolvedValue('target_no_oidc');
 
-    await expect(service.setSuperuser(2, true, reqUser({ isSuperuser: true }))).resolves.toBeUndefined();
-    expect(userRepo.setSuperuser).toHaveBeenCalledWith(2, true);
+    await expect(service.setSuperuser(2, true, reqUser({ isSuperuser: true }))).rejects.toThrow(
+      'An administrator must link an enabled OIDC provider while password authentication is disabled',
+    );
   });
 
-  it('setSuperuser skips last-admin check when target is already non-superuser', async () => {
-    userRepo.findByIdWithPermissions.mockResolvedValue({ id: 2, isSuperuser: false });
+  it('setSuperuser writes the target superuser flag when allowed', async () => {
+    await expect(service.setSuperuser(2, true, reqUser({ isSuperuser: true }))).resolves.toBeUndefined();
+    expect(userRepo.setSuperuser).toHaveBeenCalledWith(1, 2, true);
+  });
+
+  it('setSuperuser accepts an idempotent transition', async () => {
+    userRepo.setSuperuser.mockResolvedValue('unchanged');
 
     await service.setSuperuser(2, false, reqUser({ isSuperuser: true }));
 
-    expect(userRepo.countOtherSuperusers).not.toHaveBeenCalled();
-    expect(userRepo.setSuperuser).toHaveBeenCalledWith(2, false);
+    expect(userRepo.setSuperuser).toHaveBeenCalledWith(1, 2, false);
+  });
+
+  it('setSuperuser blocks promoting a shared account', async () => {
+    userRepo.setSuperuser.mockResolvedValue('shared_target');
+
+    await expect(service.setSuperuser(2, true, reqUser({ isSuperuser: true }))).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('setSuperuser rejects an actor demoted after request authentication', async () => {
+    userRepo.setSuperuser.mockResolvedValue('requester_not_superuser');
+
+    await expect(service.setSuperuser(2, true, reqUser({ isSuperuser: true }))).rejects.toBeInstanceOf(ForbiddenException);
   });
 
   it('getLibraryIds throws when target user does not exist', async () => {
@@ -492,10 +664,27 @@ describe('UserService', () => {
     expect(contentFilterRepo.findByUserIdWithNames).toHaveBeenCalledWith(5);
   });
 
-  it('getContentFilters blocks non-superusers from reading another user filters', async () => {
+  it('getContentFilters allows manage_users to read another user filters', async () => {
+    const filters = {
+      includeTags: [{ id: 1, name: 'Sci-Fi' }],
+      excludeTags: [],
+      includeGenres: [],
+      excludeGenres: [],
+    };
     userRepo.findByIdWithPermissions.mockResolvedValue({ id: 5, isSuperuser: false });
+    contentFilterRepo.findByUserIdWithNames.mockResolvedValue(filters);
 
-    await expect(service.getContentFilters(5, reqUser({ id: 1, isSuperuser: false }))).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(service.getContentFilters(5, reqUser({ id: 1, isSuperuser: false, permissions: [Permission.ManageUsers] }))).resolves.toEqual(
+      filters,
+    );
+    expect(contentFilterRepo.findByUserIdWithNames).toHaveBeenCalledWith(5);
+  });
+
+  it('getContentFilters blocks callers without manage_users from reading another user filters', async () => {
+    await expect(
+      service.getContentFilters(5, reqUser({ id: 1, isSuperuser: false, permissions: [Permission.LibraryDownload] })),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    expect(userRepo.findByIdWithPermissions).not.toHaveBeenCalled();
     expect(contentFilterRepo.findByUserIdWithNames).not.toHaveBeenCalled();
   });
 
@@ -522,17 +711,41 @@ describe('UserService', () => {
     await expect(service.setContentFilters(5, {} as any, reqUser({ isSuperuser: true }))).rejects.toBeInstanceOf(NotFoundException);
   });
 
-  it('setContentFilters blocks non-superusers from updating filters', async () => {
+  it('setContentFilters allows manage_users to update filters', async () => {
     userRepo.findByIdWithPermissions.mockResolvedValue({ id: 5, isSuperuser: false });
 
-    await expect(service.setContentFilters(5, {} as any, reqUser({ isSuperuser: false }))).rejects.toBeInstanceOf(ForbiddenException);
-    expect(contentFilterRepo.replaceFilters).not.toHaveBeenCalled();
+    await expect(
+      service.setContentFilters(
+        5,
+        { includeTagIds: [1], excludeGenreIds: [3], seeOwnRequestedBooks: true } as any,
+        reqUser({ isSuperuser: false, permissions: [Permission.ManageUsers] }),
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(contentFilterRepo.replaceFilters).toHaveBeenCalledWith(5, {
+      includeTagIds: [1],
+      excludeTagIds: [],
+      includeGenreIds: [],
+      excludeGenreIds: [3],
+    });
+    expect(userRepo.update).toHaveBeenCalledWith(5, { seeOwnRequestedBooks: true });
   });
 
-  it('setContentFilters rejects administrator targets', async () => {
+  it('setContentFilters blocks callers without manage_users from updating filters', async () => {
+    await expect(
+      service.setContentFilters(5, {} as any, reqUser({ isSuperuser: false, permissions: [Permission.LibraryDownload] })),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    expect(userRepo.findByIdWithPermissions).not.toHaveBeenCalled();
+    expect(contentFilterRepo.replaceFilters).not.toHaveBeenCalled();
+    expect(userRepo.update).not.toHaveBeenCalled();
+  });
+
+  it('setContentFilters rejects superuser targets even for manage_users callers', async () => {
     userRepo.findByIdWithPermissions.mockResolvedValue({ id: 5, isSuperuser: true });
 
-    await expect(service.setContentFilters(5, {} as any, reqUser({ isSuperuser: true }))).rejects.toBeInstanceOf(BadRequestException);
+    await expect(
+      service.setContentFilters(5, {} as any, reqUser({ isSuperuser: false, permissions: [Permission.ManageUsers] })),
+    ).rejects.toBeInstanceOf(BadRequestException);
     expect(contentFilterRepo.replaceFilters).not.toHaveBeenCalled();
   });
 
@@ -569,13 +782,13 @@ describe('UserService', () => {
     await expect(service.adminResetPassword(2, reqUser({ isSuperuser: true }))).rejects.toBeInstanceOf(BadRequestException);
   });
 
-  it('adminResetPassword returns default app URL when config is missing', async () => {
+  it('adminResetPassword builds the reset link from the configured app URL', async () => {
     userRepo.findByIdWithPermissions.mockResolvedValue({ id: 2, isSuperuser: false, provisioningMethod: 'local' });
     userRepo.generateResetToken.mockResolvedValue('token-2');
-    config.get.mockReturnValue(undefined);
+    appConfiguration.appUrl = 'http://localhost:6263';
 
     await expect(service.adminResetPassword(2, reqUser({ isSuperuser: true }))).resolves.toEqual({
-      resetUrl: 'http://localhost:5173/reset-password?token=token-2',
+      resetUrl: 'http://localhost:6263/reset-password?token=token-2',
     });
   });
 });
@@ -608,16 +821,27 @@ describe('UserService.updateSeriesCollapsePreferences', () => {
     findByUserIdWithNames: vi.fn(),
     replaceFilters: vi.fn(),
   };
-  const config = { get: vi.fn() };
+  const appConfiguration = { appUrl: '' };
   const appSettingsService = {
     getDefaultLibraryAccessLibraryIds: vi.fn(),
+  };
+  const userStatistics = {
+    rebuildDailyStatsForUser: vi.fn(),
   };
 
   beforeEach(() => {
     vi.resetAllMocks();
-    config.get.mockReturnValue('http://localhost:5173');
+    appConfiguration.appUrl = 'http://localhost:6263';
     appSettingsService.getDefaultLibraryAccessLibraryIds.mockResolvedValue([]);
-    service = new UserService(userRepo as any, config as any, contentFilterRepo as any, appSettingsService as any);
+    service = new UserService(
+      userRepo as any,
+      appConfiguration as any,
+      contentFilterRepo as any,
+      appSettingsService as any,
+      userStatistics as any,
+      new UserEventsService(),
+      { assertPasswordLoginEnabled: vi.fn() } as any,
+    );
   });
 
   it('throws NotFoundException when user does not exist', async () => {
@@ -633,7 +857,7 @@ describe('UserService.updateSeriesCollapsePreferences', () => {
 
     expect(userRepo.update).toHaveBeenCalledWith(1, {
       settings: {
-        seriesCollapsePreferences: { global: true, libraries: {}, collections: {}, smartScopes: {} },
+        seriesCollapsePreferences: { global: true, libraries: {}, collections: {}, smartScopes: {}, authorPages: false },
       },
     });
   });
@@ -650,7 +874,7 @@ describe('UserService.updateSeriesCollapsePreferences', () => {
 
     expect(userRepo.update).toHaveBeenCalledWith(1, {
       settings: {
-        seriesCollapsePreferences: { global: true, libraries: { '3': true }, collections: { '7': false }, smartScopes: {} },
+        seriesCollapsePreferences: { global: true, libraries: { '3': true }, collections: { '7': false }, smartScopes: {}, authorPages: false },
       },
     });
   });
@@ -667,7 +891,7 @@ describe('UserService.updateSeriesCollapsePreferences', () => {
 
     expect(userRepo.update).toHaveBeenCalledWith(1, {
       settings: {
-        seriesCollapsePreferences: { global: false, libraries: { '1': true, '2': false }, collections: {}, smartScopes: {} },
+        seriesCollapsePreferences: { global: false, libraries: { '1': true, '2': false }, collections: {}, smartScopes: {}, authorPages: false },
       },
     });
   });
@@ -684,7 +908,7 @@ describe('UserService.updateSeriesCollapsePreferences', () => {
 
     expect(userRepo.update).toHaveBeenCalledWith(1, {
       settings: {
-        seriesCollapsePreferences: { global: true, libraries: {}, collections: { '5': false, '9': true }, smartScopes: {} },
+        seriesCollapsePreferences: { global: true, libraries: {}, collections: { '5': false, '9': true }, smartScopes: {}, authorPages: false },
       },
     });
   });
@@ -721,8 +945,45 @@ describe('UserService.updateSeriesCollapsePreferences', () => {
 
     expect(userRepo.update).toHaveBeenCalledWith(1, {
       settings: {
-        seriesCollapsePreferences: { global: false, libraries: {}, collections: {}, smartScopes: { '3': true } },
+        seriesCollapsePreferences: { global: false, libraries: {}, collections: {}, smartScopes: { '3': true }, authorPages: false },
       },
     });
+  });
+
+  it('sets the author pages flag on its own', async () => {
+    userRepo.findByIdWithPermissions.mockResolvedValue({
+      id: 1,
+      settings: {
+        seriesCollapsePreferences: { global: false, libraries: { '3': true }, collections: {} },
+      },
+    });
+
+    await service.updateSeriesCollapsePreferences(1, { authorPages: true });
+
+    expect(userRepo.update).toHaveBeenCalledWith(1, {
+      settings: {
+        seriesCollapsePreferences: { global: false, libraries: { '3': true }, collections: {}, smartScopes: {}, authorPages: true },
+      },
+    });
+  });
+
+  it('leaves the author pages flag alone when another scope is written', async () => {
+    userRepo.findByIdWithPermissions.mockResolvedValue({
+      id: 1,
+      settings: {
+        seriesCollapsePreferences: { global: false, libraries: {}, collections: {}, authorPages: true },
+      },
+    });
+
+    await service.updateSeriesCollapsePreferences(1, { global: true });
+
+    expect(userRepo.update).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({
+        settings: expect.objectContaining({
+          seriesCollapsePreferences: expect.objectContaining({ authorPages: true }),
+        }),
+      }),
+    );
   });
 });

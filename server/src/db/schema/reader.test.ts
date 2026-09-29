@@ -6,6 +6,7 @@ import {
   readerDefaultPreferences,
   readerPreferences,
   readingProgress,
+  readingSessionSyncCursors,
   readingSessions,
   userReadingDailyStats,
 } from './reader';
@@ -35,6 +36,19 @@ describe('reader schema', () => {
     expect(readingProgress.updatedAt.onUpdateFn?.()).toBeInstanceOf(Date);
   });
 
+  it('tracks last read separately from the row update timestamp', () => {
+    const config = getTableConfig(readingProgress);
+    const indexNames = config.indexes.map((idx) => idx.config.name);
+
+    // Ordering by "last read" needs an always-advancing column: updated_at is deliberately
+    // frozen by the KOReader sync path so it can act as a "last local write" marker.
+    expect(readingProgress.lastReadAt.notNull).toBe(true);
+    expect(readingProgress.lastReadAt.hasDefault).toBe(true);
+    expect(readingProgress.lastReadAt.onUpdateFn?.()).toBeInstanceOf(Date);
+    expect(indexNames).toContain('reading_progress_user_last_read_at_idx');
+    expect(indexNames).not.toContain('reading_progress_user_updated_at_idx');
+  });
+
   it('stores reading sessions with idempotency and time indexes', () => {
     const config = getTableConfig(readingSessions);
     const uniqueIndexes = config.indexes.filter((idx) => idx.config.unique);
@@ -45,8 +59,19 @@ describe('reader schema', () => {
     expect(indexNames).toContain('rs_user_started_at_idx');
     expect(indexNames).toContain('rs_book_file_started_at_idx');
     expect(indexNames).toContain('rs_user_book_file_idx');
+    expect(indexNames).toContain('rs_user_book_source_device_started_idx');
     expect(fkMap.get('user_id')?.onDelete).toBe('cascade');
     expect(fkMap.get('book_file_id')?.onDelete).toBe('cascade');
+  });
+
+  it('keeps cumulative sync cursors isolated by user, book, source, and device', () => {
+    const config = getTableConfig(readingSessionSyncCursors);
+    const pkColumns = config.primaryKeys.map((pk) => pk.columns.map((col) => col.name));
+    const fkMap = fkByColumn(readingSessionSyncCursors);
+
+    expect(pkColumns).toContainEqual(['user_id', 'book_id', 'source', 'source_device_key']);
+    expect(fkMap.get('user_id')?.onDelete).toBe('cascade');
+    expect(fkMap.get('book_id')?.onDelete).toBe('cascade');
   });
 
   it('stores user daily reading aggregates keyed by user, library, and day', () => {

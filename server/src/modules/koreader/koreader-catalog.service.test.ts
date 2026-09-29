@@ -9,10 +9,11 @@ vi.mock('fs/promises', () => ({
 import { createReadStream } from 'fs';
 import { join } from 'path';
 import { stat } from 'fs/promises';
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, InternalServerErrorException, NotFoundException } from '@nestjs/common';
 import { DEFAULT_KOREADER_DEVICE_PATTERN } from '@bookorbit/types';
 import type { MockedFunction } from 'vitest';
 
+import { formatSeriesIndex } from '../../common/utils/series-index-format.utils';
 import { makeUser } from '../../common/test-utils/make-user';
 import { KoreaderCatalogBooksQueryDto, KoreaderCatalogManifestQueryDto } from './dto/koreader-catalog-query.dto';
 import { KoreaderCatalogService } from './koreader-catalog.service';
@@ -53,7 +54,7 @@ function makeDetail(overrides: Record<string, unknown> = {}) {
     pageCount: 412,
     seriesId: null,
     seriesName: 'Dune',
-    seriesIndex: 1,
+    seriesIndex: '1',
     seriesMemberships: [],
     rating: 5,
     coverSource: 'extracted',
@@ -71,6 +72,7 @@ function makeDetail(overrides: Record<string, unknown> = {}) {
         createdAt: new Date('2026-01-01T00:00:00.000Z'),
         filename: 'dune.epub',
         durationSeconds: null,
+        mediaOverlay: null,
       },
     ],
     lastWrittenAt: null,
@@ -84,6 +86,39 @@ function makeDetail(overrides: Record<string, unknown> = {}) {
     fileWriteStatus: { enabled: false, reason: 'library_disabled', writableFormats: [], writableFields: [] },
     ...overrides,
   };
+}
+
+function makeManifestRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 10,
+    libraryName: 'Main',
+    title: 'Dune',
+    subtitle: null,
+    authors: ['Frank Herbert'],
+    seriesName: 'Dune',
+    seriesIndex: '1',
+    language: 'en',
+    publisher: 'Ace',
+    publishedYear: 1965,
+    isbn10: null,
+    isbn13: '9780441172719',
+    files: [
+      {
+        id: 100,
+        format: 'EPUB',
+        mediaOverlayAvailable: false,
+        sizeBytes: 1234,
+        fileHash: 'abcdef0123456789',
+        filename: 'dune.epub',
+        contentVersion: new Date('2026-02-01T00:00:00.000Z'),
+      },
+    ],
+    ...overrides,
+  };
+}
+
+function makeQuery(overrides: Record<string, unknown> = {}) {
+  return Object.assign(new KoreaderCatalogManifestQueryDto(), overrides);
 }
 
 function makeService(
@@ -110,16 +145,18 @@ function makeService(
   const bookService = {
     getDetail: vi.fn().mockResolvedValue(makeDetail()),
     verifyBookAccess: vi.fn().mockResolvedValue(undefined),
+    getThumbnailPath: vi.fn().mockResolvedValue(join('/data', 'covers', '10', 'thumbnail.jpg')),
     bulkSetRating: vi.fn().mockResolvedValue(undefined),
     verifyFileAccess: vi.fn().mockResolvedValue({
       id: 100,
       role: 'content',
       bookId: 10,
       libraryId: 1,
-      absolutePath: '/books/dune.epub',
+      absolutePath: '/path/to/library/dune.epub',
       format: 'epub',
     }),
     resolveDownloadFilename: vi.fn().mockResolvedValue('Dune - Frank Herbert.epub'),
+    createAudiolessEpubDownload: vi.fn(),
   };
   const bookReadService = {
     findProgressByBook: vi.fn().mockResolvedValue([
@@ -168,7 +205,7 @@ function makeService(
         id: 10,
         title: 'Dune',
         updatedAt: '2026-02-01T00:00:00.000Z',
-        seriesIndex: 1,
+        seriesIndex: '1',
         hasCover: true,
         authors: ['Frank Herbert'],
       },
@@ -176,7 +213,7 @@ function makeService(
         id: 11,
         title: 'Dune Messiah',
         updatedAt: '2026-02-02T00:00:00.000Z',
-        seriesIndex: 2,
+        seriesIndex: '2',
         hasCover: true,
         authors: ['Frank Herbert'],
       },
@@ -238,7 +275,6 @@ function makeService(
       getDeviceFileNamingPattern: vi.fn().mockResolvedValue(deviceOrganization),
     } as never,
     pluginService as never,
-    { appDataPath: '/data', bookDockPath: '/data/book-dock' },
   );
 
   return {
@@ -304,7 +340,7 @@ describe('KoreaderCatalogService', () => {
           description: null,
           seriesId: 42,
           seriesName: 'Dune',
-          seriesIndex: 1,
+          seriesIndex: '1',
           language: 'en',
           publisher: 'Ace',
           isbn13: null,
@@ -630,7 +666,7 @@ describe('KoreaderCatalogService', () => {
           description: null,
           seriesId: 42,
           seriesName: 'Dune',
-          seriesIndex: 1,
+          seriesIndex: '1',
           language: 'en',
           publisher: 'Ace',
           isbn13: null,
@@ -686,10 +722,11 @@ describe('KoreaderCatalogService', () => {
             id: 100,
             format: 'epub',
             role: 'primary',
+            downloadVariant: 'original',
             sizeBytes: 1234,
             durationSeconds: null,
             downloadUrl: '/api/v1/koreader/plugin/catalog/files/100/download',
-            devicePath: 'Series/Dune/1.00 - Dune.epub',
+            devicePath: 'Series/Dune/01.00 - Dune.epub',
           },
         ],
         relatedSections: [
@@ -700,7 +737,7 @@ describe('KoreaderCatalogService', () => {
               expect.objectContaining({
                 id: 11,
                 title: 'Dune Messiah',
-                seriesIndex: 2,
+                seriesIndex: '2',
                 thumbnailUrl: '/api/v1/koreader/plugin/catalog/books/11/thumbnail',
               }),
             ],
@@ -815,7 +852,7 @@ describe('KoreaderCatalogService', () => {
 
     await service.streamThumbnail(makeUser(), 10, reply as never);
 
-    expect(bookService.verifyBookAccess).toHaveBeenCalledWith(10, expect.objectContaining({ id: 1 }));
+    expect(bookService.getThumbnailPath).toHaveBeenCalledWith(10, expect.objectContaining({ id: 1 }), { medium: 'ebook' });
     expect(reply.header).toHaveBeenCalledWith('ETag', '"5000"');
     expect(reply.type).toHaveBeenCalledWith('image/jpeg');
     expect(mockCreateReadStream).toHaveBeenCalledWith(join('/data', 'covers', '10', 'thumbnail.jpg'));
@@ -838,7 +875,7 @@ describe('KoreaderCatalogService', () => {
     );
     expect(reply.header).toHaveBeenCalledWith('Content-Length', 1234);
     expect(reply.type).toHaveBeenCalledWith('application/epub+zip');
-    expect(mockCreateReadStream).toHaveBeenCalledWith('/books/dune.epub');
+    expect(mockCreateReadStream).toHaveBeenCalledWith('/path/to/library/dune.epub');
   });
 
   it('encodes non-ASCII content file download filenames for Content-Disposition', async () => {
@@ -854,7 +891,7 @@ describe('KoreaderCatalogService', () => {
     );
     expect(reply.header).toHaveBeenCalledWith('Content-Length', 1234);
     expect(reply.type).toHaveBeenCalledWith('application/epub+zip');
-    expect(mockCreateReadStream).toHaveBeenCalledWith('/books/dune.epub');
+    expect(mockCreateReadStream).toHaveBeenCalledWith('/path/to/library/dune.epub');
   });
 
   it('rejects non-content file downloads and missing thumbnails', async () => {
@@ -871,6 +908,9 @@ describe('KoreaderCatalogService', () => {
     await expect(service.streamFile(makeUser(), 200, makeReply() as never)).rejects.toThrow(NotFoundException);
 
     mockStat.mockRejectedValueOnce(new Error('missing'));
+    await expect(service.streamThumbnail(makeUser(), 10, makeReply() as never)).rejects.toThrow(NotFoundException);
+
+    bookService.getThumbnailPath.mockResolvedValueOnce(null);
     await expect(service.streamThumbnail(makeUser(), 10, makeReply() as never)).rejects.toThrow(NotFoundException);
   });
 
@@ -947,38 +987,6 @@ describe('KoreaderCatalogService', () => {
   });
 
   describe('bulk download manifest', () => {
-    function makeManifestRow(overrides: Record<string, unknown> = {}) {
-      return {
-        id: 10,
-        libraryName: 'Main',
-        title: 'Dune',
-        subtitle: null,
-        authors: ['Frank Herbert'],
-        seriesName: 'Dune',
-        seriesIndex: 1,
-        language: 'en',
-        publisher: 'Ace',
-        publishedYear: 1965,
-        isbn10: null,
-        isbn13: '9780441172719',
-        files: [
-          {
-            id: 100,
-            format: 'EPUB',
-            sizeBytes: 1234,
-            fileHash: 'abcdef0123456789',
-            filename: 'dune.epub',
-            contentVersion: new Date('2026-02-01T00:00:00.000Z'),
-          },
-        ],
-        ...overrides,
-      };
-    }
-
-    function makeQuery(overrides: Record<string, unknown> = {}) {
-      return Object.assign(new KoreaderCatalogManifestQueryDto(), overrides);
-    }
-
     it('returns everything a bulk transfer needs and no internal path', async () => {
       const { service, opdsBookService } = makeService();
       opdsBookService.getBookManifestPage.mockResolvedValueOnce({ rows: [makeManifestRow()], hasNext: false });
@@ -995,6 +1003,7 @@ describe('KoreaderCatalogService', () => {
       expect(file).toMatchObject({
         id: 100,
         format: 'epub',
+        downloadVariant: 'original',
         sizeBytes: 1234,
         fileHash: 'abcdef0123456789',
         contentVersion: '2026-02-01T00:00:00.000Z',
@@ -1002,6 +1011,98 @@ describe('KoreaderCatalogService', () => {
       });
       expect(file.devicePath).not.toContain('/books/');
       expect(JSON.stringify(result)).not.toContain('absolutePath');
+    });
+
+    it('marks read-along EPUBs as derived and does not publish metadata for the original bytes', async () => {
+      const { service, opdsBookService } = makeService();
+      opdsBookService.getBookManifestPage.mockResolvedValueOnce({
+        rows: [
+          makeManifestRow({
+            files: [
+              {
+                id: 100,
+                format: 'epub',
+                mediaOverlayAvailable: false,
+                sizeBytes: 1234,
+                fileHash: 'standard-hash',
+                filename: 'dune.epub',
+                contentVersion: new Date('2026-02-01T00:00:00.000Z'),
+              },
+              {
+                id: 101,
+                format: 'epub',
+                mediaOverlayAvailable: true,
+                sizeBytes: 9_999_999,
+                fileHash: 'audio-archive-hash',
+                filename: 'dune-read-along.epub',
+                contentVersion: new Date('2026-02-02T00:00:00.000Z'),
+              },
+            ],
+          }),
+        ],
+        hasNext: false,
+      });
+
+      const result = await service.getBulkManifest(makeUser({ id: 7 }), makeQuery());
+
+      expect(result.items[0]!.files).toEqual([
+        expect.objectContaining({ id: 100, downloadVariant: 'original', sizeBytes: 1234, fileHash: 'standard-hash' }),
+        expect.objectContaining({
+          id: 101,
+          downloadVariant: 'audioless_epub',
+          sizeBytes: null,
+          fileHash: null,
+          devicePath: 'Series/Dune/01.00 - Dune - Read Along.epub',
+        }),
+      ]);
+    });
+
+    it('keeps detail and manifest variants and collision-safe paths identical', async () => {
+      const files = [
+        {
+          id: 100,
+          format: 'epub',
+          role: 'primary',
+          sizeBytes: 1234,
+          absolutePath: '/books/dune.epub',
+          createdAt: new Date('2026-01-01T00:00:00.000Z'),
+          filename: 'dune.epub',
+          durationSeconds: null,
+          mediaOverlay: null,
+        },
+        {
+          id: 101,
+          format: 'epub',
+          role: 'content',
+          sizeBytes: 9_999_999,
+          absolutePath: '/books/dune-read-along.epub',
+          createdAt: new Date('2026-01-02T00:00:00.000Z'),
+          filename: 'dune-read-along.epub',
+          durationSeconds: null,
+          mediaOverlay: { available: true, durationSeconds: 100 },
+        },
+      ];
+      const manifestFiles = files.map((file) => ({
+        id: file.id,
+        format: file.format,
+        mediaOverlayAvailable: file.mediaOverlay?.available === true,
+        sizeBytes: file.sizeBytes,
+        fileHash: `${file.id}-hash`,
+        filename: file.filename,
+        contentVersion: file.createdAt,
+      }));
+      const { service, opdsBookService, bookService } = makeService();
+      opdsBookService.getBookManifestPage.mockResolvedValueOnce({ rows: [makeManifestRow({ files: manifestFiles })], hasNext: false });
+      bookService.getDetail.mockResolvedValueOnce(makeDetail({ files }));
+
+      const [manifest, detail] = await Promise.all([
+        service.getBulkManifest(makeUser({ id: 7 }), makeQuery()),
+        service.getBookDetail(makeUser({ id: 7 }), 10),
+      ]);
+
+      expect(detail.files.map(({ id, downloadVariant, sizeBytes, devicePath }) => ({ id, downloadVariant, sizeBytes, devicePath }))).toEqual(
+        manifest.items[0]!.files.map(({ id, downloadVariant, sizeBytes, devicePath }) => ({ id, downloadVariant, sizeBytes, devicePath })),
+      );
     });
 
     it('scopes the query to the requesting user and forwards the filter', async () => {
@@ -1106,7 +1207,7 @@ describe('KoreaderCatalogService', () => {
 
       const result = await service.getBulkManifest(makeUser({ id: 7 }), makeQuery({ deviceId: 'device-1' }));
 
-      expect(result.items[0]!.files[0]!.devicePath).toBe('Dune/1 - Dune.epub');
+      expect(result.items[0]!.files[0]!.devicePath).toBe('Dune/01 - Dune.epub');
     });
 
     it('resolves the library token so each library keeps its own subtree on the device', async () => {
@@ -1137,6 +1238,159 @@ describe('KoreaderCatalogService', () => {
       const result = await service.getBulkManifest(makeUser({ id: 7 }), makeQuery({ deviceId: 'device-1' }));
 
       expect(result.items[0]!.files[0]!.devicePath).toBe('Dune.epub');
+    });
+  });
+
+  describe('series index device paths', () => {
+    const seriesPattern = {
+      fileNamingPattern: '',
+      seriesFileNamingPattern: '{series}/<{seriesIndex} - >{title}',
+      standaloneFileNamingPattern: '',
+    };
+
+    async function manifestDevicePath(seriesIndex: string | null, organization = seriesPattern) {
+      const { service, opdsBookService } = makeService(organization);
+      opdsBookService.getBookManifestPage.mockResolvedValueOnce({ rows: [makeManifestRow({ seriesIndex })], hasNext: false });
+
+      const result = await service.getBulkManifest(makeUser({ id: 7 }), makeQuery({ deviceId: 'device-1' }));
+      return result.items[0]!.files[0]!.devicePath;
+    }
+
+    async function detailDevicePath(seriesIndex: string | null, organization = seriesPattern) {
+      const { service, bookService } = makeService(organization);
+      bookService.getDetail.mockResolvedValue(makeDetail({ seriesIndex }));
+
+      const detail = await service.getBookDetail(makeUser({ id: 7 }), 10, 'device-1');
+      return detail.files[0]?.devicePath;
+    }
+
+    it.each<[string, string]>([
+      ['1', 'Dune/01 - Dune.epub'],
+      ['9', 'Dune/09 - Dune.epub'],
+      ['10', 'Dune/10 - Dune.epub'],
+      ['100', 'Dune/100 - Dune.epub'],
+    ])('zero-pads a manifest series index of %s to two digits', async (seriesIndex, expected) => {
+      await expect(manifestDevicePath(seriesIndex)).resolves.toBe(expected);
+    });
+
+    it.each<[string, string]>([
+      ['1', 'Dune/01 - Dune.epub'],
+      ['9', 'Dune/09 - Dune.epub'],
+      ['10', 'Dune/10 - Dune.epub'],
+      ['100', 'Dune/100 - Dune.epub'],
+    ])('zero-pads a book detail series index of %s to two digits', async (seriesIndex, expected) => {
+      await expect(detailDevicePath(seriesIndex)).resolves.toBe(expected);
+    });
+
+    it('pads only the whole part of a fractional index', async () => {
+      await expect(manifestDevicePath('5.10')).resolves.toBe('Dune/05.10 - Dune.epub');
+      await expect(detailDevicePath('5.10')).resolves.toBe('Dune/05.10 - Dune.epub');
+    });
+
+    it('drops the optional index block instead of padding nothing when the book has no index', async () => {
+      await expect(manifestDevicePath(null)).resolves.toBe('Dune/Dune.epub');
+      await expect(detailDevicePath(null)).resolves.toBe('Dune/Dune.epub');
+    });
+
+    it.each<[string]>([['1'], ['7'], ['10'], ['5.10']])('resolves index %s to the same token the library rename path uses', async (seriesIndex) => {
+      await expect(manifestDevicePath(seriesIndex)).resolves.toBe(`Dune/${formatSeriesIndex(seriesIndex)} - Dune.epub`);
+    });
+
+    it('keeps the manifest and the book detail agreeing on one path per file', async () => {
+      const { service, opdsBookService, bookService } = makeService(seriesPattern);
+      opdsBookService.getBookManifestPage.mockResolvedValueOnce({ rows: [makeManifestRow({ seriesIndex: '3' })], hasNext: false });
+      bookService.getDetail.mockResolvedValue(makeDetail({ seriesIndex: '3' }));
+
+      const manifest = await service.getBulkManifest(makeUser({ id: 7 }), makeQuery({ deviceId: 'device-1' }));
+      const detail = await service.getBookDetail(makeUser({ id: 7 }), 10, 'device-1');
+
+      expect(manifest.items[0]!.files[0]!.devicePath).toBe('Dune/03 - Dune.epub');
+      expect(detail.files[0]?.devicePath).toBe(manifest.items[0]!.files[0]!.devicePath);
+    });
+
+    it.each<[string, string]>([
+      ['1', 'Series/Dune/01.00 - Dune.epub'],
+      ['10', 'Series/Dune/10.00 - Dune.epub'],
+      ['1.5', 'Series/Dune/01.50 - Dune.epub'],
+      ['5.10', 'Series/Dune/05.10 - Dune.epub'],
+    ])('leaves the shipped fixed2 default unchanged for index %s', async (seriesIndex, expected) => {
+      const defaultOrganization = {
+        fileNamingPattern: DEFAULT_KOREADER_DEVICE_PATTERN,
+        seriesFileNamingPattern: '',
+        standaloneFileNamingPattern: '',
+      };
+
+      await expect(manifestDevicePath(seriesIndex, defaultOrganization)).resolves.toBe(expected);
+      await expect(detailDevicePath(seriesIndex, defaultOrganization)).resolves.toBe(expected);
+    });
+  });
+
+  describe('streamFile', () => {
+    const readAlongFile = {
+      id: 100,
+      role: 'content',
+      bookId: 10,
+      libraryId: 1,
+      absolutePath: '/books/dune.epub',
+      format: 'epub',
+      mediaOverlayAvailable: true,
+    };
+
+    function audiolessResult() {
+      return {
+        path: '/path/to/temp/download.epub',
+        size: 4096,
+        filename: 'Dune - KOReader.epub',
+        bookId: 10,
+        removedEntries: 4,
+        sanitizedEntries: 0,
+        koreaderHash: 'deadbeef',
+        cleanup: vi.fn().mockResolvedValue(undefined),
+      };
+    }
+
+    it('serves the audioless rebuild for a read-along EPUB', async () => {
+      const { service, bookService } = makeService();
+      bookService.verifyFileAccess.mockResolvedValueOnce(readAlongFile);
+      bookService.createAudiolessEpubDownload.mockResolvedValueOnce(audiolessResult());
+      mockCreateReadStream.mockReturnValueOnce({ once: vi.fn() } as never);
+      const reply = makeReply();
+
+      await service.streamFile(makeUser({ id: 7 }), 100, reply as never);
+
+      expect(bookService.createAudiolessEpubDownload).toHaveBeenCalledWith(100, expect.objectContaining({ id: 7 }), { linkKoreaderHash: true });
+      expect(mockCreateReadStream).toHaveBeenCalledWith('/path/to/temp/download.epub');
+      expect(reply.header).toHaveBeenCalledWith('Content-Length', 4096);
+      expect(reply.type).toHaveBeenCalledWith('application/epub+zip');
+    });
+
+    it('does not expose the original audio archive when the audioless rebuild fails', async () => {
+      const { service, bookService } = makeService();
+      bookService.verifyFileAccess.mockResolvedValueOnce(readAlongFile);
+      bookService.createAudiolessEpubDownload.mockRejectedValueOnce(new Error('corrupt central directory'));
+      const reply = makeReply();
+
+      await expect(service.streamFile(makeUser({ id: 7 }), 100, reply as never)).rejects.toBeInstanceOf(InternalServerErrorException);
+
+      expect(mockCreateReadStream).not.toHaveBeenCalledWith('/books/dune.epub');
+      expect(reply.send).not.toHaveBeenCalled();
+    });
+
+    it('serves the stored file untouched when there is no media overlay', async () => {
+      const { service, bookService } = makeService();
+      const reply = makeReply();
+
+      await service.streamFile(makeUser({ id: 7 }), 100, reply as never);
+
+      expect(bookService.createAudiolessEpubDownload).not.toHaveBeenCalled();
+      expect(mockCreateReadStream).toHaveBeenCalledWith('/path/to/library/dune.epub');
+    });
+
+    it('rejects a file that is not library content', async () => {
+      const { service, bookService } = makeService();
+      bookService.verifyFileAccess.mockResolvedValueOnce({ ...readAlongFile, role: 'sidecar' });
+
+      await expect(service.streamFile(makeUser({ id: 7 }), 100, makeReply() as never)).rejects.toBeInstanceOf(NotFoundException);
     });
   });
 });

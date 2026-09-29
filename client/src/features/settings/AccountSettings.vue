@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { Button } from '@/components/ui/button'
 import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { OidcProviderPublic, UserSettings } from '@bookorbit/types'
@@ -15,6 +16,7 @@ import SettingsPageHeader from './SettingsPageHeader.vue'
 import ToggleSwitch from '@/components/ui/ToggleSwitch.vue'
 import ConfirmDialog from '@/components/ui/ConfirmDialog.vue'
 import { useOnboardingTour } from '@/features/onboarding/composables/useOnboardingTour'
+import { useLoginOptions } from '@/features/auth/composables/useLoginOptions'
 
 const props = withDefaults(defineProps<{ embedded?: boolean }>(), { embedded: false })
 
@@ -24,6 +26,7 @@ const { isDemoRestrictedAccount } = usePermissions()
 const { open: openChangePassword } = useChangePasswordDialog()
 const { uploading, removing, uploadAvatar, removeAvatar } = useProfileAvatar()
 const { resetTour } = useOnboardingTour()
+const { loginOptions, fetchLoginOptions } = useLoginOptions()
 
 const fileInput = ref<HTMLInputElement | null>(null)
 const savingProfile = ref(false)
@@ -64,8 +67,13 @@ const nameChanged = computed(() => {
 const profileChanged = computed(() => nameChanged.value || timezoneChanged.value)
 const accountEditBlocked = computed(() => isDemoRestrictedAccount.value)
 const canChangePassword = computed(
-  () => !accountEditBlocked.value && user.value?.provisioningMethod !== 'oidc' && user.value?.provisioningMethod !== 'shared',
+  () =>
+    loginOptions.value?.passwordLoginEnabled === true &&
+    !accountEditBlocked.value &&
+    user.value?.provisioningMethod !== 'oidc' &&
+    user.value?.provisioningMethod !== 'shared',
 )
+const needsUnlinkPassword = computed(() => loginOptions.value?.passwordLoginEnabled === true && user.value?.authenticationMethod !== 'oidc')
 
 const accountTypeLabel = computed(() => {
   if (user.value?.provisioningMethod === 'oidc') return t('settings.account.profile.accountTypeOidc')
@@ -248,12 +256,9 @@ const linkingSlug = ref<string | null>(null)
 onMounted(async () => {
   oidcIdentityLoading.value = true
   try {
-    const [identitiesRes, providersRes] = await Promise.all([
-      api('/api/v1/auth/oidc/identities'),
-      fetch('/api/v1/app-settings/oidc/providers/public'),
-    ])
+    const [identitiesRes, options] = await Promise.all([api('/api/v1/auth/oidc/identities'), fetchLoginOptions()])
     if (identitiesRes.ok) linkedIdentities.value = await identitiesRes.json()
-    if (providersRes.ok) oidcProviders.value = await providersRes.json()
+    oidcProviders.value = options.oidcProviders
   } finally {
     oidcIdentityLoading.value = false
   }
@@ -297,13 +302,13 @@ async function initiateOidcLink(provider: OidcProviderPublic) {
 
 async function confirmUnlink() {
   if (shouldBlockAccountEdit()) return
-  if (!unlinkPassword.value || !unlinkTarget.value) return
+  if (!unlinkTarget.value || (needsUnlinkPassword.value && !unlinkPassword.value)) return
   unlinking.value = true
   try {
     const res = await api(`/api/v1/auth/oidc/identities/${unlinkTarget.value.providerId}`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password: unlinkPassword.value }),
+      body: JSON.stringify(needsUnlinkPassword.value ? { password: unlinkPassword.value } : {}),
     })
     if (!res.ok) {
       const err = await res.json().catch(() => ({}))
@@ -346,7 +351,7 @@ function closeUnlinkDialog() {
     </p>
   </div>
 
-  <div class="mt-5 space-y-8 md:mt-0">
+  <div class="space-y-8" :class="{ 'mt-5 md:mt-0': !props.embedded }">
     <p
       v-if="accountEditBlocked"
       class="rounded-md border-[var(--pill-warning)]/40 border bg-[var(--pill-warning)]/10 px-3 py-2 text-xs text-[var(--pill-warning)]"
@@ -354,9 +359,7 @@ function closeUnlinkDialog() {
       {{ t('settings.account.demoRestricted.notice') }}
     </p>
 
-    <section aria-labelledby="account-profile-heading" class="space-y-3">
-      <h2 id="account-profile-heading" class="settings-group-label mb-0">{{ t('settings.account.groups.profile') }}</h2>
-
+    <section :aria-label="t('settings.account.groups.profile')">
       <div class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card shadow-xs">
         <div class="flex flex-col gap-4 px-4 py-4 sm:flex-row sm:items-center sm:justify-between md:px-5 md:py-5">
           <div class="flex min-w-0 items-center gap-4">
@@ -383,7 +386,7 @@ function closeUnlinkDialog() {
               :disabled="profileBusy || accountEditBlocked"
               @change="onFileSelected"
             />
-            <button type="button" class="settings-btn-outline" :disabled="profileBusy || accountEditBlocked" @click="triggerFileDialog">
+            <Button variant="outline" size="sm" type="button" :disabled="profileBusy || accountEditBlocked" @click="triggerFileDialog">
               <Upload :size="14" aria-hidden="true" />
               {{
                 uploading
@@ -392,16 +395,17 @@ function closeUnlinkDialog() {
                     ? t('settings.account.avatar.replace')
                     : t('settings.account.avatar.upload')
               }}
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="destructive-outline"
+              size="sm"
               type="button"
-              class="settings-btn-outline"
               :disabled="profileBusy || !hasAvatar || accountEditBlocked"
               @click="openRemoveAvatarDialog"
             >
               <Trash2 :size="14" aria-hidden="true" />
               {{ removing ? t('settings.account.avatar.removing') : t('settings.account.avatar.remove') }}
-            </button>
+            </Button>
           </div>
         </div>
 
@@ -449,11 +453,14 @@ function closeUnlinkDialog() {
       </div>
     </section>
 
-    <section aria-labelledby="account-preferences-heading" class="space-y-3">
-      <h2 id="account-preferences-heading" class="settings-group-label mb-0">{{ t('settings.account.groups.preferences') }}</h2>
+    <section aria-labelledby="account-preferences-heading" class="space-y-2">
+      <h2 id="account-preferences-heading" class="settings-group-label">{{ t('settings.account.groups.preferences') }}</h2>
 
       <div class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card shadow-xs">
-        <div class="flex flex-col gap-3 px-4 py-4 md:flex-row md:items-center md:justify-between md:px-5 md:py-5">
+        <div
+          v-if="loginOptions?.passwordLoginEnabled"
+          class="flex flex-col gap-3 px-4 py-4 md:flex-row md:items-center md:justify-between md:px-5 md:py-5"
+        >
           <div class="flex min-w-0 max-w-2xl items-start gap-2.5">
             <Clock :size="16" class="mt-0.5 shrink-0 text-muted-foreground" aria-hidden="true" />
             <div class="min-w-0">
@@ -491,13 +498,13 @@ function closeUnlinkDialog() {
               <p class="settings-hint">{{ t('settings.account.tour.description') }}</p>
             </div>
           </div>
-          <button type="button" class="settings-btn-outline shrink-0" @click="resetTour">{{ t('settings.account.tour.action') }}</button>
+          <Button variant="outline" size="sm" type="button" @click="resetTour">{{ t('settings.account.tour.action') }}</Button>
         </div>
       </div>
     </section>
 
-    <section aria-labelledby="account-security-heading" class="space-y-3">
-      <h2 id="account-security-heading" class="settings-group-label mb-0">{{ t('settings.account.groups.security') }}</h2>
+    <section aria-labelledby="account-security-heading" class="space-y-2">
+      <h2 id="account-security-heading" class="settings-group-label">{{ t('settings.account.groups.security') }}</h2>
 
       <div class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card shadow-xs">
         <div class="flex flex-col gap-3 px-4 py-4 md:flex-row md:items-center md:justify-between md:px-5 md:py-5">
@@ -508,14 +515,16 @@ function closeUnlinkDialog() {
               <p class="settings-hint">{{ passwordHint }}</p>
             </div>
           </div>
-          <button
+          <Button
+            variant="outline"
+            size="sm"
             type="button"
-            class="settings-btn-outline shrink-0 self-start md:self-auto"
+            class="self-start md:self-auto"
             :disabled="!canChangePassword || profileBusy"
             @click="handleChangePassword"
           >
             {{ t('settings.account.profile.changePassword') }}
-          </button>
+          </Button>
         </div>
 
         <div v-if="!oidcIdentityLoading" class="space-y-3 px-4 py-4 md:px-5 md:py-5">
@@ -538,27 +547,30 @@ function closeUnlinkDialog() {
                 <p class="settings-label truncate">{{ identity.providerName }}</p>
                 <p class="settings-hint truncate">{{ identity.oidcSubject }}</p>
               </div>
-              <button
+              <Button
+                variant="destructive-outline"
+                size="sm"
                 type="button"
                 :disabled="accountEditBlocked"
-                class="shrink-0 rounded-md border border-destructive/40 px-2 py-1 text-xs font-medium text-destructive transition-colors hover:bg-destructive/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                class="shrink-0"
                 :aria-label="t('settings.account.connectedAccounts.unlinkAria', { provider: identity.providerName })"
                 @click="openUnlinkDialog(identity)"
               >
                 {{ t('settings.account.connectedAccounts.unlink') }}
-              </button>
+              </Button>
             </li>
           </ul>
 
           <div v-if="availableForLinking().length > 0" class="space-y-2">
             <p class="settings-hint">{{ t('settings.account.connectedAccounts.linkAdditional') }}</p>
             <div class="flex flex-wrap gap-2">
-              <button
+              <Button
+                variant="outline"
+                size="sm"
                 v-for="provider in availableForLinking()"
                 :key="provider.slug"
                 type="button"
                 :disabled="linkingSlug !== null || accountEditBlocked"
-                class="settings-btn-outline"
                 @click="initiateOidcLink(provider)"
               >
                 <img v-if="provider.iconUrl" :src="provider.iconUrl" alt="" class="size-3 shrink-0 object-contain" />
@@ -568,7 +580,7 @@ function closeUnlinkDialog() {
                     ? t('settings.account.connectedAccounts.redirecting')
                     : t('settings.account.connectedAccounts.linkProvider', { provider: provider.displayName })
                 }}
-              </button>
+              </Button>
             </div>
           </div>
 
@@ -586,13 +598,13 @@ function closeUnlinkDialog() {
   >
     <p role="status" class="settings-hint mt-0">{{ t('settings.account.feedback.unsavedChanges') }}</p>
     <div class="flex shrink-0 items-center gap-2">
-      <button type="button" class="settings-btn-outline" :disabled="profileBusy" @click="discardProfileChanges">
+      <Button variant="outline" size="sm" type="button" :disabled="profileBusy" @click="discardProfileChanges">
         {{ t('settings.account.feedback.discard') }}
-      </button>
-      <button type="button" class="settings-btn-primary" :disabled="profileBusy || accountEditBlocked" @click="saveProfile">
+      </Button>
+      <Button size="sm" type="button" :disabled="profileBusy || accountEditBlocked" @click="saveProfile">
         <Save :size="14" aria-hidden="true" />
         {{ savingProfile ? t('settings.account.profile.saving') : t('settings.account.profile.save') }}
-      </button>
+      </Button>
     </div>
   </div>
 
@@ -613,11 +625,11 @@ function closeUnlinkDialog() {
     :description="t('settings.account.connectedAccounts.unlinkDialog.description')"
     :confirm-label="unlinking ? t('settings.account.connectedAccounts.unlinking') : t('settings.account.connectedAccounts.unlink')"
     :busy="unlinking"
-    :confirm-disabled="!unlinkPassword || accountEditBlocked"
+    :confirm-disabled="(needsUnlinkPassword && !unlinkPassword) || accountEditBlocked"
     @confirm="confirmUnlink"
     @cancel="closeUnlinkDialog"
   >
-    <div class="mt-3 space-y-1.5">
+    <div v-if="needsUnlinkPassword" class="mt-3 space-y-1.5">
       <label for="account-unlink-password" class="settings-label">
         {{ t('settings.account.connectedAccounts.unlinkDialog.currentPassword') }}
       </label>

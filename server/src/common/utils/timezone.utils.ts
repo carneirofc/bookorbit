@@ -30,6 +30,16 @@ export function resolveTimeZone(value: unknown, fallback = 'UTC'): string {
   return isValidTimeZone(normalized) ? normalized : fallback;
 }
 
+export function resolveSystemTimeZone(): string {
+  try {
+    return resolveTimeZone(Intl.DateTimeFormat().resolvedOptions().timeZone);
+  } catch {
+    return 'UTC';
+  }
+}
+
+export const SYSTEM_TIME_ZONE = resolveSystemTimeZone();
+
 export function isDateKey(value: string): boolean {
   const match = DATE_KEY_RE.exec(value);
   if (!match) return false;
@@ -103,4 +113,8 @@ export function toTimeZoneStartOfDay(dateKey: string, timeZone: string): Date {
   }
 
   throw new RangeError(`Invalid timezone conversion for date key: ${dateKey}`);
+}
+
+export function getYearInTimeZone(date: Date, timeZone: string): number {
+  return Number(toDateKeyInTimeZone(date, timeZone).slice(0, 4));
 }

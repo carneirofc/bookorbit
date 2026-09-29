@@ -1,51 +1,93 @@
-/**
- * Failure modes of a chunked upload, surfaced as `errorCode` on the error body.
- *
- * Retry policy the client must follow: CHUNK_CORRUPT is the only code that means
- * "re-send this one chunk". Every other code at or above 409 means the session is
- * unusable - restart the whole upload with a fresh uploadId, or give up.
- */
-export enum ChunkUploadErrorCode {
-  CHUNK_CORRUPT = "chunk_corrupt",
-  CHUNK_TOO_LARGE = "chunk_too_large",
-  SESSION_MISMATCH = "chunk_session_mismatch",
-  SESSION_FINALIZING = "chunk_session_finalizing",
-  SESSION_EXPIRED = "chunk_session_expired",
-  UPLOAD_TOO_LARGE = "chunk_upload_too_large",
-  INVALID_CHUNK_METADATA = "chunk_invalid_metadata",
-  ASSEMBLY_FAILED = "chunk_assembly_failed",
-  CONTENT_TYPE_MISMATCH = "content_type_mismatch",
-  TOO_MANY_UPLOADS = "chunk_too_many_uploads",
-  STORAGE_FULL = "chunk_storage_full",
+import type { EpubMediaOverlayCapability } from "./epub";
+
+export const UPLOAD_SUPPORTED_FORMATS = [
+  "epub",
+  "kepub",
+  "pdf",
+  "mobi",
+  "azw",
+  "azw3",
+  "cbz",
+  "cbr",
+  "cb7",
+  "fb2",
+  "m4b",
+  "m4a",
+  "mp3",
+  "opus",
+  "ogg",
+  "flac",
+] as const;
+
+export type UploadSupportedFormat = (typeof UPLOAD_SUPPORTED_FORMATS)[number];
+
+export const UploadErrorCode = {
+  TooLarge: "UPLOAD_TOO_LARGE",
+  Empty: "UPLOAD_EMPTY",
+  UnsupportedFormat: "UPLOAD_FORMAT_UNSUPPORTED",
+  FormatNotAllowed: "UPLOAD_FORMAT_NOT_ALLOWED",
+  InvalidContent: "UPLOAD_CONTENT_INVALID",
+  Duplicate: "UPLOAD_DUPLICATE",
+  DestinationConflict: "UPLOAD_DESTINATION_CONFLICT",
+  StorageFull: "UPLOAD_STORAGE_FULL",
+  InvalidTarget: "UPLOAD_TARGET_INVALID",
+  OffsetMismatch: "UPLOAD_OFFSET_MISMATCH",
+  ChecksumMismatch: "UPLOAD_CHECKSUM_MISMATCH",
+  SessionExpired: "UPLOAD_SESSION_EXPIRED",
+  SessionStateInvalid: "UPLOAD_SESSION_STATE_INVALID",
+  ImportFailed: "UPLOAD_IMPORT_FAILED",
+} as const;
+
+export type UploadErrorCode = (typeof UploadErrorCode)[keyof typeof UploadErrorCode];
+
+export type UploadTarget =
+  { kind: "library"; libraryId: number; folderId?: number } | { kind: "existing_book"; bookId: number } | { kind: "book_dock" };
+
+export type UploadSessionStatus = "receiving" | "processing" | "completed" | "failed" | "cancelled" | "expired";
+
+export interface CreateUploadSessionRequest {
+  filename: string;
+  sizeBytes: number;
+  idempotencyKey: string;
+  target: UploadTarget;
+  contentType?: string;
+  sha256?: string;
 }
 
-/** Hard ceiling on a single chunk request body, enforced at the multipart layer. */
-export const MAX_CHUNK_BYTES = 64 * 1024 * 1024;
+export interface UploadSessionResponse {
+  id: string;
+  filename: string;
+  sizeBytes: number;
+  receivedBytes: number;
+  chunkSizeBytes: number;
+  status: UploadSessionStatus;
+  target: UploadTarget;
+  errorCode?: UploadErrorCode | null;
+  errorMessage?: string | null;
+  bookId?: number | null;
+  bookDockFileId?: number | null;
+  expiresAt: string;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string | null;
+}
 
-/** Chunks below this are pure overhead and would blow up the chunk count. */
-export const MIN_CHUNK_BYTES = 256 * 1024;
+export interface UploadCapabilitiesLibrary {
+  id: number;
+  name: string;
+  allowedFormats: string[];
+  organizationMode: "book_per_file" | "book_per_folder";
+  folders: { id: number; name: string }[];
+}
 
-/**
- * Default chunk size advertised to clients. Small enough that a failed chunk is
- * cheap to re-send and progress moves smoothly, far enough under common reverse
- * proxy body caps (Cloudflare's 100 MB) to survive them.
- */
-export const DEFAULT_UPLOAD_CHUNK_BYTES = 16 * 1024 * 1024;
-
-/** Refuse absurd chunk counts before allocating a per-chunk bitmap. */
-export const MAX_UPLOAD_CHUNKS = 10_000;
-
-/** Header that marks a request as one chunk of a chunked upload. */
-export const CHUNK_UPLOAD_HEADER = "x-upload-id";
-
-/** Server response to a chunk that did not complete the upload. */
-export type ChunkUploadProgressResponse = {
-  chunked: true;
-  complete: false;
-  receivedChunks: number;
-  totalChunks: number;
-  finalizing: boolean;
-};
+export interface UploadCapabilitiesResponse {
+  maxFileSizeBytes: number;
+  chunkSizeBytes: number;
+  supportedFormats: string[];
+  canUploadToLibrary: boolean;
+  canUseBookDock: boolean;
+  libraries: UploadCapabilitiesLibrary[];
+}
 
 export type UploadResult = {
   bookId: number;
@@ -63,5 +105,6 @@ export type AddBookFileResult = {
   createdAt: string;
   filename: string;
   durationSeconds: number | null;
+  mediaOverlay?: EpubMediaOverlayCapability | null;
   bookStatus: string;
 };

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { Permission } from '@bookorbit/types';
+import { PgDialect } from 'drizzle-orm/pg-core';
 
 import * as schema from '../../db/schema';
 import { HardcoverRepository } from './hardcover.repository';
@@ -35,7 +36,9 @@ function makeRepository() {
   const settingsInsert = makeReturningChain(settingsRow);
   const bookStateInsert = makeReturningChain(bookStateRow);
   const deleteChain = makeWhereChain(undefined);
-  const updateChain = { set: vi.fn().mockReturnValue(makeWhereChain(undefined)) };
+  const updateReturning = vi.fn().mockResolvedValue([{ id: 3 }]);
+  const updateWhere = vi.fn().mockReturnValue({ returning: updateReturning });
+  const updateChain = { set: vi.fn().mockReturnValue({ where: updateWhere }) };
   const bookIdLimit = vi.fn().mockResolvedValue([{ bookId: 42 }]);
   const bookIdWhere = vi.fn().mockReturnValue({ limit: bookIdLimit });
   const bookIdFrom = vi.fn().mockReturnValue({ where: bookIdWhere });
@@ -64,6 +67,8 @@ function makeRepository() {
     bookStateInsert,
     deleteChain,
     updateChain,
+    updateReturning,
+    updateWhere,
     bookIdLimit,
     bookIdWhere,
     permissionLimit,
@@ -122,6 +127,17 @@ describe('HardcoverRepository', () => {
     expect(bookStateQuery.findMany).toHaveBeenCalledTimes(1);
   });
 
+  it('findBookStatesByBookIds binds large ID lists as one PostgreSQL array parameter', async () => {
+    const { repo, bookStateQuery } = makeRepository();
+    const bookIds = Array.from({ length: 65_535 }, (_, index) => index + 1);
+
+    await repo.findBookStatesByBookIds(7, bookIds);
+
+    const config = bookStateQuery.findMany.mock.calls[0]![0] as { where: Parameters<PgDialect['sqlToQuery']>[0] };
+    const query = new PgDialect().sqlToQuery(config.where);
+    expect(query.params).toEqual([7, bookIds]);
+  });
+
   it('upsertBookState inserts or updates per-book state', async () => {
     const { repo, db, bookStateInsert, bookStateRow } = makeRepository();
     db.insert.mockReset();
@@ -178,6 +194,19 @@ describe('HardcoverRepository', () => {
     expect(mainSelect).toBeDefined();
     expect(mainSelect).toHaveProperty('pageCount');
     expect(mainSelect).toHaveProperty('format');
+  });
+
+  it('uses audiobook progress for an audiobook sync snapshot', async () => {
+    const { repo, db } = makeRepository();
+    const chain: Record<string, unknown> = {};
+    for (const method of ['from', 'innerJoin', 'leftJoin', 'where', 'groupBy', 'as']) {
+      chain[method] = vi.fn().mockReturnValue(chain);
+    }
+    chain.then = (resolve: (rows: unknown[]) => void) => resolve([{ bookId: 42, format: 'm4b', readingProgress: null, audioProgress: 37.5 }]);
+    db.select.mockImplementation(() => chain);
+
+    await expect(repo.findSyncableBooks(7)).resolves.toEqual([{ bookId: 42, format: 'm4b', progress: 37.5 }]);
+    expect(chain.leftJoin).toHaveBeenCalledWith(schema.audiobookProgress, expect.anything());
   });
 
   it('findSyncableBook returns a book from findSyncableBooks', async () => {
@@ -439,5 +468,102 @@ describe('HardcoverRepository', () => {
 
     expect(progressInsert.values).toHaveBeenCalledWith(expect.objectContaining({ percentage: 0 }));
     expect(progressInsert.onConflictDoUpdate).toHaveBeenCalledWith(expect.objectContaining({ set: expect.objectContaining({ percentage: 0 }) }));
+  });
+  describe('linkReadingAttempt', () => {
+    function pgError(fields: Record<string, unknown>) {
+      return Object.assign(new Error('Failed query: update "reading_attempts"'), { cause: fields });
+    }
+
+    function rejectUpdateWith(updateChain: { set: ReturnType<typeof vi.fn> }, error: unknown) {
+      updateChain.set.mockReturnValue({ where: vi.fn().mockReturnValue({ returning: vi.fn().mockRejectedValue(error) }) });
+    }
+
+    it('stamps the attempt and reports it linked', async () => {
+      const { repo, updateChain } = makeRepository();
+
+      await expect(repo.linkReadingAttempt(7, 3, 555)).resolves.toBe('linked');
+      expect(updateChain.set).toHaveBeenCalledWith(expect.objectContaining({ externalProvider: 'hardcover', externalId: '555' }));
+    });
+
+    it('reports a conflict when another attempt already owns the read', async () => {
+      const { repo, updateChain } = makeRepository();
+      rejectUpdateWith(updateChain, pgError({ code: '23505', constraint: 'reading_attempts_external_uidx' }));
+
+      await expect(repo.linkReadingAttempt(7, 3, 555)).resolves.toBe('conflict');
+    });
+
+    it('reports a conflict when the attempt was already claimed by a concurrent sync', async () => {
+      const { repo, updateReturning } = makeRepository();
+      updateReturning.mockResolvedValue([]);
+
+      await expect(repo.linkReadingAttempt(7, 3, 555)).resolves.toBe('conflict');
+    });
+
+    it('recognises the conflict when the driver only names the index in the message', async () => {
+      const { repo, updateChain } = makeRepository();
+      rejectUpdateWith(
+        updateChain,
+        pgError({ code: '23505', message: 'duplicate key value violates unique constraint "reading_attempts_external_uidx"' }),
+      );
+
+      await expect(repo.linkReadingAttempt(7, 3, 555)).resolves.toBe('conflict');
+    });
+
+    it('recognises a conflict reported directly rather than through a cause', async () => {
+      const { repo, updateChain } = makeRepository();
+      rejectUpdateWith(updateChain, Object.assign(new Error('duplicate key'), { code: '23505', constraint: 'reading_attempts_external_uidx' }));
+
+      await expect(repo.linkReadingAttempt(7, 3, 555)).resolves.toBe('conflict');
+    });
+
+    it('rethrows a unique violation on a different constraint', async () => {
+      const { repo, updateChain } = makeRepository();
+      rejectUpdateWith(updateChain, pgError({ code: '23505', constraint: 'reading_attempts_one_active_uidx' }));
+
+      await expect(repo.linkReadingAttempt(7, 3, 555)).rejects.toThrow('Failed query');
+    });
+
+    it('rethrows errors that are not unique violations', async () => {
+      const { repo, updateChain } = makeRepository();
+      rejectUpdateWith(updateChain, pgError({ code: '40001', message: 'could not serialize access' }));
+
+      await expect(repo.linkReadingAttempt(7, 3, 555)).rejects.toThrow('Failed query');
+    });
+
+    it('does not loop on a self-referencing cause chain', async () => {
+      const { repo, updateChain } = makeRepository();
+      const error = new Error('boom') as Error & { cause?: unknown };
+      error.cause = error;
+      rejectUpdateWith(updateChain, error);
+
+      await expect(repo.linkReadingAttempt(7, 3, 555)).rejects.toThrow('boom');
+    });
+  });
+
+  describe('findClaimedHardcoverReadIds', () => {
+    function withRows(db: { select: ReturnType<typeof vi.fn> }, rows: Array<{ externalId: string | null }>) {
+      db.select.mockReturnValue({ from: vi.fn().mockReturnValue({ where: vi.fn().mockResolvedValue(rows) }) });
+    }
+
+    it('returns the read ids already claimed on the book', async () => {
+      const { repo, db } = makeRepository();
+      withRows(db, [{ externalId: '555' }, { externalId: '777' }]);
+
+      await expect(repo.findClaimedHardcoverReadIds(7, 42)).resolves.toEqual([555, 777]);
+    });
+
+    it('drops ids that are not usable read identifiers', async () => {
+      const { repo, db } = makeRepository();
+      withRows(db, [{ externalId: 'abc' }, { externalId: '0' }, { externalId: null }, { externalId: '-1' }, { externalId: '12' }]);
+
+      await expect(repo.findClaimedHardcoverReadIds(7, 42)).resolves.toEqual([12]);
+    });
+
+    it('returns an empty list when nothing is claimed', async () => {
+      const { repo, db } = makeRepository();
+      withRows(db, []);
+
+      await expect(repo.findClaimedHardcoverReadIds(7, 42)).resolves.toEqual([]);
+    });
   });
 });

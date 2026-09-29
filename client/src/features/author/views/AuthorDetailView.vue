@@ -4,14 +4,15 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { formatNumber } from '@/i18n/formatters'
 import { useRoute, useRouter } from 'vue-router'
-import { ArrowUpDown, ChevronDown, ChevronLeft, ImageMinus, LayoutGrid, List, Upload } from '@lucide/vue'
+import { ArrowUpDown, ChevronDown, ChevronLeft, ImageMinus, Layers, LayoutGrid, List, Upload } from '@lucide/vue'
 import { toast } from 'vue-sonner'
 
-import type { AuthorSummary, BookCard } from '@bookorbit/types'
+import type { AuthorDetail, AuthorSummary, BookCard } from '@bookorbit/types'
 import VirtualBookGrid from '@/features/book/components/VirtualBookGrid.vue'
 import BookListRow from '@/features/book/components/BookListRow.vue'
 import DeleteBookDialog from '@/features/book/components/DeleteBookDialog.vue'
 import { useScrollRestoreOnActivate } from '@/features/book/composables/useScrollRestoreOnActivate'
+import { useSeriesCollapsePreference } from '@/features/book/composables/useSeriesCollapsePreference'
 import { useDisplaySettings } from '@/composables/useDisplaySettings'
 import { useLibraries } from '@/features/library/composables/useLibraries'
 import { usePermissions } from '@/features/auth/composables/usePermissions'
@@ -49,7 +50,30 @@ const authorBooksViewMode = ref<'grid' | 'list'>('grid')
 
 const authorId = computed(() => Number(route.params.id))
 const { author, loading: loadingAuthor, error: authorError, notFound: authorNotFound, load: loadAuthor } = useAuthorDetail(authorId)
-const { items: books, total, loading: loadingBooks, error: booksError, hasMore, sort, order, libraryId, load: loadBooks } = useAuthorBooks(authorId)
+const {
+  items: books,
+  total,
+  bookTotal,
+  loading: loadingBooks,
+  error: booksError,
+  hasMore,
+  sort,
+  order,
+  libraryId,
+  collapseSeries,
+  load: loadBooks,
+} = useAuthorBooks(authorId)
+
+// One flag for every author page, so the state carries from one author to the next rather than
+// being re-chosen per author; the toggle below writes it back. Tracked rather than read once,
+// because on a cold load of an author URL the signed-in user - and so the preference - can
+// arrive after this component is set up.
+const { getEffectivePreference, setPreference } = useSeriesCollapsePreference()
+watch(
+  () => getEffectivePreference({ authorPages: true }),
+  (value) => (collapseSeries.value = value),
+  { immediate: true },
+)
 const authorName = computed(() => author.value?.name ?? '')
 const pageTitle = computed(() => {
   if (author.value?.name) return t('author.detail.pageTitleNamed', { name: author.value.name })
@@ -83,7 +107,14 @@ const authorImageInput = ref<HTMLInputElement | null>(null)
 const draftName = ref('')
 const draftSortName = ref('')
 const draftDescription = ref('')
+const seededDrafts = ref<{ name: string; sortName: string; description: string } | null>(null)
 const authorImageBusy = computed(() => uploadingImage.value || removingImage.value)
+
+const draftsDirty = computed(() => {
+  const seeded = seededDrafts.value
+  if (!seeded) return false
+  return draftName.value !== seeded.name || draftSortName.value !== seeded.sortName || draftDescription.value !== seeded.description
+})
 
 const mergeQuery = ref('')
 const mergeCandidates = ref<AuthorSummary[]>([])
@@ -122,7 +153,10 @@ const {
   books.value = books.value.filter((b) => b.id !== id)
   if (books.value.length === previousLength) return
 
+  // Only a plain book card carries a delete action - a collapsed series row opens the series
+  // instead - so the card that just went is worth exactly one row and one book.
   total.value = Math.max(0, total.value - 1)
+  bookTotal.value = Math.max(0, bookTotal.value - 1)
   if (author.value) {
     author.value = {
       ...author.value,
@@ -139,12 +173,26 @@ function showRefreshResultToast(updated: { imageUrl?: string | null }) {
   toast.success(t('author.detail.toast.refreshed'))
 }
 
+function seedDrafts(value: AuthorDetail | null) {
+  const seeded = {
+    name: value?.name ?? '',
+    sortName: value?.sortName ?? '',
+    description: value?.description ?? '',
+  }
+  draftName.value = seeded.name
+  draftSortName.value = seeded.sortName
+  draftDescription.value = seeded.description
+  seededDrafts.value = seeded
+}
+
+// Image uploads, image removal and metadata refresh all replace the whole author
+// object, so re-seeding on every change would discard edits typed but not saved.
 watch(
   author,
-  (value) => {
-    draftName.value = value?.name ?? ''
-    draftSortName.value = value?.sortName ?? ''
-    draftDescription.value = value?.description ?? ''
+  (value, previous) => {
+    const sameAuthor = previous != null && value != null && previous.id === value.id
+    if (sameAuthor && draftsDirty.value) return
+    seedDrafts(value)
   },
   { immediate: true },
 )
@@ -188,6 +236,14 @@ function handleBookUpdate(updated: BookCard) {
   if (idx !== -1) books.value = books.value.map((b, i) => (i === idx ? updated : b))
 }
 
+const collapseToggleLabel = computed(() => (collapseSeries.value ? t('views.bookView.expandSeries') : t('views.bookView.collapseSeries')))
+
+async function handleToggleCollapse() {
+  const next = !collapseSeries.value
+  collapseSeries.value = next
+  await setPreference({ authorPages: true }, next)
+}
+
 function loadIfSentinelVisible() {
   if (loadingBooks.value || !hasMore.value || !sentinel.value) return
   if (sentinel.value.getBoundingClientRect().top < window.innerHeight + 250) {
@@ -211,6 +267,7 @@ async function saveAuthorEdits() {
       description: draftDescription.value.trim() || null,
     })
     author.value = updated
+    seedDrafts(updated)
     editOpen.value = false
     toast.success(t('author.detail.toast.updated'))
   } catch (error) {
@@ -426,7 +483,7 @@ watch(authorId, () => {
   void Promise.all([loadAuthor(), loadBooks(true)]).then(() => loadMetadataPreview())
 })
 
-watch([sort, order, libraryId], () => {
+watch([sort, order, libraryId, collapseSeries], () => {
   void loadBooks(true)
 })
 
@@ -596,7 +653,7 @@ defineOptions({ name: 'AuthorDetailView' })
           <div class="mb-3 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
             <h2 class="text-sm font-semibold text-foreground">{{ t('author.detail.books.heading') }}</h2>
             <div class="w-full space-y-2 sm:hidden">
-              <div class="grid grid-cols-[minmax(0,1fr)_auto_auto] gap-2">
+              <div class="grid grid-cols-[minmax(0,1fr)_auto_auto_auto] gap-2">
                 <div class="relative min-w-0">
                   <select
                     :value="sort"
@@ -615,6 +672,22 @@ defineOptions({ name: 'AuthorDetailView' })
                   @click="toggleBookOrder"
                 >
                   {{ order === 'asc' ? t('author.detail.books.asc') : t('author.detail.books.desc') }}
+                </button>
+
+                <button
+                  data-testid="author-collapse-series-toggle-mobile"
+                  class="flex h-8 w-8 items-center justify-center rounded-md border transition-colors"
+                  :class="
+                    collapseSeries
+                      ? 'border-primary text-primary bg-primary/10'
+                      : 'border-input text-muted-foreground bg-background hover:text-foreground hover:bg-muted'
+                  "
+                  :aria-label="collapseToggleLabel"
+                  :aria-pressed="collapseSeries"
+                  :title="collapseToggleLabel"
+                  @click="handleToggleCollapse"
+                >
+                  <Layers :size="14" />
                 </button>
 
                 <div class="flex items-center rounded-md border border-input bg-background">
@@ -681,6 +754,22 @@ defineOptions({ name: 'AuthorDetailView' })
                 <option v-for="library in libraries" :key="library.id" :value="library.id">{{ library.name }}</option>
               </select>
 
+              <button
+                data-testid="author-collapse-series-toggle"
+                class="flex h-8 w-8 items-center justify-center rounded-md border transition-colors"
+                :class="
+                  collapseSeries
+                    ? 'border-primary text-primary bg-primary/10'
+                    : 'border-input text-muted-foreground bg-background hover:text-foreground hover:bg-muted'
+                "
+                :aria-label="collapseToggleLabel"
+                :aria-pressed="collapseSeries"
+                :title="collapseToggleLabel"
+                @click="handleToggleCollapse"
+              >
+                <Layers :size="14" />
+              </button>
+
               <div class="flex items-center rounded-md border border-input bg-background">
                 <button
                   class="flex h-8 w-8 items-center justify-center rounded-l-md transition-colors"
@@ -729,7 +818,7 @@ defineOptions({ name: 'AuthorDetailView' })
           <div ref="sentinel" class="mt-4 flex h-8 items-center justify-center">
             <span v-if="loadingBooks" class="text-xs text-muted-foreground">{{ t('common.loading') }}</span>
             <span v-else-if="!hasMore && books.length > 0" class="text-xs text-muted-foreground">{{
-              t('author.detail.books.allLoaded', { total: formatNumber(total) })
+              t('author.detail.books.allLoaded', { total: formatNumber(bookTotal) })
             }}</span>
           </div>
         </section>

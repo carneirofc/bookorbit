@@ -3,9 +3,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { readingSessions, userReadingDailyStats } from '../../db/schema';
 import { ReadingSessionRepository } from './reading-session.repository';
 
-function makeDbHarness(options?: { fileRow?: { bookId: number; libraryId: number } | null; insertedIds?: Array<{ id: number }> }) {
+function makeDbHarness(options?: {
+  fileRow?: { bookId: number; libraryId: number } | null;
+  insertedIds?: Array<{ id: number }>;
+  /// The row a conflicting sessionId already occupies. `saveSession` reads it to decide whether the
+  /// incoming write supersedes a checkpoint or is a sync-queue retry of one already stored.
+  existingSession?: { id: number; durationSeconds: number; progressDelta: number | null } | null;
+}) {
   const fileRow = options?.fileRow === undefined ? { bookId: 7, libraryId: 11 } : options.fileRow;
   const insertedIds = options?.insertedIds ?? [{ id: 1 }];
+  const existingSession = options?.existingSession === undefined ? null : options.existingSession;
 
   const limit = vi.fn().mockResolvedValue(fileRow == null ? [] : [fileRow]);
   const where = vi.fn().mockReturnValue({ limit });
@@ -20,8 +27,19 @@ function makeDbHarness(options?: { fileRow?: { bookId: number; libraryId: number
   const dailyConflictUpdate = vi.fn().mockResolvedValue(undefined);
   const dailyValues = vi.fn().mockReturnValue({ onConflictDoUpdate: dailyConflictUpdate });
 
+  const existingLimit = vi.fn().mockResolvedValue(existingSession == null ? [] : [existingSession]);
+  const existingWhere = vi.fn().mockReturnValue({ limit: existingLimit });
+  const existingFrom = vi.fn().mockReturnValue({ where: existingWhere });
+  const txSelect = vi.fn().mockReturnValue({ from: existingFrom });
+
+  const updateWhere = vi.fn().mockResolvedValue(undefined);
+  const updateSet = vi.fn().mockReturnValue({ where: updateWhere });
+  const txUpdate = vi.fn().mockReturnValue({ set: updateSet });
+
   const tx = {
     execute: vi.fn().mockResolvedValue(undefined),
+    select: txSelect,
+    update: txUpdate,
     insert: vi.fn((table: unknown) => {
       if (table === readingSessions) return { values: sessionValues };
       if (table === userReadingDailyStats) return { values: dailyValues };
@@ -43,6 +61,8 @@ function makeDbHarness(options?: { fileRow?: { bookId: number; libraryId: number
     sessionReturning,
     dailyValues,
     dailyConflictUpdate,
+    updateSet,
+    updateWhere,
     tx,
   };
 }
@@ -81,7 +101,11 @@ describe('ReadingSessionRepository', () => {
   });
 
   it('skips when session id already exists (idempotent duplicate)', async () => {
-    const { repo, dailyValues } = makeDbHarness({ insertedIds: [] });
+    // A sync-queue retry of a write already stored: same id, same duration. It must stay a no-op.
+    const { repo, dailyValues } = makeDbHarness({
+      insertedIds: [],
+      existingSession: { id: 42, durationSeconds: 60, progressDelta: 3.2 },
+    });
 
     const result = await repo.saveSession(
       5,
@@ -95,6 +119,60 @@ describe('ReadingSessionRepository', () => {
     );
 
     expect(result).toEqual({ kind: 'skipped', reason: 'duplicate_session_id' });
+    expect(dailyValues).not.toHaveBeenCalled();
+  });
+
+  it('supersedes a checkpointed session when the later write carries more time', async () => {
+    // The iOS player checkpoints a session when the app is backgrounded, because `willTerminate`
+    // is not delivered if it is then killed, and the later close carries the same sessionId
+    // deliberately to replace that partial row. Dropping the second write capped every
+    // backgrounded session at the checkpoint: a measured 50s listen recorded 17s.
+    const { repo, dailyValues, updateSet } = makeDbHarness({
+      fileRow: { bookId: 9, libraryId: 3 },
+      insertedIds: [],
+      existingSession: { id: 77, durationSeconds: 17, progressDelta: 1.0 },
+    });
+
+    const result = await repo.saveSession(
+      5,
+      8,
+      'checkpointed-id',
+      new Date('2026-04-15T10:00:00.000Z'),
+      new Date('2026-04-15T10:01:00.000Z'),
+      56,
+      4.0,
+      12.5,
+    );
+
+    expect(result).toEqual({ kind: 'superseded', addedSeconds: 39 });
+    expect(updateSet).toHaveBeenCalledWith(expect.objectContaining({ durationSeconds: 56 }));
+    // Daily stats accumulate, so only the difference may be added or the checkpoint's seconds are
+    // counted twice.
+    expect(dailyValues).toHaveBeenCalled();
+    const segments = dailyValues.mock.calls[0][0] as Array<{ readingSeconds: number }>;
+    const added = segments.reduce((sum, segment) => sum + segment.readingSeconds, 0);
+    expect(added).toBe(39);
+  });
+
+  it('does not let a stale retry shrink a session', async () => {
+    const { repo, dailyValues, updateSet } = makeDbHarness({
+      insertedIds: [],
+      existingSession: { id: 78, durationSeconds: 90, progressDelta: 2.0 },
+    });
+
+    const result = await repo.saveSession(
+      5,
+      8,
+      'already-longer',
+      new Date('2026-04-15T10:00:00.000Z'),
+      new Date('2026-04-15T10:02:00.000Z'),
+      30,
+      1.0,
+      5.0,
+    );
+
+    expect(result).toEqual({ kind: 'skipped', reason: 'duplicate_session_id' });
+    expect(updateSet).not.toHaveBeenCalled();
     expect(dailyValues).not.toHaveBeenCalled();
   });
 
@@ -210,7 +288,7 @@ describe('ReadingSessionRepository - insertManualSession', () => {
       timeZone: 'UTC',
     });
 
-    expect(result).toEqual({ id: 321 });
+    expect(result).toEqual({ id: 321, attemptId: null });
     expect(sessionValues).toHaveBeenCalledWith(
       expect.objectContaining({
         userId: 5,
@@ -302,14 +380,22 @@ describe('ReadingSessionRepository - listByBook', () => {
     return self;
   }
 
-  function makeListDb(results: { rows?: unknown[]; count?: unknown[]; stats?: unknown[]; summary?: unknown[]; bySource?: unknown[] }) {
+  function makeListDb(results: {
+    rows?: unknown[];
+    count?: unknown[];
+    stats?: unknown[];
+    summary?: unknown[];
+    bySource?: unknown[];
+    latest?: unknown[];
+  }) {
     const select = vi
       .fn()
       .mockReturnValueOnce({ from: vi.fn().mockReturnValue(makeQueryChain(results.rows ?? [])) })
       .mockReturnValueOnce({ from: vi.fn().mockReturnValue(makeQueryChain(results.count ?? [])) })
       .mockReturnValueOnce({ from: vi.fn().mockReturnValue(makeQueryChain(results.stats ?? [])) })
       .mockReturnValueOnce({ from: vi.fn().mockReturnValue(makeQueryChain(results.summary ?? [])) })
-      .mockReturnValueOnce({ from: vi.fn().mockReturnValue(makeQueryChain(results.bySource ?? [])) });
+      .mockReturnValueOnce({ from: vi.fn().mockReturnValue(makeQueryChain(results.bySource ?? [])) })
+      .mockReturnValueOnce({ from: vi.fn().mockReturnValue(makeQueryChain(results.latest ?? [])) });
     return { db: { select }, select };
   }
 
@@ -318,7 +404,19 @@ describe('ReadingSessionRepository - listByBook', () => {
     const later = new Date('2026-04-15T10:30:00.000Z');
 
     const { db } = makeListDb({
-      rows: [{ id: 1, startedAt: now, endedAt: later, durationSeconds: 1800, progressDelta: 5, endProgress: 50, format: 'epub', source: 'web' }],
+      rows: [
+        {
+          id: 1,
+          bookFileId: 42,
+          startedAt: now,
+          endedAt: later,
+          durationSeconds: 1800,
+          progressDelta: 5,
+          endProgress: 50,
+          format: 'epub',
+          source: 'web',
+        },
+      ],
       count: [{ total: 1 }],
       stats: [
         {
@@ -344,17 +442,18 @@ describe('ReadingSessionRepository - listByBook', () => {
     expect(result.stats.paceDurationSeconds).toBe(1800);
     expect(result.stats.progressSummary).toEqual([{ day: '2026-04-15', endProgress: 50 }]);
     expect(result.items).toHaveLength(1);
+    expect(result.items[0]?.bookFileId).toBe(42);
     expect(result.items[0]?.startedAt).toBe(now.toISOString());
     expect(result.items[0]?.source).toBe('web');
   });
 
-  it('fires five select queries', async () => {
+  it('fires six select queries', async () => {
     const { db, select } = makeListDb({});
     const repo = new ReadingSessionRepository(db as never);
 
     await repo.listByBook(1, 2, 2, 25, 'startedAt', 'desc');
 
-    expect(select).toHaveBeenCalledTimes(5);
+    expect(select).toHaveBeenCalledTimes(6);
   });
 
   it('splits per-book daily summaries across local midnight', async () => {
@@ -419,7 +518,19 @@ describe('ReadingSessionRepository - listByBook', () => {
   it('maps null format and null source to null in items', async () => {
     const now = new Date('2026-04-15T10:00:00.000Z');
     const { db } = makeListDb({
-      rows: [{ id: 1, startedAt: now, endedAt: now, durationSeconds: 60, progressDelta: null, endProgress: null, format: null, source: null }],
+      rows: [
+        {
+          id: 1,
+          bookFileId: null,
+          startedAt: now,
+          endedAt: now,
+          durationSeconds: 60,
+          progressDelta: null,
+          endProgress: null,
+          format: null,
+          source: null,
+        },
+      ],
       count: [{ total: 1 }],
       stats: [{ totalSessions: 1, totalSeconds: 60, avgDurationSeconds: 60, firstSessionAt: null, lastSessionAt: null }],
     });
@@ -427,6 +538,7 @@ describe('ReadingSessionRepository - listByBook', () => {
 
     const result = await repo.listByBook(1, 2, 1, 25, 'startedAt', 'desc');
 
+    expect(result.items[0]?.bookFileId).toBeNull();
     expect(result.items[0]?.format).toBeNull();
     expect(result.items[0]?.source).toBeNull();
   });
@@ -445,7 +557,7 @@ describe('ReadingSessionRepository - listByBook', () => {
     await expect(repo.listByBook(1, 2, 1, 25, 'startedAt', 'asc')).resolves.toBeDefined();
   });
 
-  it('folds sessions into the 3 display buckets, ordered and excluding empty buckets', async () => {
+  it('keeps native Apple sources distinct while folding legacy BookOrbit sessions', async () => {
     const { db } = makeListDb({
       count: [{ total: 5 }],
       stats: [{ totalSessions: 5, totalSeconds: 380, avgDurationSeconds: 76, firstSessionAt: null, lastSessionAt: null }],
@@ -453,6 +565,8 @@ describe('ReadingSessionRepository - listByBook', () => {
         { source: 'web', totalSeconds: 100, totalSessions: 1 },
         { source: 'manual', totalSeconds: 50, totalSessions: 1 },
         { source: null, totalSeconds: 30, totalSessions: 1 },
+        { source: 'ios', totalSeconds: 70, totalSessions: 1 },
+        { source: 'watchos', totalSeconds: 40, totalSessions: 1 },
         { source: 'kobo', totalSeconds: 200, totalSessions: 2 },
       ],
     });
@@ -460,9 +574,11 @@ describe('ReadingSessionRepository - listByBook', () => {
 
     const result = await repo.listByBook(1, 2, 1, 25, 'startedAt', 'desc');
 
-    // web + manual + null collapse into bookorbit; koreader has no rows and is omitted.
+    // web + manual + null collapse into bookorbit; native clients retain identity.
     expect(result.stats.bySource).toEqual([
       { bucket: 'bookorbit', totalSeconds: 180, totalSessions: 3 },
+      { bucket: 'ios', totalSeconds: 70, totalSessions: 1 },
+      { bucket: 'watchos', totalSeconds: 40, totalSessions: 1 },
       { bucket: 'kobo', totalSeconds: 200, totalSessions: 2 },
     ]);
   });
@@ -474,6 +590,71 @@ describe('ReadingSessionRepository - listByBook', () => {
     const result = await repo.listByBook(1, 2, 1, 25, 'startedAt', 'desc');
 
     expect(result.stats.bySource).toEqual([]);
+  });
+
+  it('exposes the latest recorded end progress on stats', async () => {
+    const { db } = makeListDb({ latest: [{ endProgress: 76.5 }] });
+    const repo = new ReadingSessionRepository(db as never);
+
+    const result = await repo.listByBook(1, 2, 1, 25, 'startedAt', 'desc');
+
+    expect(result.stats.latestEndProgress).toBe(76.5);
+  });
+
+  it('reports a null latest end progress when no session recorded one', async () => {
+    const { db } = makeListDb({ latest: [] });
+    const repo = new ReadingSessionRepository(db as never);
+
+    const result = await repo.listByBook(1, 2, 1, 25, 'startedAt', 'desc');
+
+    expect(result.stats.latestEndProgress).toBeNull();
+  });
+
+  it('keeps the latest end progress outside the date and format filters', async () => {
+    const { db } = makeListDb({ rows: [], count: [{ total: 0 }], summary: [], latest: [{ endProgress: 100 }] });
+    const repo = new ReadingSessionRepository(db as never);
+
+    const result = await repo.listByBook(1, 2, 1, 25, 'startedAt', 'desc', '2026-01-01', '2026-01-31', 'EPUB');
+
+    expect(result.stats.progressSummary).toEqual([]);
+    expect(result.stats.latestEndProgress).toBe(100);
+  });
+});
+
+describe('ReadingSessionRepository - findLatestEndProgress', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function makeLatestHarness(rows: Array<{ endProgress: number | null }>) {
+    const limit = vi.fn().mockResolvedValue(rows);
+    const orderBy = vi.fn().mockReturnValue({ limit });
+    const where = vi.fn().mockReturnValue({ orderBy });
+    const from = vi.fn().mockReturnValue({ where });
+    const select = vi.fn().mockReturnValue({ from });
+    const repo = new ReadingSessionRepository({ select } as never);
+    return { repo, orderBy, limit, where };
+  }
+
+  it('returns the end progress of the most recent session that recorded one', async () => {
+    const { repo, orderBy, limit } = makeLatestHarness([{ endProgress: 42.5 }]);
+
+    await expect(repo.findLatestEndProgress(1, 2)).resolves.toBe(42.5);
+    expect(orderBy).toHaveBeenCalledTimes(1);
+    expect(orderBy.mock.calls[0]).toHaveLength(2);
+    expect(limit).toHaveBeenCalledWith(1);
+  });
+
+  it('returns null when the book has no session with an end progress', async () => {
+    const { repo } = makeLatestHarness([]);
+
+    await expect(repo.findLatestEndProgress(1, 2)).resolves.toBeNull();
+  });
+
+  it('returns null when the most recent row carries a null end progress', async () => {
+    const { repo } = makeLatestHarness([{ endProgress: null }]);
+
+    await expect(repo.findLatestEndProgress(1, 2)).resolves.toBeNull();
   });
 });
 
@@ -595,5 +776,114 @@ describe('ReadingSessionRepository - deleteSessionByBook', () => {
     await repo.deleteSessionByBook(1, 2, 99);
 
     expect(transaction).toHaveBeenCalledOnce();
+  });
+});
+
+describe('ReadingSessionRepository - deleteLegacyKoreaderSyncEstimatesBatch', () => {
+  function makeCleanupHarness(
+    rows: Array<{
+      id: number;
+      userId: number;
+      libraryId: number;
+      startedAt: Date;
+      endedAt: Date;
+      durationSeconds: number;
+      progressDelta: number | null;
+      userSettings: Record<string, unknown>;
+    }>,
+  ) {
+    const initialLimit = vi.fn().mockResolvedValue(rows);
+    const initialSelect = {
+      from: vi.fn().mockReturnValue({
+        innerJoin: vi.fn().mockReturnValue({
+          innerJoin: vi.fn().mockReturnValue({
+            where: vi.fn().mockReturnValue({ orderBy: vi.fn().mockReturnValue({ limit: initialLimit }) }),
+          }),
+        }),
+      }),
+    };
+    const survivingSessions = [
+      {
+        startedAt: new Date('2026-07-01T10:00:00.000Z'),
+        endedAt: new Date('2026-07-01T10:05:00.000Z'),
+        durationSeconds: 300,
+        progressDelta: 1,
+      },
+    ];
+    const recomputeWhere = vi.fn().mockResolvedValue(survivingSessions);
+    const recomputeSelect = {
+      from: vi.fn().mockReturnValue({ innerJoin: vi.fn().mockReturnValue({ where: recomputeWhere }) }),
+    };
+    const select = vi.fn().mockReturnValue(recomputeSelect).mockReturnValueOnce(initialSelect);
+    const deleteWhere = vi.fn().mockResolvedValue(undefined);
+    const deleteFn = vi.fn().mockReturnValue({ where: deleteWhere });
+    const dailyValues = vi.fn().mockReturnValue({ onConflictDoUpdate: vi.fn().mockResolvedValue(undefined) });
+    const insert = vi.fn((table: unknown) => {
+      if (table === userReadingDailyStats) return { values: dailyValues };
+      throw new Error('Unexpected table in insert');
+    });
+    const tx = { select, delete: deleteFn, insert, execute: vi.fn().mockResolvedValue(undefined) };
+    const transaction = vi.fn(async (callback: (trx: typeof tx) => Promise<unknown>) => callback(tx));
+
+    return {
+      repo: new ReadingSessionRepository({ transaction } as never),
+      deleteFn,
+      dailyValues,
+      initialLimit,
+      recomputeWhere,
+      transaction,
+    };
+  }
+
+  it('deletes one bounded batch and rebuilds the affected daily totals', async () => {
+    const { repo, deleteFn, dailyValues, initialLimit } = makeCleanupHarness([
+      {
+        id: 9,
+        userId: 7,
+        libraryId: 3,
+        startedAt: new Date('2026-07-01T09:45:00.000Z'),
+        endedAt: new Date('2026-07-01T10:00:00.000Z'),
+        durationSeconds: 900,
+        progressDelta: 4,
+        userSettings: { timezone: 'UTC' },
+      },
+    ]);
+
+    await expect(repo.deleteLegacyKoreaderSyncEstimatesBatch(500)).resolves.toEqual({ deleted: 1 });
+
+    expect(initialLimit).toHaveBeenCalledWith(500);
+    expect(deleteFn).toHaveBeenCalledWith(readingSessions);
+    expect(deleteFn).toHaveBeenCalledWith(userReadingDailyStats);
+    expect(dailyValues).toHaveBeenCalledWith([
+      expect.objectContaining({ userId: 7, libraryId: 3, day: '2026-07-01', readingSeconds: 300, sessionsCount: 1 }),
+    ]);
+  });
+
+  it('does not rewrite daily totals when no legacy estimates remain', async () => {
+    const { repo, deleteFn, dailyValues, transaction } = makeCleanupHarness([]);
+
+    await expect(repo.deleteLegacyKoreaderSyncEstimatesBatch(500)).resolves.toEqual({ deleted: 0 });
+
+    expect(deleteFn).not.toHaveBeenCalled();
+    expect(dailyValues).not.toHaveBeenCalled();
+    expect(transaction).toHaveBeenCalledOnce();
+  });
+
+  it('recomputes sparse history in bounded date ranges', async () => {
+    const row = (id: number, day: string) => ({
+      id,
+      userId: 7,
+      libraryId: 3,
+      startedAt: new Date(`${day}T09:45:00.000Z`),
+      endedAt: new Date(`${day}T10:00:00.000Z`),
+      durationSeconds: 900,
+      progressDelta: 4,
+      userSettings: { timezone: 'UTC' },
+    });
+    const { repo, recomputeWhere } = makeCleanupHarness([row(9, '2024-01-01'), row(10, '2026-07-01')]);
+
+    await repo.deleteLegacyKoreaderSyncEstimatesBatch(500);
+
+    expect(recomputeWhere).toHaveBeenCalledTimes(2);
   });
 });

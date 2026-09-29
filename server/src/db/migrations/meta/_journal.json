@@ -467,8 +467,239 @@
     {
       "idx": 66,
       "version": "7",
-      "when": 1786586299842,
-      "tag": "0066_add_book_dock_sha256",
+      "when": 1786683893541,
+      "tag": "0066_add_koreader_device_retirements",
+      "breakpoints": true
+    },
+    {
+      "idx": 67,
+      "version": "7",
+      "when": 1786840894954,
+      "tag": "0067_add_reading_progress_last_read_at",
+      "breakpoints": true
+    },
+    {
+      "idx": 68,
+      "version": "7",
+      "when": 1786843782210,
+      "tag": "0068_normalize_entity_name_whitespace",
+      "breakpoints": true
+    },
+    {
+      "idx": 69,
+      "version": "7",
+      "when": 1787023974136,
+      "tag": "0069_add_author_metadata_fields",
+      "breakpoints": true
+    },
+    {
+      "idx": 70,
+      "version": "7",
+      "when": 1787083687102,
+      "tag": "0070_add_koreader_progress_resets",
+      "breakpoints": true
+    },
+    {
+      "idx": 71,
+      "version": "7",
+      "when": 1787086030151,
+      "tag": "0071_add_koreader_progress_reset_devices",
+      "breakpoints": true
+    },
+    {
+      "idx": 72,
+      "version": "7",
+      "when": 1787372069937,
+      "tag": "0072_add_variable_font_axes",
+      "breakpoints": true
+    },
+    {
+      "idx": 73,
+      "version": "7",
+      "when": 1787378660967,
+      "tag": "0073_widen_font_weights",
+      "breakpoints": true
+    },
+    {
+      "idx": 74,
+      "version": "7",
+      "when": 1787522267109,
+      "tag": "0074_add_scan_jobs_library_started_at_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 75,
+      "version": "7",
+      "when": 1787530767419,
+      "tag": "0075_add_book_file_fixed_layout",
+      "breakpoints": true
+    },
+    {
+      "idx": 76,
+      "version": "7",
+      "when": 1787605916561,
+      "tag": "0076_add_series_index_labels",
+      "breakpoints": true
+    },
+    {
+      "idx": 77,
+      "version": "7",
+      "when": 1787678883089,
+      "tag": "0077_add_notification_coalescing",
+      "breakpoints": true
+    },
+    {
+      "idx": 78,
+      "version": "7",
+      "when": 1787689487276,
+      "tag": "0078_add_kobo_statistics_cursors",
+      "breakpoints": true
+    },
+    {
+      "idx": 79,
+      "version": "7",
+      "when": 1787777420432,
+      "tag": "0079_add_annotations_user_created_active_idx",
+      "breakpoints": true
+    },
+    {
+      "idx": 80,
+      "version": "7",
+      "when": 1787850415027,
+      "tag": "0080_add_book_metadata_cover_updated_at",
+      "breakpoints": true
+    },
+    {
+      "idx": 81,
+      "version": "7",
+      "when": 1787931558680,
+      "tag": "0081_add_public_collections",
+      "breakpoints": true
+    },
+    {
+      "idx": 82,
+      "version": "7",
+      "when": 1788151243360,
+      "tag": "0082_add_community_rating_count_filter_indexes",
+      "breakpoints": true
+    },
+    {
+      "idx": 83,
+      "version": "7",
+      "when": 1788194498208,
+      "tag": "0083_add_book_requests",
+      "breakpoints": true
+    },
+    {
+      "idx": 84,
+      "version": "7",
+      "when": 1788206528114,
+      "tag": "0084_add_scan_state_version",
+      "breakpoints": true
+    },
+    {
+      "idx": 85,
+      "version": "7",
+      "when": 1788321273908,
+      "tag": "0085_add_authentication_method",
+      "breakpoints": true
+    },
+    {
+      "idx": 86,
+      "version": "7",
+      "when": 1788884825211,
+      "tag": "0086_add_annotation_source_created_at",
+      "breakpoints": true
+    },
+    {
+      "idx": 87,
+      "version": "7",
+      "when": 1789055692244,
+      "tag": "0087_add_library_added_at_source",
+      "breakpoints": true
+    },
+    {
+      "idx": 88,
+      "version": "7",
+      "when": 1789098337223,
+      "tag": "0088_audiobook_contract_v2",
+      "breakpoints": true
+    },
+    {
+      "idx": 89,
+      "version": "7",
+      "when": 1789273281909,
+      "tag": "0089_add_newznab_nzbget",
+      "breakpoints": true
+    },
+    {
+      "idx": 90,
+      "version": "7",
+      "when": 1789316739511,
+      "tag": "0090_add_indexer_seed_goals",
+      "breakpoints": true
+    },
+    {
+      "idx": 91,
+      "version": "7",
+      "when": 1789366394767,
+      "tag": "0091_add_read_aloud_and_podcasts",
+      "breakpoints": true
+    },
+    {
+      "idx": 92,
+      "version": "7",
+      "when": 1789366475035,
+      "tag": "0092_narration_progress_columns",
+      "breakpoints": true
+    },
+    {
+      "idx": 93,
+      "version": "7",
+      "when": 1789366529464,
+      "tag": "0093_add_device_auth_sessions",
+      "breakpoints": true
+    },
+    {
+      "idx": 94,
+      "version": "7",
+      "when": 1789930465236,
+      "tag": "0094_add_book_duplicate_dismissals_and_sort_keys",
+      "breakpoints": true
+    },
+    {
+      "idx": 95,
+      "version": "7",
+      "when": 1789949424697,
+      "tag": "0095_add_sabnzbd_and_prowlarr_support",
+      "breakpoints": true
+    },
+    {
+      "idx": 96,
+      "version": "7",
+      "when": 1790119788880,
+      "tag": "0096_add_android_reading_session_source",
+      "breakpoints": true
+    },
+    {
+      "idx": 97,
+      "version": "7",
+      "when": 1790137565077,
+      "tag": "0097_add_book_covers",
+      "breakpoints": true
+    },
+    {
+      "idx": 98,
+      "version": "7",
+      "when": 1790398181669,
+      "tag": "0098_add_subtitle_search_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 99,
+      "version": "7",
+      "when": 1790446233976,
+      "tag": "0099_fractional_finished_threshold",
       "breakpoints": true
     }
   ]

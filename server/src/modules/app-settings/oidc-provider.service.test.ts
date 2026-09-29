@@ -1,5 +1,6 @@
 import { BadRequestException, ConflictException, Logger, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { OidcErrorCode } from '@bookorbit/types';
 
 vi.mock('../../common/utils/ssrf.utils', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../common/utils/ssrf.utils')>();
@@ -54,6 +55,7 @@ describe('OidcProviderService', () => {
   });
 
   afterEach(() => {
+    vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
 
@@ -192,7 +194,6 @@ describe('OidcProviderService', () => {
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(discoveryDoc) }));
       await service.testConnection('https://kc.example.com/realms/main');
       expect(vi.mocked(ensureSafeUrl)).toHaveBeenCalledWith('https://kc.example.com/realms/main', { allowLocal: true, allowPrivate: true });
-      vi.unstubAllGlobals();
     });
 
     it('passes allowLocal/allowPrivate=false in production by default', async () => {
@@ -200,7 +201,6 @@ describe('OidcProviderService', () => {
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(discoveryDoc) }));
       await prodService.testConnection('https://kc.example.com/realms/main');
       expect(vi.mocked(ensureSafeUrl)).toHaveBeenCalledWith('https://kc.example.com/realms/main', { allowLocal: false, allowPrivate: false });
-      vi.unstubAllGlobals();
     });
 
     it('passes allowLocal/allowPrivate=true in production when override is enabled', async () => {
@@ -208,7 +208,6 @@ describe('OidcProviderService', () => {
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(discoveryDoc) }));
       await prodService.testConnection('https://kc.example.com/realms/main');
       expect(vi.mocked(ensureSafeUrl)).toHaveBeenCalledWith('https://kc.example.com/realms/main', { allowLocal: true, allowPrivate: true });
-      vi.unstubAllGlobals();
     });
 
     it('re-throws PrivateAddressException as BadRequestException with OIDC_ALLOW_LOCAL_ISSUERS hint', async () => {
@@ -217,6 +216,7 @@ describe('OidcProviderService', () => {
       expect(err).toBeInstanceOf(BadRequestException);
       expect(err.getResponse()).toMatchObject({
         message: expect.stringContaining('OIDC_ALLOW_LOCAL_ISSUERS=true'),
+        errorCode: OidcErrorCode.PRIVATE_ISSUER_ADDRESS,
       });
     });
 
@@ -224,6 +224,57 @@ describe('OidcProviderService', () => {
       const original = new BadRequestException('Invalid URL');
       vi.mocked(ensureSafeUrl).mockRejectedValueOnce(original);
       await expect(service.testConnection('https://bad-url')).rejects.toBe(original);
+    });
+
+    it.each([
+      'CERT_UNTRUSTED',
+      'DEPTH_ZERO_SELF_SIGNED_CERT',
+      'SELF_SIGNED_CERT_IN_CHAIN',
+      'UNABLE_TO_GET_ISSUER_CERT',
+      'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+      'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+    ])('returns a structured error for nested TLS trust failure %s', async (code) => {
+      const tlsError = Object.assign(new Error('certificate verification failed'), { code });
+      vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('fetch failed', { cause: tlsError })));
+
+      const err = await service.testConnection('https://kc.example.com/realms/main').catch((error) => error);
+
+      expect(err).toBeInstanceOf(BadRequestException);
+      expect(err.getResponse()).toEqual({
+        message: 'The OIDC provider TLS certificate is not trusted by BookOrbit.',
+        errorCode: OidcErrorCode.TLS_CERTIFICATE_UNTRUSTED,
+      });
+    });
+
+    it('finds a TLS trust failure inside an aggregate fetch error', async () => {
+      const tlsError = Object.assign(new Error('unable to verify leaf signature'), { code: 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' });
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockRejectedValue(
+          Object.assign(new TypeError('fetch failed'), {
+            errors: [Object.assign(new Error('connection refused'), { code: 'ECONNREFUSED' }), tlsError],
+          }),
+        ),
+      );
+
+      const err = await service.testConnection('https://kc.example.com/realms/main').catch((error) => error);
+
+      expect(err.getResponse()).toMatchObject({ errorCode: OidcErrorCode.TLS_CERTIFICATE_UNTRUSTED });
+    });
+
+    it('keeps the existing generic response for unrelated fetch failures', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockRejectedValue(new TypeError('fetch failed', { cause: Object.assign(new Error('connection refused'), { code: 'ECONNREFUSED' }) })),
+      );
+
+      const err = await service.testConnection('https://kc.example.com/realms/main').catch((error) => error);
+
+      expect(err).toBeInstanceOf(BadRequestException);
+      expect(err.getResponse()).toMatchObject({
+        statusCode: 400,
+        message: 'OIDC connection test failed: fetch failed',
+      });
     });
   });
 });

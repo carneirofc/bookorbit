@@ -14,10 +14,10 @@ import {
   Trophy,
   MoreVertical,
   BadgeQuestionMark,
-  Star,
   ExternalLink,
   Sparkles,
   Languages,
+  Info,
 } from '@lucide/vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
@@ -33,17 +33,15 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-  DropdownMenuSub,
-  DropdownMenuSubContent,
-  DropdownMenuSubTrigger,
 } from '@/components/ui/dropdown-menu'
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet'
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 import AccentPicker from '@/components/AccentPicker.vue'
 import LanguagePicker from '@/components/LanguagePicker.vue'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import RadiusPicker from '@/components/RadiusPicker.vue'
 import BackgroundPicker from '@/components/BackgroundPicker.vue'
 import ThemePicker from '@/components/ThemePicker.vue'
+import SurfaceBrightnessPicker from '@/components/SurfaceBrightnessPicker.vue'
 import SurfacePicker from '@/components/SurfacePicker.vue'
 import { useGlobalSearch, type GlobalSearchResult } from '@/features/book/composables/useGlobalSearch'
 import BookCoverImage from '@/features/book/components/BookCoverImage.vue'
@@ -56,10 +54,12 @@ import NotificationSheet from '@/features/notifications/components/NotificationS
 import { useNotifications } from '@/features/notifications/composables/useNotifications'
 import { useWhatsNew } from '@/features/whats-new/composables/useWhatsNew'
 import UserAvatar from '@/components/UserAvatar.vue'
-import { DEFAULT_FORMAT_PRIORITY, LOCALE_LABELS, type Locale } from '@bookorbit/types'
+import { LOCALE_LABELS, Permission, type Locale } from '@bookorbit/types'
 import { useThemeStore } from '@/stores/theme'
 import { useLocaleStore } from '@/stores/locale'
-import { getFormatColor } from '@/features/book/lib/format-colors'
+import BookFormatChip from '@/features/book/components/BookFormatChip.vue'
+import { bookFormatEntries } from '@/features/book/lib/book-formats'
+import { useLegalNotices } from '@/components/legal/useLegalNotices'
 
 const { t } = useI18n()
 const router = useRouter()
@@ -72,10 +72,9 @@ const { subscribe: subscribeNotifications } = useNotifications()
 const { hasUnseen: hasUnseenWhatsNew } = useWhatsNew()
 const themeStore = useThemeStore()
 const localeStore = useLocaleStore()
+const { openLegalNotices } = useLegalNotices()
 const currentLanguageLabel = computed(() => LOCALE_LABELS[localeStore.locale])
 const documentationUrl = 'https://bookorbit.app/what-is-bookorbit'
-const githubRepositoryUrl = 'https://github.com/bookorbit/bookorbit'
-const githubStarPopoverOpen = ref(false)
 
 const iconRadiusClass = computed(() => (themeStore.radius === 'sharp' ? 'rounded-none' : 'rounded-full'))
 
@@ -113,7 +112,7 @@ function navigateToAchievements() {
 const canChangePassword = computed(
   () => !isDemoRestrictedAccount.value && user.value?.provisioningMethod !== 'oidc' && user.value?.provisioningMethod !== 'shared',
 )
-const canAccessNotifications = computed(() => hasPermission('notification_access') && !isDemoRestrictedAccount.value)
+const canAccessNotifications = computed(() => hasPermission(Permission.NotificationAccess) && !isDemoRestrictedAccount.value)
 const GLOBAL_SEARCH_ROW_HEIGHT = 84
 const GLOBAL_SEARCH_OVERSCAN = 4
 const GLOBAL_SEARCH_VIEWPORT_HEIGHT = 512
@@ -126,6 +125,7 @@ function navigateToSettings() {
   router.push({ name: 'settings-libraries' })
 }
 
+const appearanceSheetOpen = ref(false)
 const languageSheetOpen = ref(false)
 const languagePopoverOpen = ref(false)
 
@@ -142,6 +142,10 @@ async function selectLanguage(locale: Locale) {
 
 function openLanguageSheet() {
   languageSheetOpen.value = true
+}
+
+function openAppearanceSheet() {
+  appearanceSheetOpen.value = true
 }
 
 function navigateToWhatsNew() {
@@ -250,14 +254,6 @@ function closeMobileSearch() {
   clearSearch()
 }
 
-function handleGithubStarPopoverOpenChange(open: boolean) {
-  githubStarPopoverOpen.value = open
-}
-
-function closeGithubStarPopover() {
-  githubStarPopoverOpen.value = false
-}
-
 function navigateToResult(result: GlobalSearchResult) {
   clearSearch()
   mobileSearchOpen.value = false
@@ -340,34 +336,8 @@ function highlightSegments(text: string | null, query: string) {
   return parts.map((part) => ({ text: part, match: part.toLowerCase() === lower }))
 }
 
-function sortFormats(formats: string[]): string[] {
-  return [...formats].sort((a, b) => {
-    const aIndex = (DEFAULT_FORMAT_PRIORITY as readonly string[]).indexOf(a.toLowerCase())
-    const bIndex = (DEFAULT_FORMAT_PRIORITY as readonly string[]).indexOf(b.toLowerCase())
-
-    if (aIndex === -1 && bIndex === -1) return a.localeCompare(b)
-    if (aIndex === -1) return 1
-    if (bIndex === -1) return -1
-    return aIndex - bIndex
-  })
-}
-
-function resultFormats(result: GlobalSearchResult): string[] {
-  const formats = new Set<string>()
-  for (const file of result.files) {
-    const fmt = file.format?.toLowerCase()
-    if (fmt) formats.add(fmt)
-  }
-  return sortFormats([...formats])
-}
-
-function formatBadgeStyle(fmt: string) {
-  const color = getFormatColor(fmt)
-  return {
-    color,
-    backgroundColor: `color-mix(in oklch, ${color} 10%, transparent)`,
-    borderColor: `color-mix(in oklch, ${color} 20%, transparent)`,
-  }
+function resultFormatEntries(result: GlobalSearchResult) {
+  return bookFormatEntries(result.files)
 }
 </script>
 
@@ -426,7 +396,7 @@ function formatBadgeStyle(fmt: string) {
                 <BookCoverImage
                   :book-id="row.result.id"
                   type="thumbnail"
-                  :version="row.result.updatedAt"
+                  :version="row.result.coverVersion"
                   class="h-16 w-12 object-cover rounded shrink-0 bg-muted"
                   :alt="row.result.title ?? ''"
                 />
@@ -452,15 +422,13 @@ function formatBadgeStyle(fmt: string) {
                     </template>
                   </p>
                 </div>
-                <div v-if="resultFormats(row.result).length" class="flex shrink-0 gap-1">
-                  <span
-                    v-for="fmt in resultFormats(row.result)"
-                    :key="fmt"
-                    :class="['text-[11px] font-semibold px-1 py-0.5 rounded border uppercase']"
-                    :style="formatBadgeStyle(fmt)"
-                  >
-                    {{ fmt }}
-                  </span>
+                <div v-if="resultFormatEntries(row.result).length" class="flex shrink-0 gap-1">
+                  <BookFormatChip
+                    v-for="entry in resultFormatEntries(row.result)"
+                    :key="entry.key"
+                    :format-key="entry.key"
+                    class="gap-0.5 text-[11px] px-1 py-0.5 rounded"
+                  />
                 </div>
               </button>
             </div>
@@ -553,7 +521,7 @@ function formatBadgeStyle(fmt: string) {
                 <BookCoverImage
                   :book-id="row.result.id"
                   type="thumbnail"
-                  :version="row.result.updatedAt"
+                  :version="row.result.coverVersion"
                   class="h-16 w-12 object-cover rounded shrink-0 bg-muted"
                   :alt="row.result.title ?? ''"
                 />
@@ -579,15 +547,13 @@ function formatBadgeStyle(fmt: string) {
                     </template>
                   </p>
                 </div>
-                <div v-if="resultFormats(row.result).length" class="flex shrink-0 gap-1">
-                  <span
-                    v-for="fmt in resultFormats(row.result)"
-                    :key="fmt"
-                    :class="['text-[11px] font-semibold px-1 py-0.5 rounded border uppercase']"
-                    :style="formatBadgeStyle(fmt)"
-                  >
-                    {{ fmt }}
-                  </span>
+                <div v-if="resultFormatEntries(row.result).length" class="flex shrink-0 gap-1">
+                  <BookFormatChip
+                    v-for="entry in resultFormatEntries(row.result)"
+                    :key="entry.key"
+                    :format-key="entry.key"
+                    class="gap-0.5 text-[11px] px-1 py-0.5 rounded"
+                  />
                 </div>
               </button>
             </div>
@@ -608,11 +574,17 @@ function formatBadgeStyle(fmt: string) {
       </div>
 
       <!-- Right -->
-      <div class="ml-auto flex items-center gap-3">
+      <div class="ml-auto flex items-center gap-2">
         <!-- Mobile: search icon -->
         <Tooltip>
           <TooltipTrigger as-child>
-            <Button variant="ghost" size="icon" :class="['md:hidden', controlClass]" @click="mobileSearchOpen = true">
+            <Button
+              variant="ghost"
+              size="icon"
+              :class="['md:hidden', controlClass]"
+              :aria-label="t('common.search')"
+              @click="mobileSearchOpen = true"
+            >
               <Search :size="15" />
             </Button>
           </TooltipTrigger>
@@ -647,36 +619,10 @@ function formatBadgeStyle(fmt: string) {
 
             <DropdownMenuSeparator />
 
-            <DropdownMenuSub>
-              <DropdownMenuSubTrigger>
-                <Palette :size="15" class="mr-2 text-muted-foreground" />
-                {{ t('components.appHeader.appearance') }}
-              </DropdownMenuSubTrigger>
-              <DropdownMenuSubContent class="w-72 p-4">
-                <div class="space-y-4">
-                  <div class="space-y-1.5">
-                    <span class="text-[13px] text-muted-foreground">{{ t('components.appHeader.theme') }}</span>
-                    <ThemePicker />
-                  </div>
-                  <div class="space-y-1.5">
-                    <span class="text-[13px] text-muted-foreground">{{ t('components.appHeader.accent') }}</span>
-                    <AccentPicker />
-                  </div>
-                  <div class="space-y-1.5">
-                    <span class="text-[13px] text-muted-foreground">{{ t('components.appHeader.radius') }}</span>
-                    <RadiusPicker />
-                  </div>
-                  <div class="space-y-1.5">
-                    <span class="text-[13px] text-muted-foreground">{{ t('components.appHeader.surfaceOpacity') }}</span>
-                    <SurfacePicker />
-                  </div>
-                  <div class="space-y-1.5">
-                    <span class="text-[13px] text-muted-foreground">{{ t('components.appHeader.background') }}</span>
-                    <BackgroundPicker />
-                  </div>
-                </div>
-              </DropdownMenuSubContent>
-            </DropdownMenuSub>
+            <DropdownMenuItem @click="openAppearanceSheet">
+              <Palette :size="15" class="mr-2 text-muted-foreground" />
+              {{ t('components.appHeader.appearance') }}
+            </DropdownMenuItem>
 
             <DropdownMenuItem @click="openLanguageSheet">
               <Languages :size="15" class="mr-2 text-muted-foreground" />
@@ -703,11 +649,17 @@ function formatBadgeStyle(fmt: string) {
                 <ExternalLink :size="12" class="ml-auto text-muted-foreground" />
               </a>
             </DropdownMenuItem>
+            <DropdownMenuItem @click="openLegalNotices">
+              <Info :size="15" class="mr-2 text-muted-foreground" />
+              {{ t('components.legalNotices.about') }}
+            </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
 
+        <Separator orientation="vertical" class="hidden h-4 md:block" />
+
         <!-- Group 1: Content (Notifications, Statistics, Achievements, Upload) -->
-        <div class="hidden md:flex items-center gap-2.5">
+        <div class="hidden md:flex items-center gap-1.5">
           <NotificationSheet v-if="canAccessNotifications" :icon-radius-class="iconRadiusClass" />
 
           <Tooltip>
@@ -717,6 +669,7 @@ function formatBadgeStyle(fmt: string) {
                 variant="ghost"
                 size="icon"
                 :class="destinationClass(isStatisticsActive)"
+                :aria-label="t('components.appHeader.statistics')"
                 @click="navigateToStatistics"
               >
                 <BarChart3 :size="15" />
@@ -727,7 +680,13 @@ function formatBadgeStyle(fmt: string) {
 
           <Tooltip v-if="achievementsEnabled">
             <TooltipTrigger as-child>
-              <Button variant="ghost" size="icon" :class="destinationClass(isAchievementsActive)" @click="navigateToAchievements">
+              <Button
+                variant="ghost"
+                size="icon"
+                :class="destinationClass(isAchievementsActive)"
+                :aria-label="t('components.appHeader.achievements')"
+                @click="navigateToAchievements"
+              >
                 <Trophy :size="15" />
               </Button>
             </TooltipTrigger>
@@ -736,7 +695,14 @@ function formatBadgeStyle(fmt: string) {
 
           <Tooltip v-if="hasPermission('library_upload')">
             <TooltipTrigger as-child>
-              <Button data-tour="upload-button" variant="ghost" size="icon" :class="controlClass" @click="uploadOpen = true">
+              <Button
+                data-tour="upload-button"
+                variant="ghost"
+                size="icon"
+                :class="controlClass"
+                :aria-label="t('components.appHeader.uploadBooks')"
+                @click="uploadOpen = true"
+              >
                 <Upload :size="15" />
               </Button>
             </TooltipTrigger>
@@ -744,14 +710,20 @@ function formatBadgeStyle(fmt: string) {
           </Tooltip>
         </div>
 
-        <!-- Group 2: Preferences (Help, GitHub, Appearance, Language, Settings) -->
-        <Separator orientation="vertical" class="mx-1 hidden h-4 md:block" />
-        <div class="hidden md:flex items-center gap-2.5">
+        <!-- Group 2: Preferences (Help, Appearance, Language, Settings) -->
+        <Separator orientation="vertical" class="hidden h-4 md:block" />
+        <div class="hidden md:flex items-center gap-1.5">
           <Tooltip>
             <DropdownMenu>
               <TooltipTrigger as-child>
                 <DropdownMenuTrigger as-child>
-                  <Button data-tour="documentation-link" variant="ghost" size="icon" :class="['relative', controlClass]">
+                  <Button
+                    data-tour="documentation-link"
+                    variant="ghost"
+                    size="icon"
+                    :class="['relative', controlClass]"
+                    :aria-label="t('components.appHeader.help')"
+                  >
                     <BadgeQuestionMark :size="15" />
                     <span
                       v-if="hasUnseenWhatsNew"
@@ -774,52 +746,26 @@ function formatBadgeStyle(fmt: string) {
                   {{ t('components.appHeader.whatsNew') }}
                   <span v-if="hasUnseenWhatsNew" class="ml-auto h-1.5 w-1.5 rounded-full bg-primary" :aria-label="t('components.appHeader.new')" />
                 </DropdownMenuItem>
+                <DropdownMenuItem @click="openLegalNotices">
+                  <Info :size="14" class="mr-2 text-muted-foreground" />
+                  {{ t('components.legalNotices.about') }}
+                </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
             <TooltipContent>{{ t('components.appHeader.help') }}</TooltipContent>
           </Tooltip>
 
           <Tooltip>
-            <Popover :open="githubStarPopoverOpen" @update:open="handleGithubStarPopoverOpenChange">
-              <TooltipTrigger as-child>
-                <PopoverTrigger as-child>
-                  <Button data-tour="github-star-cta" variant="ghost" size="icon" :class="controlClass">
-                    <Star :size="15" />
-                  </Button>
-                </PopoverTrigger>
-              </TooltipTrigger>
-              <PopoverContent side="bottom" align="end" class="relative w-80 p-4">
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  class="absolute right-2 top-2 h-6 w-6 text-muted-foreground hover:text-foreground"
-                  :aria-label="t('common.close')"
-                  @click="closeGithubStarPopover"
-                >
-                  <X :size="13" />
-                </Button>
-                <div class="space-y-3 pr-5">
-                  <p class="text-[14px] font-medium text-foreground">{{ t('components.appHeader.githubStar.title') }}</p>
-                  <p class="text-[13px] leading-relaxed text-muted-foreground">
-                    {{ t('components.appHeader.githubStar.body') }}
-                  </p>
-                  <Button as-child class="w-full">
-                    <a :href="githubRepositoryUrl" target="_blank" rel="noopener noreferrer" class="inline-flex items-center justify-center gap-1.5">
-                      <span>{{ t('components.appHeader.githubStar.cta') }}</span>
-                      <ExternalLink :size="14" />
-                    </a>
-                  </Button>
-                </div>
-              </PopoverContent>
-            </Popover>
-            <TooltipContent>{{ t('components.appHeader.starOnGithub') }}</TooltipContent>
-          </Tooltip>
-
-          <Tooltip>
             <Popover>
               <TooltipTrigger as-child>
                 <PopoverTrigger as-child>
-                  <Button data-tour="appearance-picker" variant="ghost" size="icon" :class="controlClass">
+                  <Button
+                    data-tour="appearance-picker"
+                    variant="ghost"
+                    size="icon"
+                    :class="controlClass"
+                    :aria-label="t('components.appHeader.appearance')"
+                  >
                     <Palette :size="15" />
                   </Button>
                 </PopoverTrigger>
@@ -842,6 +788,10 @@ function formatBadgeStyle(fmt: string) {
                   <div class="space-y-1.5">
                     <span class="text-[13px] text-muted-foreground">{{ t('components.appHeader.surfaceOpacity') }}</span>
                     <SurfacePicker />
+                  </div>
+                  <div v-if="themeStore.resolvedTheme === 'dark'" class="space-y-1.5">
+                    <span class="text-[13px] text-muted-foreground">{{ t('settings.appearance.theme.surfaceBrightness.label') }}</span>
+                    <SurfaceBrightnessPicker />
                   </div>
                   <div class="space-y-1.5">
                     <span class="text-[13px] text-muted-foreground">{{ t('components.appHeader.background') }}</span>
@@ -877,7 +827,14 @@ function formatBadgeStyle(fmt: string) {
 
           <Tooltip>
             <TooltipTrigger as-child>
-              <Button data-tour="settings-nav" variant="ghost" size="icon" :class="controlClass" @click="navigateToSettings">
+              <Button
+                data-tour="settings-nav"
+                variant="ghost"
+                size="icon"
+                :class="controlClass"
+                :aria-label="t('components.appHeader.settings')"
+                @click="navigateToSettings"
+              >
                 <Settings :size="15" />
               </Button>
             </TooltipTrigger>
@@ -886,7 +843,7 @@ function formatBadgeStyle(fmt: string) {
         </div>
 
         <!-- Group 3: Identity (Avatar) -->
-        <Separator orientation="vertical" class="mx-1 hidden h-4 md:block" />
+        <Separator orientation="vertical" class="hidden h-4 md:block" />
         <DropdownMenu v-if="user">
           <DropdownMenuTrigger as-child>
             <button
@@ -928,10 +885,52 @@ function formatBadgeStyle(fmt: string) {
 
   <BookUploadModal v-if="uploadOpen" @close="uploadOpen = false" @uploaded="uploadOpen = false" />
 
+  <Sheet v-model:open="appearanceSheetOpen">
+    <SheetContent side="bottom" class="h-[85dvh] rounded-t-xl p-0">
+      <SheetHeader class="shrink-0 border-b border-border px-4 py-3 text-start">
+        <SheetTitle class="text-base">{{ t('components.appHeader.appearance') }}</SheetTitle>
+        <SheetDescription class="sr-only">{{ t('components.appHeader.appearanceDescription') }}</SheetDescription>
+      </SheetHeader>
+      <div class="min-h-0 flex-1 space-y-2 overflow-y-auto px-3 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+        <section class="space-y-2 rounded-lg border border-border bg-card p-3">
+          <h3 class="text-xs font-medium text-foreground">{{ t('components.appHeader.theme') }}</h3>
+          <ThemePicker touch />
+        </section>
+
+        <section class="space-y-2 rounded-lg border border-border bg-card p-3">
+          <h3 class="text-xs font-medium text-foreground">{{ t('components.appHeader.accent') }}</h3>
+          <AccentPicker touch />
+        </section>
+
+        <section class="space-y-2 rounded-lg border border-border bg-card p-3">
+          <h3 class="text-xs font-medium text-foreground">{{ t('components.appHeader.radius') }}</h3>
+          <RadiusPicker touch />
+        </section>
+
+        <section class="space-y-3 rounded-lg border border-border bg-card p-3">
+          <div class="space-y-2">
+            <h3 class="text-xs font-medium text-foreground">{{ t('components.appHeader.surfaceOpacity') }}</h3>
+            <SurfacePicker />
+          </div>
+          <div v-if="themeStore.resolvedTheme === 'dark'" class="space-y-2 border-t border-border pt-3">
+            <h3 class="text-xs font-medium text-foreground">{{ t('settings.appearance.theme.surfaceBrightness.label') }}</h3>
+            <SurfaceBrightnessPicker />
+          </div>
+        </section>
+
+        <section class="space-y-2 rounded-lg border border-border bg-card p-3">
+          <h3 class="text-xs font-medium text-foreground">{{ t('components.appHeader.background') }}</h3>
+          <BackgroundPicker touch />
+        </section>
+      </div>
+    </SheetContent>
+  </Sheet>
+
   <Sheet v-model:open="languageSheetOpen">
     <SheetContent side="bottom" class="h-[85dvh] rounded-t-xl px-2 pb-2">
       <SheetHeader class="pb-1">
         <SheetTitle>{{ t('settings.appearance.language.label') }}</SheetTitle>
+        <SheetDescription class="sr-only">{{ t('settings.appearance.language.description') }}</SheetDescription>
       </SheetHeader>
       <LanguagePicker :autofocus="false" class="min-h-0 flex-1" @select="selectLanguage" />
     </SheetContent>

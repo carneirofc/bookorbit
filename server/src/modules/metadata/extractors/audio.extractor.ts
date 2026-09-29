@@ -1,15 +1,18 @@
 import { execFile as execFileCallback, spawn } from 'child_process';
 import { promisify } from 'util';
-import type { AudiobookChapter } from '@bookorbit/types';
+import { parseSeriesIndex as parseSeriesIndexLabel, type AudiobookChapter } from '@bookorbit/types';
 import { parsePublishedDateKey, parsePublishedYear, publishedYearFromDateKey } from '../../../common/utils/published-date.utils';
 
 const execFile = promisify(execFileCallback);
 
 const FFPROBE_PATH = process.env.FFPROBE_PATH || 'ffprobe';
 const FFMPEG_PATH = process.env.FFMPEG_PATH || 'ffmpeg';
+// A chapter-rich audiobook prints far more than execFile's 1 MB default, and an overflow there
+// would surface as a failed read of a perfectly good file.
+const FFPROBE_OUTPUT_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
+const MAX_EMBEDDED_COVER_BYTES = 32 * 1_024 * 1_024;
 
 const FF_TIMEOUT_MS = 60_000;
-const FF_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 // Restrict the decoder to local file access. A crafted media file that embeds an
 // HLS/concat playlist would otherwise turn ffmpeg into an SSRF and local-file-read
 // primitive; both listed protocols are local-only.
@@ -26,13 +29,18 @@ export interface AudioExtractResult {
   description: string | null;
   language: string | null;
   seriesName: string | null;
-  seriesIndex: number | null;
+  seriesIndex: string | null;
   genres: string[];
   audibleId: string | null;
   librofmId: string | null;
   durationSeconds: number | null;
   chapters: AudiobookChapter[];
   coverBytes: Buffer | null;
+}
+
+export interface AudioChapterProbe {
+  chapters: AudiobookChapter[];
+  durationMs: number | null;
 }
 
 interface FfprobeStream {
@@ -55,12 +63,14 @@ interface FfprobeOutput {
   chapters?: FfprobeChapter[];
 }
 
-export async function extractAudioMetadata(absolutePath: string): Promise<AudioExtractResult> {
+// Null means the file could not be read, which is not the same as a file that carries no tags:
+// callers persist what they get, so a failed read must never be mistaken for empty metadata.
+export async function extractAudioMetadata(absolutePath: string): Promise<AudioExtractResult | null> {
   try {
     const { stdout } = await execFile(
       FFPROBE_PATH,
       [...FF_PROTOCOL_ARGS, '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_chapters', '-show_streams', absolutePath],
-      { timeout: FF_TIMEOUT_MS, maxBuffer: FF_MAX_BUFFER_BYTES },
+      { timeout: FF_TIMEOUT_MS, maxBuffer: FFPROBE_OUTPUT_MAX_BUFFER_BYTES },
     );
 
     const data: FfprobeOutput = JSON.parse(stdout);
@@ -108,11 +118,7 @@ export async function extractAudioMetadata(absolutePath: string): Promise<AudioE
     const librofmId = tagValue(tags, 'librofm_isbn');
     const durationSeconds = parseDurationSeconds(data.format?.duration);
 
-    const mappedChapters: AudiobookChapter[] = chapters.flatMap((ch) => {
-      const startMs = parseChapterStartMs(ch.start_time);
-      if (startMs === null) return [];
-      return [{ title: ch.tags?.title ?? '', startMs }];
-    });
+    const mappedChapters = mapChapters(chapters);
 
     const coverBytes = await extractCoverBytes(absolutePath, streams);
 
@@ -136,7 +142,7 @@ export async function extractAudioMetadata(absolutePath: string): Promise<AudioE
       coverBytes,
     };
   } catch {
-    return emptyResult();
+    return null;
   }
 }
 
@@ -144,10 +150,51 @@ export async function parseAudioDuration(absolutePath: string): Promise<number |
   try {
     const { stdout } = await execFile(FFPROBE_PATH, [...FF_PROTOCOL_ARGS, '-v', 'quiet', '-print_format', 'json', '-show_format', absolutePath], {
       timeout: FF_TIMEOUT_MS,
-      maxBuffer: FF_MAX_BUFFER_BYTES,
+      maxBuffer: FFPROBE_OUTPUT_MAX_BUFFER_BYTES,
     });
     const data: FfprobeOutput = JSON.parse(stdout);
     return parseDurationSeconds(data.format?.duration);
+  } catch {
+    return null;
+  }
+}
+
+// Chapters and length only: the merge pass for multi-file audiobooks needs both from every file,
+// and a full extract would also pull tags and cover art it has no use for.
+export async function probeAudioChapters(absolutePath: string): Promise<AudioChapterProbe> {
+  try {
+    const { stdout } = await execFile(
+      FFPROBE_PATH,
+      [...FF_PROTOCOL_ARGS, '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_chapters', absolutePath],
+      {
+        timeout: FF_TIMEOUT_MS,
+        maxBuffer: FFPROBE_OUTPUT_MAX_BUFFER_BYTES,
+      },
+    );
+    const data: FfprobeOutput = JSON.parse(stdout);
+    return { chapters: mapChapters(data.chapters ?? []), durationMs: parseDurationMs(data.format?.duration) };
+  } catch {
+    return { chapters: [], durationMs: null };
+  }
+}
+
+function mapChapters(chapters: FfprobeChapter[]): AudiobookChapter[] {
+  return chapters.flatMap((ch) => {
+    const startMs = parseChapterStartMs(ch.start_time);
+    if (startMs === null) return [];
+    return [{ title: ch.tags?.title ?? '', startMs }];
+  });
+}
+
+/** Reads only the embedded picture, for callers that need a cover without the rest of the tags. */
+export async function extractAudioCover(absolutePath: string): Promise<Buffer | null> {
+  try {
+    const { stdout } = await execFile(FFPROBE_PATH, [...FF_PROTOCOL_ARGS, '-v', 'quiet', '-print_format', 'json', '-show_streams', absolutePath], {
+      timeout: FF_TIMEOUT_MS,
+      maxBuffer: FFPROBE_OUTPUT_MAX_BUFFER_BYTES,
+    });
+    const data: FfprobeOutput = JSON.parse(stdout);
+    return await extractCoverBytes(absolutePath, data.streams ?? []);
   } catch {
     return null;
   }
@@ -159,12 +206,15 @@ async function extractCoverBytes(absolutePath: string, streams: FfprobeStream[])
 
   return new Promise<Buffer | null>((resolve) => {
     const chunks: Buffer[] = [];
-    let total = 0;
+    let totalBytes = 0;
     let settled = false;
     const proc = spawn(
       FFMPEG_PATH,
       [...FF_PROTOCOL_ARGS, '-y', '-i', absolutePath, '-map', '0:v', '-frames:v', '1', '-f', 'image2pipe', '-vcodec', 'mjpeg', 'pipe:1'],
-      { stdio: ['ignore', 'pipe', 'ignore'], timeout: FF_TIMEOUT_MS },
+      {
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: FF_TIMEOUT_MS,
+      },
     );
 
     const finish = (value: Buffer | null) => {
@@ -172,18 +222,23 @@ async function extractCoverBytes(absolutePath: string, streams: FfprobeStream[])
       settled = true;
       resolve(value);
     };
-
     proc.stdout.on('data', (chunk: Buffer) => {
-      total += chunk.length;
-      // A crafted stream could emit an unbounded frame; stop buffering and kill it.
-      if (total > FF_MAX_BUFFER_BYTES) {
-        proc.kill('SIGKILL');
+      totalBytes += chunk.length;
+      if (totalBytes > MAX_EMBEDDED_COVER_BYTES) {
+        proc.kill();
+        chunks.length = 0;
         finish(null);
         return;
       }
       chunks.push(chunk);
     });
-    proc.on('close', (code) => finish(code === 0 && chunks.length > 0 ? Buffer.concat(chunks) : null));
+    proc.on('close', (code) => {
+      if (code === 0 && chunks.length > 0) {
+        finish(Buffer.concat(chunks, totalBytes));
+      } else {
+        finish(null);
+      }
+    });
     proc.on('error', () => finish(null));
   });
 }
@@ -237,15 +292,22 @@ function parseDurationSeconds(raw: string | undefined): number | null {
   return Number.isFinite(parsed) ? Math.round(parsed) : null;
 }
 
+// Milliseconds, not the rounded seconds stored per file: chapter offsets accumulate across files,
+// so half-second rounding errors would compound down the book.
+function parseDurationMs(raw: string | undefined): number | null {
+  if (!raw) return null;
+  const parsed = Number.parseFloat(raw);
+  return Number.isFinite(parsed) ? Math.round(parsed * 1000) : null;
+}
+
 function parseChapterStartMs(raw: string): number | null {
   const parsed = Number.parseFloat(raw);
   return Number.isFinite(parsed) ? Math.round(parsed * 1000) : null;
 }
 
-function parseSeriesIndex(raw: string | null): number | null {
+function parseSeriesIndex(raw: string | null): string | null {
   if (!raw) return null;
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) ? parsed : null;
+  return parseSeriesIndexLabel(raw);
 }
 
 function resolveDescription(...values: (string | null)[]): string | null {
@@ -271,26 +333,4 @@ function normalizeLanguageValue(value: string | null): string | null {
   if (!normalized) return null;
   const lower = normalized.toLowerCase();
   return lower === 'und' || lower === 'unknown' ? null : normalized;
-}
-
-function emptyResult(): AudioExtractResult {
-  return {
-    title: null,
-    subtitle: null,
-    authors: [],
-    narrators: [],
-    publisher: null,
-    publishedDate: null,
-    publishedYear: null,
-    description: null,
-    language: null,
-    seriesName: null,
-    seriesIndex: null,
-    genres: [],
-    audibleId: null,
-    librofmId: null,
-    durationSeconds: null,
-    chapters: [],
-    coverBytes: null,
-  };
 }

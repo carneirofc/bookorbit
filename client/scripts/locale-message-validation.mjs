@@ -101,8 +101,17 @@ export function analyzeIcuMessage(message) {
   }
 }
 
+// Every plural in the catalogs counts whole items, and a library tops out well below a million.
+// CLDR still lists categories that only fractional counts (Czech and Slovak `many`) or counts of a
+// million and over (Spanish, French, Italian and Portuguese `many`) can ever select, so demanding a
+// translation for them rejects otherwise correct Crowdin exports for a branch that cannot render.
+// Sampling 0..1000 selects exactly the categories every integer below a million selects.
+const REACHABLE_COUNT_SAMPLE = Array.from({ length: 1001 }, (_, index) => index)
+
 function pluralCategories(locale, type) {
-  return new Intl.PluralRules(locale, { type }).resolvedOptions().pluralCategories
+  const rules = new Intl.PluralRules(locale, { type })
+  const reachable = new Set(REACHABLE_COUNT_SAMPLE.map((count) => rules.select(count)))
+  return rules.resolvedOptions().pluralCategories.filter((category) => reachable.has(category))
 }
 
 function exactSelectors(selectors) {
@@ -153,6 +162,57 @@ function pluralOptionPounds(elements) {
   }
 
   return totals
+}
+
+// A translator types the whole ICU message by hand, so a locale with more plural categories than
+// English loses every plural to a missing branch: Romanian arrived with `one` and `other` for all 156
+// of its plurals and rendered English for every one of them. The branch a translator writes as
+// `other` is the one a reader sees for small counts, so copying it into the missing categories keeps
+// the message in its own language, and the copy disappears as soon as Crowdin carries a real branch.
+function pluralElements(elements, found = []) {
+  for (const element of elements) {
+    if (element.type === TYPE.plural) found.push(element)
+    if (element.type === TYPE.select || element.type === TYPE.plural) {
+      for (const option of Object.values(element.options)) pluralElements(option.value, found)
+    }
+    if (element.type === TYPE.tag) pluralElements(element.children, found)
+  }
+  return found
+}
+
+export function completePluralCategories({ locale, message }) {
+  if (!isIcuPluralMessage(message)) return null
+
+  let elements
+  try {
+    elements = parse(message, { captureLocation: true })
+  } catch {
+    return null
+  }
+
+  const insertions = []
+  for (const element of pluralElements(elements)) {
+    const other = element.options.other
+    if (!other) continue
+
+    const missing = pluralCategories(locale, element.pluralType).filter((category) => !(category in element.options))
+    if (missing.length === 0) continue
+
+    const text = message.slice(other.location.start.offset + 1, other.location.end.offset - 1)
+    insertions.push({
+      offset: other.location.end.offset,
+      text: missing.map((category) => ` ${category} {${text}}`).join(''),
+    })
+  }
+
+  if (insertions.length === 0) return null
+
+  let completed = message
+  for (const { offset, text } of insertions.sort((first, second) => second.offset - first.offset)) {
+    completed = `${completed.slice(0, offset)}${text}${completed.slice(offset)}`
+  }
+
+  return completed
 }
 
 export function validateSlotCountMessage({ key, locale, message }) {

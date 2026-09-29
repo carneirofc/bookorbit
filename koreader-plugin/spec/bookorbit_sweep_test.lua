@@ -167,6 +167,222 @@ do
         "a candidate-less matched book with no stamp is refreshed by the sweep")
 end
 
+-- An HTTP response proves that the server was reachable. It must not be
+-- collapsed into the transport-error path and shown as an offline failure.
+do
+    local harness = SweepHarness.install{
+        books = { { md5 = "aaa", id = 1, title = "A", last_open = 100 } },
+        match_error = 400,
+    }
+    local Sweep = require("bookorbit_sweep")
+
+    local _, result = startSweep(harness, Sweep)
+    harness.scheduler:drain()
+
+    local finished, err = result()
+    assertEqual(finished, true, "a rejected sweep reports completion")
+    assertEqual(err, "server", "an HTTP rejection is classified as a server failure")
+    assertEqual(harness.shown.text, "BookOrbit sync: server request failed.",
+        "an HTTP rejection is not presented as an unreachable server")
+    assertEqual(harness.calls.sweep_complete, 0, "a rejected match phase is not recorded as a completed sweep")
+end
+
+-- A library recreation can replace a server file without an intervening
+-- unmatched response. The rematch must reset the old target's cursor before
+-- the statistics queue is built, then retain the new server acknowledgment.
+do
+    local state = {
+        books = {
+            aaa = {
+                bookId = 1,
+                fileId = 11,
+                file = "/books/a.epub",
+                statsWatermark = 1000,
+                annWatermark = "2026-01-01 10:00:00",
+                annCount = 2,
+                sidecarMtime = 100,
+                matchVerifiedAt = NOW - 2 * DAY,
+                matchVerifiedVersion = "v1",
+            },
+        },
+        global = { libraryVersion = "v1" },
+    }
+    local harness = SweepHarness.install{
+        books = { { md5 = "aaa", id = 1, title = "A", last_open = 100 } },
+        events = { [1] = { { page = 4, start_time = 500 } } },
+        library_version = "v2",
+        matches = { aaa = { bookId = 2, bookFileId = 22 } },
+        state = state,
+        sidecar = {
+            sidecarMtime = function() return 100 end,
+            extract = function()
+                return {
+                    annotations = { { datetime = "2025-01-01 10:00:00", text = "A highlight" } },
+                    annotations_count = 1,
+                    annotations_max_datetime = "2025-01-01 10:00:00",
+                    annotations_signature = "new-signature",
+                    bookmarks = {},
+                    bookmarks_signature = "empty-bookmarks",
+                }
+            end,
+        },
+        page_stats_response = function(books)
+            return {
+                results = { { hash = books[1].hash, watermark = books[1].events[1].startTime } },
+                unmatched = {},
+            }
+        end,
+    }
+    local Sweep = require("bookorbit_sweep")
+
+    startSweep(harness, Sweep)
+    harness.scheduler:drain()
+
+    assertEqual(#harness.calls.page_stats, 1, "a replacement server file receives historical reading data")
+    assertEqual(#harness.calls.page_stats[1][1].events, 1, "the historical event is included in the upload")
+    assertEqual(harness.calls.page_stats[1][1].events[1].startTime, 500, "the event predates the old target's watermark")
+    assertEqual(harness.state.books.aaa.fileId, 22, "the replacement server file id is stored")
+    assertEqual(harness.state.books.aaa.statsWatermark, 500, "the replacement target stores the acknowledged watermark")
+    assertEqual(#harness.calls.annotation_exchanges, 1, "a replacement server file forces an annotation exchange")
+    assertEqual(#harness.calls.annotation_exchanges[1].annotations, 1, "the replacement exchange carries the local annotation")
+    assertEqual(harness.state.books.aaa.sidecarMtime, 100, "the replacement target stores the newly delivered sidecar marker")
+
+    startSweep(harness, Sweep)
+    harness.scheduler:drain()
+    assertEqual(#harness.calls.page_stats, 1, "the acknowledged history is not uploaded again")
+    assertEqual(#harness.calls.annotation_exchanges, 1, "the acknowledged sidecar is not exchanged again")
+end
+
+-- A path mapped to another matched book is a stale identity signal. The sweep
+-- samples only that conflicted file, repairs the map, and carries the file id
+-- already verified for the actual digest into the recovery match.
+do
+    local file = "/books/repaired.epub"
+    local actual = "md5-" .. file
+    local harness = SweepHarness.install{
+        books = { { md5 = actual, id = 9, title = "Recovered", last_open = 500 } },
+        history = { { file = file, time = 500, text = "Recovered" } },
+        library_version = "v1",
+        state = {
+            books = {
+                stale = {
+                    bookId = 1, fileId = 11, file = "/books/different.epub",
+                    matchVerifiedAt = NOW, matchVerifiedVersion = "v1",
+                },
+                [actual] = {
+                    bookId = 2, fileId = 22, file = file,
+                    matchVerifiedAt = NOW - 2 * DAY, matchVerifiedVersion = "v1",
+                },
+            },
+            files = { [file] = "stale" },
+            global = { libraryVersion = "v1" },
+        },
+    }
+    local Sweep = require("bookorbit_sweep")
+
+    startSweep(harness, Sweep)
+    harness.scheduler:drain()
+
+    assertEqual(harness.state.files[file], actual, "sweep repairs the stale path digest")
+    assertEqual(harness.calls.match_candidates[1][actual].book_file_id, 22,
+        "sweep recovery carries only the actual digest's verified file id")
+end
+
+-- Statistics rows that share a partial MD5 keep independent server targets
+-- and watermarks. The older cursor for one book must not hide newer reading
+-- from another book in the collision group.
+do
+    local hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    local harness = SweepHarness.install{
+        books = {
+            { md5 = hash, id = 41, title = "Collision One", authors = "Author A", last_open = 500 },
+            { md5 = hash, id = 42, title = "Collision Two", authors = "Author B", last_open = 600 },
+        },
+        events = {
+            [41] = { { page = 1, start_time = 500 } },
+            [42] = { { page = 2, start_time = 600 } },
+        },
+        library_version = "v1",
+        state = {
+            books = {
+                [hash] = {
+                    bookId = 1, fileId = 11, statsWatermark = 900,
+                    matchVerifiedAt = NOW, matchVerifiedVersion = "v1",
+                },
+            },
+            statsRows = {
+                ["41"] = {
+                    md5 = hash, title = "Collision One", authors = "Author A",
+                    bookId = 1, bookFileId = 11, statsWatermark = 550,
+                },
+                ["42"] = {
+                    md5 = hash, title = "Collision Two", authors = "Author B",
+                    bookId = 2, bookFileId = 22, statsWatermark = 0,
+                },
+            },
+            global = { libraryVersion = "v1" },
+        },
+        page_stats_response = function(books)
+            return {
+                results = { { hash = books[1].hash, watermark = books[1].events[1].startTime } },
+                unmatched = {},
+            }
+        end,
+    }
+    local Sweep = require("bookorbit_sweep")
+
+    startSweep(harness, Sweep)
+    harness.scheduler:drain()
+
+    assertEqual(#harness.calls.page_stats, 1, "only the collision row with new events uploads")
+    assertEqual(harness.calls.page_stats[1][1].bookFileId, 22,
+        "the collision row carries its independently verified server file id")
+    assertEqual(harness.calls.page_stats[1][1].events[1].startTime, 600,
+        "the other collision row's newer watermark does not suppress this event")
+    assertEqual(harness.state.statsRows["41"].statsWatermark, 550,
+        "the unchanged collision row keeps its own watermark")
+    assertEqual(harness.state.statsRows["42"].statsWatermark, 600,
+        "the uploaded collision row advances only its own watermark")
+end
+
+-- Never guess a server target for a collision row. It stays pending and the
+-- successful sweep tells the user exactly how to establish the missing link.
+do
+    local hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    local harness = SweepHarness.install{
+        books = {
+            { md5 = hash, id = 51, title = "Known", authors = "Author A", last_open = 500 },
+            { md5 = hash, id = 52, title = "Needs Link", authors = "Author B", last_open = 600 },
+        },
+        events = { [52] = { { page = 2, start_time = 600 } } },
+        library_version = "v1",
+        state = {
+            books = {
+                [hash] = {
+                    bookId = 1, fileId = 11, statsWatermark = 0,
+                    matchVerifiedAt = NOW, matchVerifiedVersion = "v1",
+                },
+            },
+            statsRows = {
+                ["51"] = {
+                    md5 = hash, title = "Known", authors = "Author A",
+                    bookId = 1, bookFileId = 11, statsWatermark = 0,
+                },
+            },
+            global = { libraryVersion = "v1" },
+        },
+    }
+    local Sweep = require("bookorbit_sweep")
+
+    startSweep(harness, Sweep)
+    harness.scheduler:drain()
+
+    assertEqual(#harness.calls.page_stats, 0, "an unbound collision row is never attributed by guesswork")
+    assert(harness.shown.text:find("1 books need to be opened and synced once", 1, true),
+        "the completed sweep exposes the recovery action")
+    assertEqual(harness.calls.sweep_complete, 1, "the diagnostic does not turn safe deferral into a failed sweep")
+end
+
 -- Cancellation stops the run at its next yield: the step already scheduled
 -- runs, sees it is no longer the current generation and writes nothing.
 do

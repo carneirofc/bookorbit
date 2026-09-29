@@ -22,6 +22,7 @@ export interface HardcoverSearchDocument {
   subtitle?: string;
   description?: string;
   author_names?: string[];
+  contributions?: HardcoverCachedContributor[];
   isbns?: string[];
   pages?: number;
   release_date?: string;
@@ -51,6 +52,7 @@ export interface HardcoverBookWithEditions {
   subtitle?: string;
   description?: string;
   cached_contributors?: HardcoverCachedContributor[];
+  cached_tags?: HardcoverCachedTags | null;
   featured_book_series?: {
     series?: {
       name?: string;
@@ -65,6 +67,11 @@ export interface HardcoverBookWithEditions {
   release_year?: number;
   image?: HardcoverImage;
   editions?: HardcoverEdition[];
+}
+
+export interface HardcoverCachedTags {
+  Genre?: unknown;
+  [category: string]: unknown;
 }
 
 export interface HardcoverEdition {
@@ -94,4 +101,6 @@ export interface HardcoverCachedContributor {
 
 export interface HardcoverImage {
   url?: string;
+  width?: number | null;
+  height?: number | null;
 }

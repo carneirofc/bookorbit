@@ -28,12 +28,16 @@ local safeFilenameBase = CatalogUtil.safeFilenameBase
 
 local CatalogDownload = {}
 
-local function sanitizeDevicePath(device_path)
+local function sanitizeDevicePath(device_path, download_dir)
     local normalized = tostring(device_path or ""):gsub("\\", "/"):gsub("^/+", "")
     local segments = {}
     for segment in normalized:gmatch("[^/]+") do
         if segment == ".." then return nil end
-        if segment ~= "." then table.insert(segments, segment) end
+        if segment ~= "." then
+            local safe_segment = util.getSafeFilename(segment, download_dir)
+            if not safe_segment or safe_segment == "" or safe_segment == "." or safe_segment == ".." then return nil end
+            table.insert(segments, safe_segment)
+        end
     end
     if #segments == 0 then return nil end
     return table.concat(segments, "/")
@@ -44,7 +48,7 @@ local function joinDownloadPath(download_dir, relative_path)
 end
 
 local function resolveRelativeDownloadPath(download_dir, filename, filetype, device_path, filename_override)
-    local relative = sanitizeDevicePath(device_path)
+    local relative = sanitizeDevicePath(device_path, download_dir)
     if relative and not filename_override then return relative end
 
     local parent = relative and relative:match("^(.*)/[^/]+$")
@@ -375,7 +379,7 @@ function CatalogDownload.install(Catalog)
                 return
             end
 
-            local linked = self:linkDownloadedFile(local_path)
+            local linked = self:linkDownloadedFile(local_path, file)
             if linked then
                 self:refreshOnDevice()
                 if self.markStackDirty then self:markStackDirty() end
@@ -391,14 +395,18 @@ function CatalogDownload.install(Catalog)
         end)
     end
 
-    function Catalog:linkDownloadedFile(local_path)
+    function Catalog:linkDownloadedFile(local_path, file)
         local ok, digest = pcall(util.partialMD5, local_path)
         if not ok or not digest then
             logger.warn("BookOrbit: downloaded file partial MD5 failed", local_path)
             return false
         end
 
-        local body, err = self.client:matchCheck({ digest }, { [digest] = { source = "file" } })
+        local candidate = { source = "file" }
+        if file and file.id then
+            candidate.book_file_id = file.id
+        end
+        local body, err = self.client:matchCheck({ digest }, { [digest] = candidate })
         if not body then
             logger.warn("BookOrbit: downloaded file match-check failed", err)
             return false
@@ -425,7 +433,7 @@ function CatalogDownload.install(Catalog)
     end
 
     function Catalog:showDownloadedDialog(local_path, linked)
-        local message = linked and _("File saved and linked to BookOrbit sync:\n%1\n\nOpen now?")
+        local message = linked and _("File saved and linked for BookOrbit progress sync:\n%1\n\nOpen now?")
             or _("File saved:\n%1\n\nOpen now?")
         UIManager:nextTick(function()
             UIManager:show(ConfirmBox:new{

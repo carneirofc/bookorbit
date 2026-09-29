@@ -14,13 +14,14 @@ import {
   Query,
   Req,
   Res,
+  Put,
 } from '@nestjs/common';
 import { createReadStream } from 'fs';
 import { access } from 'fs/promises';
 import { Readable } from 'stream';
 import type { FastifyReply } from 'fastify';
-import { CHUNK_UPLOAD_HEADER, MAX_CHUNK_BYTES, Permission } from '@bookorbit/types';
-import type { BookDockMetadata, ChunkUploadProgressResponse } from '@bookorbit/types';
+import { Permission } from '@bookorbit/types';
+import type { BookDockMetadata } from '@bookorbit/types';
 
 import { AuditAction, AuditResource } from '@bookorbit/types';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -35,6 +36,7 @@ import { BookDockIngestService } from './book-dock-ingest.service';
 import { BookDockFinalizeService } from './book-dock-finalize.service';
 import { BookDockWatcherService } from './book-dock-watcher.service';
 import { ListBookDockFilesDto } from './dto/list-book-dock-files.dto';
+import { UpdateBookDockSettingsDto } from './dto/update-book-dock-settings.dto';
 import {
   UpdateBookDockFileDto,
   FinalizeBookDockDto,
@@ -47,7 +49,6 @@ import {
   SelectionSummaryDto,
 } from './dto/index';
 import { AppSettingsService } from '../app-settings/app-settings.service';
-import { parseChunkUploadFields } from '../upload/upload-chunk.fields';
 
 @Controller('book-dock')
 @RequirePermission(Permission.BookDockAccess)
@@ -65,6 +66,7 @@ export class BookDockController {
     return this.service.listFiles({
       status: query.status,
       needsReview: query.needsReview,
+      readyToFile: query.readyToFile,
       page: query.page ?? 1,
       limit: query.limit ?? 20,
       sort: query.sort ?? 'createdAt',
@@ -92,6 +94,23 @@ export class BookDockController {
   @HttpCode(HttpStatus.OK)
   resume() {
     return this.service.resumeProcessing();
+  }
+
+  @Get('settings')
+  @RequirePermission(Permission.ManageBookDock)
+  getSettings() {
+    return this.appSettings.getBookDockSettings();
+  }
+
+  @Put('settings')
+  @RequirePermission(Permission.ManageBookDock)
+  @Auditable({
+    action: AuditAction.AppSettingsUpdate,
+    resource: AuditResource.AppSettings,
+    description: 'Updated Book Dock settings',
+  })
+  updateSettings(@Body() dto: UpdateBookDockSettingsDto) {
+    return this.appSettings.updateBookDockSettings(dto);
   }
 
   @Get('statistics')
@@ -124,53 +143,11 @@ export class BookDockController {
   @HttpCode(HttpStatus.CREATED)
   async upload(@CurrentUser() user: RequestUser, @Req() req: MultipartRequest) {
     const limitMb = await this.appSettings.getMaxUploadSizeMb();
-
-    // The multipart limit has to be picked before the body is parsed, so chunking is
-    // signalled by a header rather than a form field. Without this a single "chunk"
-    // could legally be as large as an entire allowed file.
-    const isChunk = typeof req.headers[CHUNK_UPLOAD_HEADER] === 'string';
-    const data = await req.file({
-      limits: { fileSize: isChunk ? MAX_CHUNK_BYTES : limitMb * 1024 * 1024, files: 1, fields: 12, fieldSize: 1024, parts: 20 },
-    });
+    const data = await req.file({ limits: { fileSize: limitMb * 1024 * 1024 } });
     if (!data) throw new BadRequestException('No file provided');
-
-    const chunk = parseChunkUploadFields(data.fields);
-
-    if (chunk) {
-      const result = await this.ingestService.ingestChunk({
-        uploadId: chunk.uploadId,
-        userId: user.id,
-        rawFilename: chunk.fileName ?? data.filename,
-        chunkIndex: chunk.chunkIndex,
-        totalChunks: chunk.totalChunks,
-        chunkSize: chunk.chunkSize,
-        totalSize: chunk.totalSize,
-        chunkSha256: chunk.chunkSha256,
-        chunkStream: data.file as unknown as Readable,
-      });
-
-      if (result.complete && result.fileId !== null) {
-        return this.service.getFile(result.fileId, user.id, this.canManageAll(user));
-      }
-
-      const progress: ChunkUploadProgressResponse = {
-        chunked: true,
-        complete: false,
-        receivedChunks: result.receivedChunks,
-        totalChunks: result.totalChunks,
-        finalizing: result.finalizing,
-      };
-      return progress;
-    }
 
     const fileId = await this.ingestService.ingestUpload(data.filename, data.file as unknown as Readable, user.id);
     return this.service.getFile(fileId, user.id, this.canManageAll(user));
-  }
-
-  @Delete('upload/:uploadId')
-  @HttpCode(HttpStatus.NO_CONTENT)
-  cancelUpload(@CurrentUser() user: RequestUser, @Param('uploadId') uploadId: string) {
-    return this.ingestService.abortChunkedUpload(uploadId, user.id);
   }
 
   @Patch('files/:id')
@@ -196,6 +173,7 @@ export class BookDockController {
       user.id,
       this.canManageAll(user),
       dto.needsReview,
+      dto.readyToFile,
     );
   }
 
@@ -210,6 +188,7 @@ export class BookDockController {
       user.id,
       this.canManageAll(user),
       dto.needsReview,
+      dto.readyToFile,
     );
   }
 
@@ -224,7 +203,14 @@ export class BookDockController {
       user.id,
       this.canManageAll(user),
       dto.needsReview,
+      dto.readyToFile,
     );
+  }
+
+  @Post('files/:id/refetch-metadata')
+  @HttpCode(HttpStatus.ACCEPTED)
+  refetchMetadata(@CurrentUser() user: RequestUser, @Param('id', ParseIntPipe) id: number) {
+    return this.service.refetchMetadata(id, user.id, this.canManageAll(user));
   }
 
   @Post('files/set-target')
@@ -240,6 +226,7 @@ export class BookDockController {
       user.id,
       this.canManageAll(user),
       dto.needsReview,
+      dto.readyToFile,
     );
   }
 
@@ -254,6 +241,7 @@ export class BookDockController {
       user.id,
       this.canManageAll(user),
       dto.needsReview,
+      dto.readyToFile,
     );
   }
 
@@ -272,6 +260,7 @@ export class BookDockController {
       user.id,
       this.canManageAll(user),
       dto.needsReview,
+      dto.readyToFile,
     );
   }
 
@@ -287,6 +276,7 @@ export class BookDockController {
       dto.status,
       dto.search,
       dto.needsReview,
+      dto.readyToFile,
     );
   }
 
@@ -307,6 +297,7 @@ export class BookDockController {
       dto.status,
       dto.search,
       dto.needsReview,
+      dto.readyToFile,
     );
   }
 
@@ -327,6 +318,7 @@ export class BookDockController {
       dto.status,
       dto.search,
       dto.needsReview,
+      dto.readyToFile,
     );
   }
 
@@ -357,6 +349,7 @@ export class BookDockController {
       dto.status,
       dto.search,
       dto.needsReview,
+      dto.readyToFile,
     );
   }
 

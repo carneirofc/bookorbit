@@ -1,18 +1,23 @@
-import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { access, lstat, mkdir, readdir, realpath, rename as fsRename, rmdir } from 'fs/promises';
+import { access, mkdir, readdir, rename as fsRename, rmdir } from 'fs/promises';
 import { basename, dirname, extname, isAbsolute, join, normalize, relative, sep } from 'path';
 
 import type { FileRenameResult } from '@bookorbit/types';
-import { isAudioFormat, NotificationType, resolveUploadPath, sanitizePathSegment } from '@bookorbit/types';
+import { NotificationType, resolveUploadPath, sanitizePathSegment } from '@bookorbit/types';
 import { SelfWriteRegistry } from '../../common/services/self-write-registry.service';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
+import { pathsReferToSameEntry } from '../../common/utils/path-identity.utils';
 import { AppSettingsService } from '../app-settings/app-settings.service';
+import type { BookCoverSlotRow } from '../book-cover-store/book-cover-store.repository';
+import { BookCoverStore } from '../book-cover-store/book-cover-store.service';
+import { CoverSlotReconciler } from '../metadata/cover-slot-reconciler.service';
 import { NotificationService } from '../notification/notification.service';
 import type { BookFilePathUpdate, BookRenameData } from './file-rename.repository';
 import { FileRenameRepository } from './file-rename.repository';
 import { FileLockService, bookOperationLockKey } from './file-lock.service';
-import { buildTokens } from './file-rename.utils';
+import { buildPatternTokens } from '../../common/utils/pattern-tokens.utils';
+import { resolveBookFileTargets } from './book-file-targets';
 
 const FILE_RENAME_EVENT = 'file.rename';
 const FILE_RENAME_ROLLBACK_EVENT = 'file.rename_rollback';
@@ -36,6 +41,8 @@ export class FileRenameService implements OnModuleDestroy {
     private readonly notificationService: NotificationService,
     private readonly config: ConfigService,
     private readonly selfWriteRegistry: SelfWriteRegistry,
+    private readonly coverStore: BookCoverStore,
+    @Optional() private readonly coverReconciler?: CoverSlotReconciler,
   ) {
     this.debounceMs = resolvePositiveInteger(this.config.get('fileWrite.debounceMs'), DEFAULT_RENAME_DEBOUNCE_MS);
   }
@@ -109,7 +116,14 @@ export class FileRenameService implements OnModuleDestroy {
 
     const format = (data.file.format ?? extname(data.file.absolutePath).slice(1)).toLowerCase();
     const originalStem = basename(data.file.absolutePath, extname(data.file.absolutePath));
-    const tokens = buildTokens(data.metadata, data.authors, originalStem, format, data.libraryName);
+    const tokens = buildPatternTokens({
+      metadata: data.metadata,
+      authors: data.authors,
+      narrators: data.narrators,
+      originalStem,
+      format,
+      libraryName: data.libraryName,
+    });
     const sanitizeForCrossPlatform = await this.appSettings.isCrossPlatformPathSanitizationEnabled();
     const resolvedRelPath = resolveUploadPath(pattern, tokens, format, { sanitizeForCrossPlatform });
 
@@ -120,60 +134,24 @@ export class FileRenameService implements OnModuleDestroy {
     const currentAbsolutePath = data.file.absolutePath;
     const baseNewAbsolutePath = join(data.libraryFolderPath, resolvedRelPath);
     const currentFolderPath = data.bookFolderPath;
-    const baseNewFolderPath = dirname(baseNewAbsolutePath);
     const isBookPerFolder = data.organizationMode === 'book_per_folder';
-
-    const allFiles = await this.renameRepo.findAllBookFiles(bookId);
-    const fileTargets = new Map<number, string>();
     const bookHasOwnFolder = isBookPerFolder && currentFolderPath !== currentAbsolutePath;
 
-    for (const file of allFiles) {
-      if (file.id === data.file.id) {
-        fileTargets.set(file.id, baseNewAbsolutePath);
-      } else if (file.role === 'content') {
-        const fileExt = extname(file.absolutePath);
-        const fileFormat = (file.format ?? fileExt.slice(1)).toLowerCase();
-        const fileOriginalStem = basename(file.absolutePath, fileExt);
-        const fileTokens = buildTokens(data.metadata, data.authors, fileOriginalStem, fileFormat, data.libraryName);
-        const fileResolvedRelPath = resolveUploadPath(pattern, fileTokens, fileFormat, { sanitizeForCrossPlatform });
-
-        let targetAbs: string;
-        if (fileResolvedRelPath) {
-          const resolvedAbs = join(data.libraryFolderPath, fileResolvedRelPath);
-          if (isBookPerFolder) {
-            const relToOldFolder = bookHasOwnFolder ? relative(currentFolderPath, file.absolutePath) : basename(file.absolutePath);
-            const oldSubDir = dirname(relToOldFolder);
-            targetAbs = join(baseNewFolderPath, oldSubDir, basename(resolvedAbs));
-          } else {
-            targetAbs = resolvedAbs;
-          }
-        } else {
-          const relToOldFolder = bookHasOwnFolder ? relative(currentFolderPath, file.absolutePath) : basename(file.absolutePath);
-          targetAbs = join(isBookPerFolder ? baseNewFolderPath : dirname(baseNewAbsolutePath), relToOldFolder);
-        }
-
-        fileTargets.set(file.id, targetAbs);
-      } else {
-        const relToOldFolder = bookHasOwnFolder ? relative(currentFolderPath, file.absolutePath) : basename(file.absolutePath);
-        const targetAbs = join(isBookPerFolder ? baseNewFolderPath : dirname(baseNewAbsolutePath), relToOldFolder);
-
-        fileTargets.set(file.id, targetAbs);
-      }
-    }
-
-    this.applyMultiTrackAudioPartSuffixes(fileTargets, allFiles, data.file.id);
-
-    if (this.hasInternalCollision(fileTargets)) {
-      fileTargets.clear();
-      fileTargets.set(data.file.id, baseNewAbsolutePath);
-      for (const file of allFiles) {
-        if (file.id !== data.file.id) {
-          const relToOldFolder = bookHasOwnFolder ? relative(currentFolderPath, file.absolutePath) : basename(file.absolutePath);
-          const targetDir = isBookPerFolder ? baseNewFolderPath : dirname(baseNewAbsolutePath);
-          fileTargets.set(file.id, join(targetDir, relToOldFolder));
-        }
-      }
-    }
+    const allFiles = await this.renameRepo.findAllBookFiles(bookId);
+    // Shared with the bulk rename preview so the preview can never promise a rename this refuses.
+    const fileTargets = resolveBookFileTargets({
+      primaryFileId: data.file.id,
+      files: allFiles,
+      metadata: data.metadata,
+      authors: data.authors,
+      narrators: data.narrators,
+      libraryName: data.libraryName,
+      libraryFolderPath: data.libraryFolderPath,
+      bookFolderPath: currentFolderPath,
+      organizationMode: data.organizationMode,
+      pattern,
+      sanitizeForCrossPlatform,
+    });
 
     const newAbsolutePath = fileTargets.get(data.file.id) ?? baseNewAbsolutePath;
     const newFolderPath = dirname(newAbsolutePath);
@@ -511,6 +489,8 @@ export class FileRenameService implements OnModuleDestroy {
       absolutePath: fileTargets.get(file.id)!,
       relPath: relative(data.libraryFolderPath, fileTargets.get(file.id)!),
     }));
+    // The merge deletes the source book and its slot rows with it, so they are read first.
+    const sourceSlots = await this.coverStore.slotsForAdoption(bookId);
 
     const movedFiles: Array<{ from: string; to: string }> = [];
     try {
@@ -549,8 +529,22 @@ export class FileRenameService implements OnModuleDestroy {
       throw error;
     }
 
+    await this.handOverCovers(bookId, sourceSlots, targetBookId);
     await this.tryRemoveEmptyDir(oldFolderPath);
     await this.tryRemoveEmptyDir(dirname(oldFolderPath));
+  }
+
+  /** The target keeps its own art and takes the source's for any medium it had no cover for. */
+  private async handOverCovers(sourceBookId: number, sourceSlots: BookCoverSlotRow[], targetBookId: number): Promise<void> {
+    try {
+      await this.coverStore.adoptSlots(sourceBookId, sourceSlots, targetBookId);
+      await this.coverStore.removeCoverDirectory(sourceBookId);
+    } catch (error) {
+      this.logger.warn(
+        `[${FILE_RENAME_EVENT}] [fail] bookId=${sourceBookId} targetBookId=${targetBookId} errorClass=${error instanceof Error ? error.name : 'Error'} error="${sanitizeLogValue(error instanceof Error ? error.message : String(error))}" - merged book covers not handed over`,
+      );
+    }
+    void this.coverReconciler?.enqueue([targetBookId], { filesChanged: true });
   }
 
   private async moveBookFilesIndividually(
@@ -595,58 +589,6 @@ export class FileRenameService implements OnModuleDestroy {
       await this.rollbackFolderRename(bookId, oldUpdates, oldFolderPath, error);
       throw error;
     }
-  }
-
-  private applyMultiTrackAudioPartSuffixes(fileTargets: Map<number, string>, allFiles: RenameBookFile[], primaryFileId: number): void {
-    const audioFiles = allFiles.filter((file) => this.isAudioContentFile(file, primaryFileId));
-    if (audioFiles.length < 2) return;
-
-    const audioFilesByTarget = new Map<string, RenameBookFile[]>();
-    for (const file of audioFiles) {
-      const targetPath = fileTargets.get(file.id);
-      if (!targetPath) continue;
-
-      const key = targetPath.toLowerCase();
-      const existing = audioFilesByTarget.get(key);
-      if (existing) {
-        existing.push(file);
-      } else {
-        audioFilesByTarget.set(key, [file]);
-      }
-    }
-
-    const collidingGroups = [...audioFilesByTarget.values()].filter((group) => group.length > 1);
-    if (collidingGroups.length === 0) return;
-
-    const trackNumbersByFileId = new Map<number, number>();
-    [...audioFiles].sort(compareAudioTrackFiles).forEach((file, index) => {
-      trackNumbersByFileId.set(file.id, index + 1);
-    });
-
-    for (const group of collidingGroups) {
-      for (const file of group) {
-        const targetPath = fileTargets.get(file.id);
-        const trackNumber = trackNumbersByFileId.get(file.id);
-        if (!targetPath || !trackNumber) continue;
-
-        fileTargets.set(file.id, appendPartSuffix(targetPath, trackNumber));
-      }
-    }
-  }
-
-  private isAudioContentFile(file: RenameBookFile, primaryFileId: number): boolean {
-    const format = (file.format ?? extname(file.absolutePath).slice(1)).toLowerCase();
-    return Boolean(format && isAudioFormat(format) && (file.role === 'content' || file.id === primaryFileId));
-  }
-
-  private hasInternalCollision(fileTargets: Map<number, string>): boolean {
-    const seen = new Set<string>();
-    for (const targetPath of fileTargets.values()) {
-      const key = targetPath.toLowerCase();
-      if (seen.has(key)) return true;
-      seen.add(key);
-    }
-    return false;
   }
 
   private foldersAreNested(pathA: string, pathB: string): boolean {
@@ -709,31 +651,17 @@ export class FileRenameService implements OnModuleDestroy {
     return null;
   }
 
-  private async pathsReferToSameEntry(firstPath: string, secondPath: string): Promise<boolean> {
-    try {
-      const [first, second, resolvedFirst, resolvedSecond] = await Promise.all([
-        lstat(firstPath),
-        lstat(secondPath),
-        realpath(firstPath),
-        realpath(secondPath),
-      ]);
-      return first.dev === second.dev && first.ino === second.ino && resolvedFirst === resolvedSecond;
-    } catch {
-      return false;
-    }
-  }
-
   private async pathsReferToSameSource(
     sourcePath: string,
     targetPath: string,
     libraryFolderPath: string,
     sanitizeForCrossPlatform: boolean,
   ): Promise<boolean> {
-    if (await this.pathsReferToSameEntry(sourcePath, targetPath)) return true;
+    if (await pathsReferToSameEntry(sourcePath, targetPath)) return true;
     if (!sanitizeForCrossPlatform) return false;
 
     const sanitizedSourcePath = this.buildSanitizedSourcePath(sourcePath, libraryFolderPath);
-    return sanitizedSourcePath !== null && (await this.pathsReferToSameEntry(sanitizedSourcePath, targetPath));
+    return sanitizedSourcePath !== null && (await pathsReferToSameEntry(sanitizedSourcePath, targetPath));
   }
 
   private async renamePath(sourcePath: string, targetPath: string, libraryFolderPath: string, sanitizeForCrossPlatform: boolean): Promise<string> {
@@ -816,16 +744,4 @@ function resolvePositiveInteger(value: unknown, fallback: number): number {
 
 function isMissingPathError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && 'code' in error && error.code === 'ENOENT';
-}
-
-function compareAudioTrackFiles(a: RenameBookFile, b: RenameBookFile): number {
-  const aSortOrder = a.sortOrder ?? Number.MAX_SAFE_INTEGER;
-  const bSortOrder = b.sortOrder ?? Number.MAX_SAFE_INTEGER;
-  return aSortOrder - bSortOrder || a.id - b.id;
-}
-
-function appendPartSuffix(targetPath: string, trackNumber: number): string {
-  const extension = extname(targetPath);
-  const stem = basename(targetPath, extension);
-  return join(dirname(targetPath), `${stem}-Part${String(trackNumber).padStart(2, '0')}${extension}`);
 }

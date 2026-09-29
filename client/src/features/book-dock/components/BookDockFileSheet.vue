@@ -4,13 +4,17 @@ import { useI18n } from 'vue-i18n'
 import { formatDateTime } from '@/i18n/formatters'
 import { X, BookOpen, Check, Trash2, Sparkles, ArrowLeft, Wand2, AlertCircle } from '@lucide/vue'
 import {
+  getBookMediaKind,
   resolveBookDockSearchTitle,
   type BookDockFile,
+  type CoverMedium,
   type BookDockMetadata,
   type MetadataCandidate,
   type MetadataSource,
   type MetadataProviderKey,
   type ProviderIds,
+  isValidSeriesIndex,
+  SERIES_INDEX_MAX_LENGTH,
 } from '@bookorbit/types'
 import BookDockStatusBadge from './BookDockStatusBadge.vue'
 import MetadataSearchPanel from '@/features/book/components/detail/tabs/MetadataSearchPanel.vue'
@@ -18,7 +22,7 @@ import MetadataDiffPanel from '@/features/book/components/detail/tabs/MetadataDi
 import { useBookDockDetail } from '../composables/useBookDockDetail'
 import { useLibraries } from '@/features/library/composables/useLibraries'
 import { useMetadataSearch } from '@/features/book/composables/useMetadataSearch'
-import type { MetadataPatch } from '@/features/book/composables/useMetadataDiff'
+import type { MetadataDiffApply } from '@/features/book/composables/useMetadataDiff'
 import { formatBytes } from '@/lib/formatting'
 import { toDisplayCoverUrl } from '@/features/book/lib/metadata-fetch'
 
@@ -28,11 +32,11 @@ const props = defineProps<{ file: BookDockFile }>()
 
 const emit = defineEmits<{
   close: []
-  discarded: []
+  discard: [BookDockFile]
   updated: [BookDockFile]
 }>()
 
-const { saved, saveError, saveMetadata, setTarget, discardFile, coverUrl } = useBookDockDetail()
+const { saved, saveError, saveMetadata, setTarget, coverUrl } = useBookDockDetail()
 const { libraries, fetchLibraries: fetchLibs } = useLibraries()
 
 const meta = computed(() => props.file.selectedMetadata ?? props.file.embeddedMetadata ?? ({} as BookDockMetadata))
@@ -66,6 +70,12 @@ const form = reactive({
 })
 const selectedCoverUrl = ref('')
 const passthroughMetadata = ref<BookDockMetadata>({})
+const seriesIndexError = computed(() => form.seriesIndex !== '' && !isValidSeriesIndex(form.seriesIndex.trim()))
+
+function normalizedSeriesIndex(): string | null {
+  const value = form.seriesIndex.trim()
+  return value && isValidSeriesIndex(value) ? value : null
+}
 
 watch(
   () => props.file.id,
@@ -134,7 +144,7 @@ function buildMetadataPatchFromForm(): Partial<BookDockMetadata> {
     isbn13: form.isbn13 || undefined,
     isbn10: form.isbn10 || undefined,
     seriesName: form.seriesName || undefined,
-    seriesIndex: form.seriesIndex ? ((n) => (isNaN(n) ? undefined : n))(parseFloat(form.seriesIndex)) : undefined,
+    seriesIndex: normalizedSeriesIndex() ?? undefined,
     genres: form.genres
       ? form.genres
           .split(',')
@@ -147,6 +157,7 @@ function buildMetadataPatchFromForm(): Partial<BookDockMetadata> {
 
 function onFieldChange() {
   if (debounceTimer) clearTimeout(debounceTimer)
+  if (seriesIndexError.value) return
   debounceTimer = setTimeout(async () => {
     const updated = await saveMetadata(props.file.id, buildMetadataPatchFromForm())
     if (updated) emit('updated', updated)
@@ -186,14 +197,14 @@ function formatDate(iso: string): string {
   return formatDateTime(new Date(iso))
 }
 
-async function handleDiscard() {
-  await discardFile(props.file.id)
-  emit('discarded')
+function handleDiscard() {
+  emit('discard', props.file)
 }
 
 const {
   filteredResults,
   providerCounts,
+  interruptedProviders,
   isStreaming,
   hasSearched,
   providers,
@@ -221,7 +232,7 @@ const currentSource = computed<MetadataSource>(() => ({
   language: form.language || null,
   pageCount: passthroughMetadata.value.pageCount ?? null,
   seriesName: form.seriesName || null,
-  seriesIndex: form.seriesIndex ? ((n) => (isNaN(n) ? null : n))(parseFloat(form.seriesIndex)) : null,
+  seriesIndex: normalizedSeriesIndex(),
   isbn10: form.isbn10 || null,
   isbn13: form.isbn13 || null,
   authors: form.authors
@@ -268,8 +279,13 @@ function openSearch() {
   loadProviders()
 }
 
+// A dock file has one medium, so its search asks only the providers for it, and audio files get square art.
+const fileMediaKind = computed(() => getBookMediaKind(props.file.format))
+const fileCoverMedium = computed<CoverMedium>(() => (fileMediaKind.value === 'audiobook' ? 'audio' : 'ebook'))
+
 function handleSearchSubmit(params: { title: string; author: string; isbn: string }) {
-  search(params)
+  const mediaKind = fileMediaKind.value
+  search(mediaKind === 'unknown' ? params : { ...params, mediaKind })
 }
 
 function selectCandidate(candidate: MetadataCandidate) {
@@ -287,7 +303,7 @@ function backFromDiff() {
   selectedCandidate.value = null
 }
 
-async function handleApply(patch: { formPatch: MetadataPatch; coverUrl?: string }) {
+async function handleApply(patch: MetadataDiffApply) {
   const p = patch.formPatch
   const bookDockPatch = { ...p }
   delete bookDockPatch.customMetadata
@@ -306,9 +322,10 @@ async function handleApply(patch: { formPatch: MetadataPatch; coverUrl?: string 
   if ('authors' in p) form.authors = (p.authors ?? []).join(', ')
   if ('genres' in p) form.genres = (p.genres ?? []).join(', ')
 
-  if (patch.coverUrl !== undefined) {
-    selectedCoverUrl.value = patch.coverUrl
-    passthroughMetadata.value.coverUrl = patch.coverUrl
+  const coverUrl = patch.coverUrl ?? patch.audioCoverUrl
+  if (coverUrl !== undefined) {
+    selectedCoverUrl.value = coverUrl
+    passthroughMetadata.value.coverUrl = coverUrl
   }
 
   if (debounceTimer) {
@@ -544,9 +561,16 @@ onMounted(() => {
               <span class="text-xs font-medium text-muted-foreground">{{ t('bookDock.field.seriesIndex') }}</span>
               <input
                 v-model="form.seriesIndex"
+                type="text"
+                inputmode="decimal"
+                :maxlength="SERIES_INDEX_MAX_LENGTH"
+                :aria-invalid="seriesIndexError"
                 class="mt-1 w-full h-8 rounded-lg border border-input bg-background px-3 text-sm outline-none focus:ring-1 focus:ring-ring"
                 @input="onFieldChange"
               />
+              <span v-if="seriesIndexError" class="mt-1 block text-xs text-destructive" role="alert">
+                {{ t('bookDock.invalidSeriesIndex') }}
+              </span>
             </label>
             <label class="sm:col-span-2">
               <span class="text-xs font-medium text-muted-foreground">{{ t('bookDock.field.genresCommaSeparated') }}</span>
@@ -644,6 +668,7 @@ onMounted(() => {
             :selected-providers="selectedProviders"
             :is-streaming="isStreaming"
             :has-searched="hasSearched"
+            :interrupted-providers="interruptedProviders"
             @search="handleSearchSubmit"
             @toggle-provider="toggleProvider"
             @clear-filter="clearProviderFilter"
@@ -664,6 +689,7 @@ onMounted(() => {
             :providers="providers"
             :back-label="diffSource === 'fetched' ? t('common.back') : t('bookDock.sheet.results')"
             :current-cover-url="currentBookDockCoverUrl"
+            :cover-medium="fileCoverMedium"
             :provider-ids="providerIds"
             @back="backFromDiff"
             @apply="handleApply"

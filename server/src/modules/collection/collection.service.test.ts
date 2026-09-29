@@ -1,5 +1,13 @@
 import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
 
+vi.mock('@bookorbit/types', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@bookorbit/types')>();
+  return {
+    ...actual,
+    APP_FEATURES: Object.freeze({ ...actual.APP_FEATURES, podcasts: true }),
+  };
+});
+
 import type { RequestUser } from '../../common/types/request-user';
 import { CollectionService } from './collection.service';
 import { EMPTY_CONTENT_FILTER_RULES } from '@bookorbit/types';
@@ -28,37 +36,45 @@ function makeCollection(overrides?: Record<string, unknown>) {
   return {
     id: 10,
     userId: 1,
+    mediaType: 'books',
     name: 'Favorites',
     icon: 'FolderOpen',
     description: null,
+    isPublic: false,
     syncToKobo: false,
     displayOrder: 0,
     createdAt: new Date('2026-01-01T00:00:00Z'),
     updatedAt: new Date('2026-01-01T00:00:00Z'),
     bookCount: 0,
+    podcastCount: 0,
     ...overrides,
   };
 }
 
 function makeService() {
   const collectionRepo = {
-    findAllForUser: vi.fn(),
-    findAllForUserWithMembership: vi.fn(),
+    findAllVisibleForUser: vi.fn(),
+    findAllOwnedForUserWithMembership: vi.fn(),
     findById: vi.fn(),
+    findByIdForViewer: vi.fn().mockResolvedValue([makeCollection()]),
     insert: vi.fn(),
     update: vi.fn(),
     delete: vi.fn(),
     updateDisplayOrders: vi.fn(),
     addBooks: vi.fn(),
+    addPodcasts: vi.fn(),
+    removePodcasts: vi.fn(),
+    findPodcastMembersPage: vi.fn(),
+    countPodcastMembers: vi.fn(),
     removeBooks: vi.fn(),
     findBookIdsPage: vi.fn(),
     findAllBookIds: vi.fn(),
-    buildMembershipWhere: vi.fn(),
+    buildReadableMembershipWhere: vi.fn(),
   };
 
   const libraryService = {
     verifyUserAccess: vi.fn(),
-    findAccessibleLibraryIds: vi.fn(),
+    findAccessibleLibraryIds: vi.fn().mockResolvedValue([100]),
   };
 
   const queryBuilder = {
@@ -75,14 +91,25 @@ function makeService() {
     emit: vi.fn(),
   };
 
+  const podcastAccess = {
+    requirePodcastAccess: vi.fn().mockResolvedValue(undefined),
+    requirePodcastLibrary: vi.fn().mockResolvedValue(undefined),
+    requirePodcastLibraryAccess: vi.fn().mockResolvedValue(undefined),
+  };
+  const podcastCatalogRepo = {
+    listPodcasts: vi.fn(),
+  };
+
   const service = new CollectionService(
     collectionRepo as never,
     libraryService as never,
     queryBuilder as never,
     bookService as never,
     achievementEvents as never,
+    podcastAccess as never,
+    podcastCatalogRepo as never,
   );
-  return { service, collectionRepo, libraryService, queryBuilder, bookService, achievementEvents };
+  return { service, collectionRepo, libraryService, queryBuilder, bookService, achievementEvents, podcastAccess, podcastCatalogRepo };
 }
 
 describe('CollectionService', () => {
@@ -94,35 +121,52 @@ describe('CollectionService', () => {
     it('returns all collections for user when membership ids are absent', async () => {
       const { service, collectionRepo } = makeService();
       const user = makeUser();
-      collectionRepo.findAllForUser.mockResolvedValue([makeCollection()]);
+      collectionRepo.findAllVisibleForUser.mockResolvedValue([makeCollection()]);
 
       const result = await service.findAll(user);
 
-      expect(collectionRepo.findAllForUser).toHaveBeenCalledWith(user.id);
-      expect(collectionRepo.findAllForUserWithMembership).not.toHaveBeenCalled();
-      expect(result).toEqual([makeCollection()]);
+      expect(collectionRepo.findAllVisibleForUser).toHaveBeenCalledWith(user.id, expect.anything());
+      expect(collectionRepo.findAllOwnedForUserWithMembership).not.toHaveBeenCalled();
+      expect(result).toEqual([{ ...makeCollection(), isOwner: true }]);
+    });
+
+    it('returns public collections as read-only viewer projections with content-filtered counts', async () => {
+      const { service, collectionRepo, queryBuilder } = makeService();
+      const user = makeUser({ id: 8 });
+      const shared = makeCollection({ id: 20, userId: 99, isPublic: true, bookCount: 2 });
+      collectionRepo.findAllVisibleForUser.mockResolvedValue([shared]);
+
+      const result = await service.findAll(user);
+
+      expect(queryBuilder.buildWhere).toHaveBeenCalledWith(undefined, {
+        accessibleLibraryIds: [100],
+        userId: 8,
+        timeZone: 'UTC',
+        contentFilters: EMPTY_CONTENT_FILTER_RULES,
+      });
+      expect(result).toEqual([{ ...shared, isOwner: false }]);
     });
 
     it('returns membership counts when book ids are provided', async () => {
       const { service, collectionRepo } = makeService();
       const user = makeUser();
-      collectionRepo.findAllForUserWithMembership.mockResolvedValue([makeCollection({ memberCount: 2 })]);
+      collectionRepo.findAllOwnedForUserWithMembership.mockResolvedValue([makeCollection({ memberCount: 2 })]);
 
       const result = await service.findAll(user, [4, 5]);
 
-      expect(collectionRepo.findAllForUserWithMembership).toHaveBeenCalledWith(user.id, [4, 5]);
+      expect(collectionRepo.findAllOwnedForUserWithMembership).toHaveBeenCalledWith(user.id, [4, 5], expect.anything());
       expect(result[0]).toEqual(expect.objectContaining({ memberCount: 2 }));
     });
 
     it('falls back to the non-membership query when book ids are empty', async () => {
       const { service, collectionRepo } = makeService();
       const user = makeUser();
-      collectionRepo.findAllForUser.mockResolvedValue([makeCollection()]);
+      collectionRepo.findAllVisibleForUser.mockResolvedValue([makeCollection()]);
 
       await service.findAll(user, []);
 
-      expect(collectionRepo.findAllForUser).toHaveBeenCalledWith(user.id);
-      expect(collectionRepo.findAllForUserWithMembership).not.toHaveBeenCalled();
+      expect(collectionRepo.findAllVisibleForUser).toHaveBeenCalledWith(user.id, expect.anything());
+      expect(collectionRepo.findAllOwnedForUserWithMembership).not.toHaveBeenCalled();
     });
 
     it('resolves selection payloads before loading membership counts', async () => {
@@ -130,24 +174,24 @@ describe('CollectionService', () => {
       const user = makeUser();
       const selection = { query: { libraryId: 5, q: 'dune' } };
       bookService.resolveSelectionToIds.mockResolvedValue([10, 11, 10]);
-      collectionRepo.findAllForUserWithMembership.mockResolvedValue([makeCollection({ memberCount: 2 })]);
+      collectionRepo.findAllOwnedForUserWithMembership.mockResolvedValue([makeCollection({ memberCount: 2 })]);
 
       const result = await service.findAllWithSelectionMembership(selection, user);
 
       expect(bookService.resolveSelectionToIds).toHaveBeenCalledWith(selection, user);
-      expect(collectionRepo.findAllForUserWithMembership).toHaveBeenCalledWith(user.id, [10, 11]);
+      expect(collectionRepo.findAllOwnedForUserWithMembership).toHaveBeenCalledWith(user.id, [10, 11], expect.anything());
       expect(result[0]).toEqual(expect.objectContaining({ memberCount: 2 }));
     });
 
     it('uses the plain collection list when a selection resolves to zero books', async () => {
       const { service, collectionRepo, bookService } = makeService();
       bookService.resolveSelectionToIds.mockResolvedValue([]);
-      collectionRepo.findAllForUser.mockResolvedValue([makeCollection()]);
+      collectionRepo.findAllVisibleForUser.mockResolvedValue([makeCollection()]);
 
       await service.findAllWithSelectionMembership({ query: { libraryId: 5 } }, makeUser());
 
-      expect(collectionRepo.findAllForUser).toHaveBeenCalledWith(1);
-      expect(collectionRepo.findAllForUserWithMembership).not.toHaveBeenCalled();
+      expect(collectionRepo.findAllVisibleForUser).toHaveBeenCalledWith(1, expect.anything());
+      expect(collectionRepo.findAllOwnedForUserWithMembership).not.toHaveBeenCalled();
     });
   });
 
@@ -170,19 +214,41 @@ describe('CollectionService', () => {
       const { service, collectionRepo } = makeService();
       const collection = makeCollection({ userId: 99 });
       collectionRepo.findById.mockResolvedValue([collection]);
+      collectionRepo.findByIdForViewer.mockResolvedValue([collection]);
 
       const result = await service.findOne(10, makeUser({ isSuperuser: true }));
 
-      expect(result).toEqual(collection);
+      expect(result).toEqual({ ...collection, isOwner: false });
+    });
+
+    it('allows a non-owner to read a public collection and preserves viewer-filtered counts', async () => {
+      const { service, collectionRepo } = makeService();
+      const shared = makeCollection({ userId: 99, isPublic: true, bookCount: 40 });
+      const viewerProjection = makeCollection({ userId: 99, isPublic: true, bookCount: 3 });
+      collectionRepo.findById.mockResolvedValue([shared]);
+      collectionRepo.findByIdForViewer.mockResolvedValue([viewerProjection]);
+
+      const result = await service.findOne(10, makeUser({ id: 8 }));
+
+      expect(result).toEqual({ ...viewerProjection, isOwner: false });
     });
   });
 
   describe('update', () => {
+    it('rejects updates from a non-owner even when the collection is public', async () => {
+      const { service, collectionRepo } = makeService();
+      collectionRepo.findById.mockResolvedValue([makeCollection({ userId: 99, isPublic: true })]);
+
+      await expect(service.update(10, { name: 'Hijacked' }, makeUser({ id: 8 }))).rejects.toThrow(ForbiddenException);
+      expect(collectionRepo.update).not.toHaveBeenCalled();
+    });
+
     it('returns the hydrated collection so derived counts remain available', async () => {
       const { service, collectionRepo } = makeService();
       const existing = makeCollection({ bookCount: 3 });
       const hydrated = makeCollection({ name: 'Updated Favorites', icon: 'FolderHeart', syncToKobo: true, bookCount: 3 });
       collectionRepo.findById.mockResolvedValueOnce([existing]).mockResolvedValueOnce([hydrated]);
+      collectionRepo.findByIdForViewer.mockResolvedValue([hydrated]);
       collectionRepo.update.mockResolvedValue([
         {
           id: existing.id,
@@ -205,7 +271,7 @@ describe('CollectionService', () => {
         syncToKobo: true,
       });
       expect(collectionRepo.findById).toHaveBeenCalledTimes(2);
-      expect(result).toEqual(hydrated);
+      expect(result).toEqual({ ...hydrated, isOwner: true });
     });
 
     it('maps unique constraint errors to ConflictException semantics', async () => {
@@ -245,7 +311,7 @@ describe('CollectionService', () => {
     it('creates collection for current user and returns hydrated row', async () => {
       const { service, collectionRepo } = makeService();
       collectionRepo.insert.mockResolvedValue([{ id: 25 }]);
-      collectionRepo.findById.mockResolvedValue([makeCollection({ id: 25, name: 'New Collection' })]);
+      collectionRepo.findByIdForViewer.mockResolvedValue([makeCollection({ id: 25, userId: 9, name: 'New Collection' })]);
 
       const result = await service.create({ name: 'New Collection', icon: '⭐' } as any, makeUser({ id: 9 }));
 
@@ -254,10 +320,22 @@ describe('CollectionService', () => {
           userId: 9,
           name: 'New Collection',
           icon: '⭐',
+          isPublic: false,
           syncToKobo: false,
         }),
       );
       expect(result).toEqual(expect.objectContaining({ id: 25, name: 'New Collection' }));
+    });
+
+    it('persists explicit public visibility on create', async () => {
+      const { service, collectionRepo } = makeService();
+      const created = makeCollection({ id: 26, userId: 9, isPublic: true });
+      collectionRepo.insert.mockResolvedValue([created]);
+      collectionRepo.findByIdForViewer.mockResolvedValue([created]);
+
+      await service.create({ name: 'Shared', icon: 'Globe', isPublic: true } as never, makeUser({ id: 9 }));
+
+      expect(collectionRepo.insert).toHaveBeenCalledWith(expect.objectContaining({ userId: 9, isPublic: true }));
     });
 
     it('rejects create when icon is empty after trimming', async () => {
@@ -304,6 +382,7 @@ describe('CollectionService', () => {
     it('verifies collection ownership and resolves the selection before adding books', async () => {
       const { service, collectionRepo, bookService } = makeService();
       collectionRepo.findById.mockResolvedValueOnce([makeCollection()]).mockResolvedValueOnce([makeCollection({ bookCount: 2 })]);
+      collectionRepo.findByIdForViewer.mockResolvedValue([makeCollection({ bookCount: 2 })]);
       bookService.resolveSelectionToIds.mockResolvedValue([7, 8]);
       collectionRepo.addBooks.mockResolvedValue([]);
       const selection = { bookIds: [7, 8] };
@@ -384,10 +463,11 @@ describe('CollectionService', () => {
       const { service, collectionRepo, libraryService, queryBuilder, bookService } = makeService();
       collectionRepo.findById.mockResolvedValue([makeCollection()]);
       libraryService.findAccessibleLibraryIds.mockResolvedValue([100]);
-      collectionRepo.buildMembershipWhere.mockReturnValue('membership-where');
+      collectionRepo.buildReadableMembershipWhere.mockReturnValue('membership-where');
       bookService.executeBooksQuery.mockResolvedValue({ items: [], total: 0, page: 0, size: 50 });
+      const user = makeUser();
 
-      const result = await service.getBooks(10, makeUser(), 0, 50);
+      const result = await service.getBooks(10, user, 0, 50);
 
       expect(result).toEqual({ items: [], total: 0, page: 0, size: 50 });
       expect(queryBuilder.buildWhere).toHaveBeenCalledWith(undefined, {
@@ -397,7 +477,7 @@ describe('CollectionService', () => {
         timeZone: 'UTC',
         contentFilters: EMPTY_CONTENT_FILTER_RULES,
       });
-      expect(collectionRepo.buildMembershipWhere).toHaveBeenCalledWith(10);
+      expect(collectionRepo.buildReadableMembershipWhere).toHaveBeenCalledWith(10, user.id, user.isSuperuser);
       expect(bookService.executeBooksQuery).toHaveBeenCalledWith(
         1,
         expect.anything(),
@@ -413,7 +493,7 @@ describe('CollectionService', () => {
       const { service, collectionRepo, libraryService, queryBuilder, bookService } = makeService();
       collectionRepo.findById.mockResolvedValue([makeCollection()]);
       libraryService.findAccessibleLibraryIds.mockResolvedValue([100, 101]);
-      collectionRepo.buildMembershipWhere.mockReturnValue('membership-where');
+      collectionRepo.buildReadableMembershipWhere.mockReturnValue('membership-where');
       queryBuilder.buildWhere.mockReturnValue('filter-where');
       bookService.executeBooksQuery.mockResolvedValue({ items: [{ id: 2 }, { id: 1 }], total: 2, page: 0, size: 50 });
 
@@ -457,18 +537,40 @@ describe('CollectionService', () => {
       expect(libraryService.findAccessibleLibraryIds).not.toHaveBeenCalled();
     });
 
+    it('allows a non-owner to query a public collection through the viewer access predicate', async () => {
+      const { service, collectionRepo, libraryService, queryBuilder, bookService } = makeService();
+      collectionRepo.findById.mockResolvedValue([makeCollection({ userId: 99, isPublic: true })]);
+      libraryService.findAccessibleLibraryIds.mockResolvedValue([100]);
+      collectionRepo.buildReadableMembershipWhere.mockReturnValue('membership-where');
+      queryBuilder.buildWhere.mockReturnValue('viewer-where');
+      bookService.executeBooksQuery.mockResolvedValue({ items: [{ id: 7 }], total: 1, page: 0, size: 50 });
+
+      await service.getBooks(10, makeUser({ id: 8 }), 0, 50);
+
+      expect(queryBuilder.buildWhere).toHaveBeenCalledWith(
+        undefined,
+        expect.objectContaining({
+          accessibleLibraryIds: [100],
+          userId: 8,
+          contentFilters: EMPTY_CONTENT_FILTER_RULES,
+        }),
+      );
+      expect(bookService.executeBooksQuery).toHaveBeenCalled();
+    });
+
     it('queryJumpBuckets intersects the membership filter like queryBooks', async () => {
       const { service, collectionRepo, libraryService, queryBuilder, bookService } = makeService();
       collectionRepo.findById.mockResolvedValue([makeCollection()]);
       libraryService.findAccessibleLibraryIds.mockResolvedValue([100]);
-      collectionRepo.buildMembershipWhere.mockReturnValue('membership-where');
+      collectionRepo.buildReadableMembershipWhere.mockReturnValue('membership-where');
       queryBuilder.buildWhere.mockReturnValue('filter-where');
       bookService.executeJumpBucketsQuery.mockResolvedValue({ buckets: [], total: 0, kind: 'letter', granularity: null });
 
       const query = { sort: [{ field: 'title', dir: 'asc' as const }], pagination: { page: 0, size: 50 } };
-      await service.queryJumpBuckets(10, makeUser(), query as never);
+      const user = makeUser();
+      await service.queryJumpBuckets(10, user, query as never);
 
-      expect(collectionRepo.buildMembershipWhere).toHaveBeenCalledWith(10);
+      expect(collectionRepo.buildReadableMembershipWhere).toHaveBeenCalledWith(10, user.id, user.isSuperuser);
       expect(bookService.executeJumpBucketsQuery).toHaveBeenCalledWith(1, expect.anything(), query, 'UTC');
     });
 
@@ -486,7 +588,7 @@ describe('CollectionService', () => {
   describe('reorder', () => {
     it('delegates reorder writes to repository with current user id', async () => {
       const { service, collectionRepo } = makeService();
-      collectionRepo.updateDisplayOrders.mockResolvedValue(undefined);
+      collectionRepo.updateDisplayOrders.mockResolvedValue(2);
       const user = makeUser({ id: 33 });
 
       await service.reorder(
@@ -511,12 +613,43 @@ describe('CollectionService', () => {
 
       await expect(service.reorder({ order: [{ id: 1, displayOrder: 0 }] }, makeUser({ id: 1 }))).rejects.toThrow('db unavailable');
     });
+
+    it('rejects duplicate or non-owned collection IDs instead of silently reordering a subset', async () => {
+      const { service, collectionRepo } = makeService();
+
+      await expect(
+        service.reorder(
+          {
+            order: [
+              { id: 1, displayOrder: 0 },
+              { id: 1, displayOrder: 1 },
+            ],
+          },
+          makeUser(),
+        ),
+      ).rejects.toThrow(BadRequestException);
+      expect(collectionRepo.updateDisplayOrders).not.toHaveBeenCalled();
+
+      collectionRepo.updateDisplayOrders.mockResolvedValue(1);
+      await expect(
+        service.reorder(
+          {
+            order: [
+              { id: 1, displayOrder: 0 },
+              { id: 99, displayOrder: 1 },
+            ],
+          },
+          makeUser(),
+        ),
+      ).rejects.toThrow(ForbiddenException);
+    });
   });
 
   describe('removeBooks', () => {
     it('updates collection membership and returns hydrated collection', async () => {
       const { service, collectionRepo, bookService } = makeService();
       collectionRepo.findById.mockResolvedValueOnce([makeCollection()]).mockResolvedValueOnce([makeCollection({ bookCount: 1 })]);
+      collectionRepo.findByIdForViewer.mockResolvedValue([makeCollection({ bookCount: 1 })]);
       bookService.resolveSelectionToIds.mockResolvedValue([7]);
       collectionRepo.removeBooks.mockResolvedValue([{ collectionId: 10, bookId: 7 }]);
 
@@ -575,6 +708,7 @@ describe('CollectionService', () => {
       collectionRepo.findById
         .mockResolvedValueOnce([makeCollection({ userId: 88 })])
         .mockResolvedValueOnce([makeCollection({ userId: 88, bookCount: 0 })]);
+      collectionRepo.findByIdForViewer.mockResolvedValue([makeCollection({ userId: 88, bookCount: 0 })]);
       bookService.resolveSelectionToIds.mockResolvedValue([7]);
       collectionRepo.removeBooks.mockResolvedValue([{ collectionId: 10, bookId: 7 }]);
 
@@ -600,6 +734,114 @@ describe('CollectionService', () => {
       collectionRepo.removeBooks.mockRejectedValue(new Error('remove failed'));
 
       await expect(service.removeBooks(10, { bookIds: [7] }, makeUser())).rejects.toThrow('remove failed');
+    });
+  });
+
+  describe('podcast collections', () => {
+    function podcastCollection(overrides?: Record<string, unknown>) {
+      return makeCollection({ mediaType: 'podcasts', ...overrides });
+    }
+
+    it('adds shows after checking the user can see each one', async () => {
+      const { service, collectionRepo, podcastAccess } = makeService();
+      collectionRepo.findById.mockResolvedValue([podcastCollection()]);
+
+      await service.addPodcasts(10, { podcastIds: [3, 4] }, makeUser());
+
+      expect(podcastAccess.requirePodcastAccess).toHaveBeenCalledTimes(2);
+      expect(collectionRepo.addPodcasts).toHaveBeenCalledWith(10, [3, 4]);
+    });
+
+    it('writes no membership rows when a show is not visible to the user', async () => {
+      const { service, collectionRepo, podcastAccess } = makeService();
+      collectionRepo.findById.mockResolvedValue([podcastCollection()]);
+      podcastAccess.requirePodcastAccess.mockRejectedValueOnce(new ForbiddenException());
+
+      await expect(service.addPodcasts(10, { podcastIds: [3] }, makeUser())).rejects.toThrow(ForbiddenException);
+      expect(collectionRepo.addPodcasts).not.toHaveBeenCalled();
+    });
+
+    it('refuses shows on a book collection and books on a podcast collection', async () => {
+      const { service, collectionRepo } = makeService();
+
+      collectionRepo.findById.mockResolvedValue([makeCollection()]);
+      await expect(service.addPodcasts(10, { podcastIds: [3] }, makeUser())).rejects.toThrow(BadRequestException);
+
+      collectionRepo.findById.mockResolvedValue([podcastCollection()]);
+      await expect(service.addBooks(10, { bookIds: [1] } as never, makeUser())).rejects.toThrow(BadRequestException);
+      expect(collectionRepo.addBooks).not.toHaveBeenCalled();
+    });
+
+    it('hydrates member shows per library and keeps membership order', async () => {
+      const { service, collectionRepo, podcastCatalogRepo } = makeService();
+      collectionRepo.findById.mockResolvedValue([podcastCollection()]);
+      collectionRepo.findPodcastMembersPage.mockResolvedValue([
+        { podcastId: 7, libraryId: 1 },
+        { podcastId: 9, libraryId: 2 },
+        { podcastId: 8, libraryId: 1 },
+      ]);
+      collectionRepo.countPodcastMembers.mockResolvedValue(3);
+      podcastCatalogRepo.listPodcasts.mockImplementation((libraryId: number) =>
+        Promise.resolve({ items: libraryId === 1 ? [{ id: 8 }, { id: 7 }] : [{ id: 9 }], total: 0, page: 1, size: 0 }),
+      );
+
+      const page = await service.getPodcasts(10, makeUser());
+
+      expect(podcastCatalogRepo.listPodcasts).toHaveBeenCalledTimes(2);
+      expect(page.items.map((show) => show.id)).toEqual([7, 9, 8]);
+      expect(page.total).toBe(3);
+    });
+
+    it('filters membership to the libraries the user can still reach', async () => {
+      const { service, collectionRepo, libraryService, podcastCatalogRepo } = makeService();
+      collectionRepo.findById.mockResolvedValue([podcastCollection()]);
+      libraryService.findAccessibleLibraryIds.mockResolvedValue([1]);
+      collectionRepo.findPodcastMembersPage.mockResolvedValue([{ podcastId: 7, libraryId: 1 }]);
+      collectionRepo.countPodcastMembers.mockResolvedValue(1);
+      podcastCatalogRepo.listPodcasts.mockResolvedValue({ items: [{ id: 7 }], total: 0, page: 1, size: 0 });
+
+      const page = await service.getPodcasts(10, makeUser());
+
+      expect(collectionRepo.findPodcastMembersPage).toHaveBeenCalledWith(10, 0, expect.any(Number), [1]);
+      expect(collectionRepo.countPodcastMembers).toHaveBeenCalledWith(10, [1]);
+      expect(page.items.map((show) => show.id)).toEqual([7]);
+      expect(page.total).toBe(1);
+    });
+
+    it('leaves a superuser unfiltered', async () => {
+      const { service, collectionRepo, libraryService, podcastCatalogRepo } = makeService();
+      collectionRepo.findById.mockResolvedValue([podcastCollection()]);
+      collectionRepo.findPodcastMembersPage.mockResolvedValue([{ podcastId: 7, libraryId: 9 }]);
+      collectionRepo.countPodcastMembers.mockResolvedValue(1);
+      podcastCatalogRepo.listPodcasts.mockResolvedValue({ items: [{ id: 7 }], total: 0, page: 1, size: 0 });
+
+      await service.getPodcasts(10, makeUser({ isSuperuser: true }));
+
+      expect(libraryService.findAccessibleLibraryIds).not.toHaveBeenCalled();
+      expect(collectionRepo.countPodcastMembers).toHaveBeenCalledWith(10, undefined);
+    });
+
+    it('returns an empty page rather than throwing when no member library is reachable', async () => {
+      const { service, collectionRepo, libraryService, podcastCatalogRepo } = makeService();
+      collectionRepo.findById.mockResolvedValue([podcastCollection()]);
+      libraryService.findAccessibleLibraryIds.mockResolvedValue([]);
+      collectionRepo.findPodcastMembersPage.mockResolvedValue([]);
+      collectionRepo.countPodcastMembers.mockResolvedValue(0);
+
+      const page = await service.getPodcasts(10, makeUser());
+
+      expect(page).toEqual({ items: [], total: 0, page: 0, size: expect.any(Number) });
+      expect(podcastCatalogRepo.listPodcasts).not.toHaveBeenCalled();
+    });
+
+    it('forces syncToKobo off for a podcast collection', async () => {
+      const { service, collectionRepo } = makeService();
+      collectionRepo.insert.mockResolvedValue([podcastCollection()]);
+      collectionRepo.findById.mockResolvedValue([podcastCollection()]);
+
+      await service.create({ name: 'Sci-fi', icon: 'Podcast', mediaType: 'podcasts', syncToKobo: true }, makeUser());
+
+      expect(collectionRepo.insert).toHaveBeenCalledWith(expect.objectContaining({ mediaType: 'podcasts', syncToKobo: false }));
     });
   });
 });

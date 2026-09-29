@@ -1,8 +1,9 @@
 <script setup lang="ts">
+import { Button } from '@/components/ui/button'
 import { computed, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
-import { ArrowUpRight, ChartPie, Clock3, Eye, EyeOff, Search, ShieldCheck, UserRoundCheck, UserRoundX, UsersRound } from '@lucide/vue'
+import { ArrowUpRight, ChartPie, Clock3, Eye, EyeOff, Search, UserRoundCheck, UserRoundX, UsersRound } from '@lucide/vue'
 import type {
   AccountActivityListItem,
   AccountActivitySortDirection,
@@ -11,8 +12,8 @@ import type {
   ReadingInsightsSharingLevel,
 } from '@bookorbit/types'
 
-import { formatDate, formatDateTime, formatNumber, formatRelativeTime } from '@/i18n/formatters'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { formatDate, formatDateTime, formatNumber } from '@/i18n/formatters'
+import { relativeTimestamp as formatRelative } from './lib/relative-time'
 import { useAccountActivity } from './composables/useAccountActivity'
 
 const { t } = useI18n()
@@ -82,14 +83,7 @@ function openSharedInsights(item: AccountActivityListItem) {
 }
 
 function relativeTimestamp(value: string | null): string {
-  if (!value) return t('adminFeature.accountActivity.never')
-  const differenceMs = new Date(value).getTime() - Date.now()
-  const absoluteMs = Math.abs(differenceMs)
-  if (absoluteMs < 60 * 60 * 1000) return formatRelativeTime(Math.round(differenceMs / 60_000), 'minute')
-  if (absoluteMs < 24 * 60 * 60 * 1000) return formatRelativeTime(Math.round(differenceMs / 3_600_000), 'hour')
-  if (absoluteMs < 30 * 24 * 60 * 60 * 1000) return formatRelativeTime(Math.round(differenceMs / 86_400_000), 'day')
-  if (absoluteMs < 365 * 24 * 60 * 60 * 1000) return formatRelativeTime(Math.round(differenceMs / 2_592_000_000), 'month')
-  return formatRelativeTime(Math.round(differenceMs / 31_536_000_000), 'year')
+  return value ? formatRelative(value) : t('adminFeature.accountActivity.never')
 }
 
 function exactTimestamp(value: string | null): string {
@@ -125,28 +119,7 @@ function sharingIcon(level: ReadingInsightsSharingLevel) {
 </script>
 
 <template>
-  <section aria-labelledby="account-activity-heading" class="space-y-4">
-    <div>
-      <div class="flex items-center gap-2">
-        <h2 id="account-activity-heading" class="text-lg font-semibold text-foreground">{{ t('adminFeature.accountActivity.title') }}</h2>
-        <Tooltip>
-          <TooltipTrigger as-child>
-            <button
-              type="button"
-              class="inline-flex size-7 items-center justify-center rounded-full bg-primary/15 text-primary transition-colors hover:bg-primary/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              :aria-label="t('adminFeature.accountActivity.privacyLabel')"
-            >
-              <ShieldCheck :size="15" aria-hidden="true" />
-            </button>
-          </TooltipTrigger>
-          <TooltipContent side="bottom" class="max-w-sm text-xs leading-relaxed">
-            {{ t('adminFeature.accountActivity.privacyNotice') }}
-          </TooltipContent>
-        </Tooltip>
-      </div>
-      <p class="mt-1 text-sm text-muted-foreground">{{ t('adminFeature.accountActivity.subtitle') }}</p>
-    </div>
-
+  <div class="space-y-4">
     <div class="grid grid-cols-2 gap-2 lg:grid-cols-4">
       <button
         v-for="card in summaryCards"
@@ -220,21 +193,21 @@ function sharingIcon(level: ReadingInsightsSharingLevel) {
           <option value="name:asc">{{ t('adminFeature.accountActivity.filters.name') }}</option>
         </select>
       </label>
-      <button type="submit" class="settings-btn-primary h-9 justify-center">{{ t('adminFeature.accountActivity.filters.apply') }}</button>
-      <button v-if="hasActiveFilters" type="button" class="settings-btn-outline h-9 justify-center" @click="handleClearFilters">
+      <Button size="sm" type="submit" class="h-9">{{ t('adminFeature.accountActivity.filters.apply') }}</Button>
+      <Button variant="outline" size="sm" v-if="hasActiveFilters" type="button" class="h-9" @click="handleClearFilters">
         {{ t('adminFeature.accountActivity.filters.clear') }}
-      </button>
+      </Button>
     </form>
 
-    <p v-if="activity.error.value" role="alert" class="text-sm text-destructive">{{ t('adminFeature.accountActivity.errors.load') }}</p>
-    <p v-else-if="activity.loading.value" role="status" class="text-sm text-muted-foreground">{{ t('common.loading') }}</p>
-    <div v-else-if="activity.items.value.length === 0" class="rounded-lg border border-dashed border-border px-4 py-8 text-center">
+    <p v-if="activity.error.value" role="alert" class="settings-error-state">{{ t('adminFeature.accountActivity.errors.load') }}</p>
+    <p v-else-if="activity.loading.value" role="status" class="settings-loading-state">{{ t('common.loading') }}</p>
+    <div v-else-if="activity.items.value.length === 0" class="settings-empty-state">
       <p class="text-sm font-medium text-foreground">{{ t('adminFeature.accountActivity.empty.title') }}</p>
       <p class="mt-1 text-sm text-muted-foreground">{{ t('adminFeature.accountActivity.empty.description') }}</p>
     </div>
 
     <template v-else>
-      <div class="hidden overflow-x-auto rounded-lg border border-border shadow-xs md:block">
+      <div class="hidden overflow-x-auto rounded-lg border border-border bg-card shadow-xs md:block">
         <table class="w-full min-w-[960px] table-fixed text-sm">
           <colgroup>
             <col class="w-[24%]" />
@@ -374,14 +347,14 @@ function sharingIcon(level: ReadingInsightsSharingLevel) {
           }}
         </p>
         <div class="flex gap-2">
-          <button type="button" class="settings-btn-outline" :disabled="activity.page.value <= 1" @click="handlePreviousPage">
+          <Button variant="outline" size="sm" type="button" :disabled="activity.page.value <= 1" @click="handlePreviousPage">
             {{ t('common.previous') }}
-          </button>
-          <button type="button" class="settings-btn-outline" :disabled="activity.page.value >= activity.totalPages.value" @click="handleNextPage">
+          </Button>
+          <Button variant="outline" size="sm" type="button" :disabled="activity.page.value >= activity.totalPages.value" @click="handleNextPage">
             {{ t('common.next') }}
-          </button>
+          </Button>
         </div>
       </nav>
     </template>
-  </section>
+  </div>
 </template>

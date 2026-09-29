@@ -1,8 +1,11 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
+import { BadRequestException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { ConfigService, type ConfigType } from '@nestjs/config';
 
 import {
-  AuthorAutoEnrichmentWriteMode,
+  type BookRequestImportFormats,
+  BOOK_REQUEST_AUTOMATION_SETTING_KEYS,
+  BOOK_REQUEST_IMPORT_FORMATS,
+  DEFAULT_BOOK_REQUEST_AUTOMATION_SETTINGS,
   type DefaultLibraryAccessConfig,
   DEFAULT_DOWNLOAD_PATTERN,
   DEFAULT_UPLOAD_PATTERN_BOOK_PER_FILE,
@@ -10,16 +13,21 @@ import {
   DEFAULT_METADATA_SCORE_WEIGHTS,
   type MetadataScoreWeights,
   type BookDockAutoFinalizeMetadataMode,
+  type BookDockSettings,
+  type UpdateBookDockSettingsRequest,
 } from '@bookorbit/types';
 
 import { StatsCache } from '../../common/cache/stats-cache';
+import { storageConfig } from '../../config/config';
 import {
   APP_SETTING_KEYS,
+  BOOK_DOCK_MANAGED_SETTING_KEYS,
   DEFAULT_LIBRARY_ACCESS_CONFIG,
   DEFAULT_OIDC_CONFIG,
   type OidcFullConfig,
 } from '../../common/constants/app-settings.constants';
 import { ensureSafeUrl } from '../../common/utils/ssrf.utils';
+import { DEFAULT_MAX_UPLOAD_SIZE_MB, HARD_MAX_UPLOAD_SIZE_MB } from '../../common/constants/upload.constants';
 import { AppSettingsRepository } from './app-settings.repository';
 
 const OIDC_TEST_TIMEOUT_MS = 10_000;
@@ -49,6 +57,7 @@ export class AppSettingsService {
   constructor(
     private readonly repo: AppSettingsRepository,
     private readonly config: ConfigService,
+    @Inject(storageConfig.KEY) private readonly storage: ConfigType<typeof storageConfig>,
   ) {}
 
   listSettings() {
@@ -60,16 +69,25 @@ export class AppSettingsService {
     return row?.value ?? null;
   }
 
+  /** One round trip for a group of related settings, rather than a query per key. */
+  async getValues(keys: string[]): Promise<Map<string, string>> {
+    const rows = await this.repo.findMany(keys);
+    return new Map(rows.map((row) => [row.key, row.value]));
+  }
+
   async setValue(key: string, value: string): Promise<void> {
     await this.repo.upsert(key, value);
     this.clearRuntimeSettingCache(key);
   }
 
   async update(key: string, value: string) {
+    if (BOOK_DOCK_MANAGED_SETTING_KEYS.includes(key)) {
+      throw new BadRequestException(`Setting '${key}' is managed by the Book Dock endpoints and cannot be written here`);
+    }
     if (key === APP_SETTING_KEYS.MAX_UPLOAD_SIZE_MB) {
       const parsed = parseInt(value, 10);
-      if (isNaN(parsed) || parsed <= 0) {
-        throw new BadRequestException('Upload size limit must be an integer greater than 0');
+      if (isNaN(parsed) || parsed <= 0 || parsed > HARD_MAX_UPLOAD_SIZE_MB) {
+        throw new BadRequestException(`Upload size limit must be an integer between 1 and ${HARD_MAX_UPLOAD_SIZE_MB}`);
       }
     }
     const setting = await this.repo.updateByKey(key, value);
@@ -92,22 +110,62 @@ export class AppSettingsService {
     await this.repo.upsert(APP_SETTING_KEYS.BOOK_DOCK_PAUSED, String(paused));
   }
 
-  async getAuthorsAutoEnrichmentWriteMode(): Promise<AuthorAutoEnrichmentWriteMode> {
-    const row = await this.repo.findByKey(APP_SETTING_KEYS.AUTHORS_AUTO_ENRICHMENT_WRITE_MODE);
-    const mode = row?.value?.trim();
-    if (mode === AuthorAutoEnrichmentWriteMode.ALWAYS_REFETCH) return mode;
-    return AuthorAutoEnrichmentWriteMode.MISSING_ONLY;
+  async getBookDockSettings(): Promise<BookDockSettings> {
+    const keys = [
+      APP_SETTING_KEYS.BOOK_DOCK_AUTO_FETCH_METADATA,
+      APP_SETTING_KEYS.BOOK_DOCK_AUTO_FINALIZE_ENABLED,
+      APP_SETTING_KEYS.BOOK_DOCK_AUTO_FINALIZE_THRESHOLD,
+      APP_SETTING_KEYS.BOOK_DOCK_AUTO_FINALIZE_LIBRARY_ID,
+      APP_SETTING_KEYS.BOOK_DOCK_AUTO_FINALIZE_FOLDER_ID,
+      APP_SETTING_KEYS.BOOK_DOCK_AUTO_FINALIZE_METADATA_MODE,
+    ];
+    const rows = await this.repo.findMany(keys);
+    const settings = new Map(rows.map((row) => [row.key, row.value]));
+    const libraryId = parseOptionalPositiveInt(settings.get(APP_SETTING_KEYS.BOOK_DOCK_AUTO_FINALIZE_LIBRARY_ID));
+    const folderId = parseOptionalPositiveInt(settings.get(APP_SETTING_KEYS.BOOK_DOCK_AUTO_FINALIZE_FOLDER_ID));
+
+    return {
+      bookDockPath: this.storage.bookDockPath,
+      autoFetchMetadata: parseBooleanSetting(settings.get(APP_SETTING_KEYS.BOOK_DOCK_AUTO_FETCH_METADATA), true),
+      autoFinalizeEnabled: parseBooleanSetting(settings.get(APP_SETTING_KEYS.BOOK_DOCK_AUTO_FINALIZE_ENABLED), false),
+      autoFinalizeThreshold: parseAutoFinalizeThreshold(settings.get(APP_SETTING_KEYS.BOOK_DOCK_AUTO_FINALIZE_THRESHOLD)),
+      autoFinalizeLibraryId: libraryId,
+      autoFinalizeFolderId: folderId,
+      autoFinalizeMetadataMode: parseAutoFinalizeMetadataMode(settings.get(APP_SETTING_KEYS.BOOK_DOCK_AUTO_FINALIZE_METADATA_MODE)),
+    };
   }
 
-  async isAuthorsProviderAudnexusEnabled(): Promise<boolean> {
-    const row = await this.repo.findByKey(APP_SETTING_KEYS.AUTHORS_PROVIDER_AUDNEXUS_ENABLED);
-    return parseBooleanSetting(row?.value, true);
+  async updateBookDockSettings(settings: UpdateBookDockSettingsRequest): Promise<BookDockSettings> {
+    await this.repo.upsertMany([
+      { key: APP_SETTING_KEYS.BOOK_DOCK_AUTO_FETCH_METADATA, value: String(settings.autoFetchMetadata) },
+      { key: APP_SETTING_KEYS.BOOK_DOCK_AUTO_FINALIZE_ENABLED, value: String(settings.autoFinalizeEnabled) },
+      { key: APP_SETTING_KEYS.BOOK_DOCK_AUTO_FINALIZE_THRESHOLD, value: String(settings.autoFinalizeThreshold) },
+      { key: APP_SETTING_KEYS.BOOK_DOCK_AUTO_FINALIZE_LIBRARY_ID, value: settings.autoFinalizeLibraryId?.toString() ?? '' },
+      { key: APP_SETTING_KEYS.BOOK_DOCK_AUTO_FINALIZE_FOLDER_ID, value: settings.autoFinalizeFolderId?.toString() ?? '' },
+      { key: APP_SETTING_KEYS.BOOK_DOCK_AUTO_FINALIZE_METADATA_MODE, value: settings.autoFinalizeMetadataMode },
+    ]);
+
+    return this.getBookDockSettings();
   }
 
   async getOidcConfig(): Promise<OidcFullConfig> {
     const row = await this.repo.findByKey(APP_SETTING_KEYS.OIDC_CONFIG);
     const stored = parseSafe<Partial<OidcFullConfig>>(APP_SETTING_KEYS.OIDC_CONFIG, row?.value, {}, this.logger);
     return mergeOidcConfig(DEFAULT_OIDC_CONFIG, stored);
+  }
+
+  /**
+   * How many formats of one book to keep when a release carried several.
+   *
+   * Read here rather than through the book-request module's own settings service because the dock
+   * is where placement happens, and a folder dropped in by hand has no request behind it at all.
+   * Falls back to the shipped default, so a hand-edited row cannot stall a finalize.
+   */
+  async getBookRequestImportFormats(): Promise<BookRequestImportFormats> {
+    const row = await this.repo.findByKey(BOOK_REQUEST_AUTOMATION_SETTING_KEYS.IMPORT_FORMATS);
+    return BOOK_REQUEST_IMPORT_FORMATS.includes(row?.value as BookRequestImportFormats)
+      ? (row!.value as BookRequestImportFormats)
+      : DEFAULT_BOOK_REQUEST_AUTOMATION_SETTINGS.importFormats;
   }
 
   async getUploadPattern(): Promise<string> {
@@ -310,14 +368,25 @@ export class AppSettingsService {
 
   async getMaxUploadSizeMb(): Promise<number> {
     const row = await this.repo.findByKey(APP_SETTING_KEYS.MAX_UPLOAD_SIZE_MB);
-    const size = row?.value ? parseInt(row.value, 10) : 500;
-    return isNaN(size) || size <= 0 ? 500 : size;
+    const size = row?.value ? parseInt(row.value, 10) : DEFAULT_MAX_UPLOAD_SIZE_MB;
+    return isNaN(size) || size <= 0 ? DEFAULT_MAX_UPLOAD_SIZE_MB : Math.min(size, HARD_MAX_UPLOAD_SIZE_MB);
   }
 }
 
 function parseAutoFinalizeMetadataMode(value: string | undefined): BookDockAutoFinalizeMetadataMode {
   if (value === 'fetched_only' || value === 'embedded_only') return value;
   return 'safe_merge';
+}
+
+function parseOptionalPositiveInt(value: string | undefined): number | null {
+  if (!value) return null;
+  const parsed = parseInt(value, 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function parseAutoFinalizeThreshold(value: string | undefined): number {
+  const parsed = parseInt(value ?? '85', 10);
+  return Number.isInteger(parsed) && parsed >= 50 && parsed <= 100 ? parsed : 85;
 }
 
 function mergeOidcConfig(base: OidcFullConfig, patch: Partial<OidcFullConfig>): OidcFullConfig {

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { AchievementService } from './achievement.service';
-import { AchievementEventsService, ACHIEVEMENT_EVENT_BOOK_STATUS_CHANGED } from './achievement-events.service';
+import { AchievementEventsService, ACHIEVEMENT_EVENT_BACKFILL, ACHIEVEMENT_EVENT_BOOK_STATUS_CHANGED } from './achievement-events.service';
 
 function makeRepo() {
   return {
@@ -9,8 +9,13 @@ function makeRepo() {
     findUserAchievements: vi.fn().mockResolvedValue([]),
     findUserEarnedKeys: vi.fn().mockResolvedValue(new Set()),
     findUserIsSuperuser: vi.fn().mockResolvedValue(false),
+    findUserTimeZone: vi.fn().mockResolvedValue('UTC'),
     award: vi.fn().mockResolvedValue({ id: 1, achievementKey: 'test', userId: 1, awardedAt: new Date(), contextJson: null }),
     upsertCatalogue: vi.fn().mockResolvedValue(undefined),
+    backfillExistingCelebrations: vi.fn().mockResolvedValue(0),
+    claimNextCelebration: vi.fn().mockResolvedValue(null),
+    acknowledgeCelebration: vi.fn().mockResolvedValue('acknowledged'),
+    findAccessibleBookIds: vi.fn().mockResolvedValue(new Set()),
     countFinishedBooks: vi.fn().mockResolvedValue(0),
     sumPagesRead: vi.fn().mockResolvedValue(0),
     sumReadingHours: vi.fn().mockResolvedValue(0),
@@ -78,6 +83,44 @@ describe('AchievementService', () => {
     it('seeds the catalogue', async () => {
       await service.onModuleInit();
       expect(repo.upsertCatalogue).toHaveBeenCalledOnce();
+    });
+
+    it('subscribes achievement evaluation to backfill events', async () => {
+      const handleEvent = vi.spyOn(service, 'handleEvent').mockResolvedValue(undefined);
+      await service.onModuleInit();
+
+      events.emit(ACHIEVEMENT_EVENT_BACKFILL, { userId: 7 });
+
+      expect(handleEvent).toHaveBeenCalledWith(ACHIEVEMENT_EVENT_BACKFILL, { userId: 7 });
+    });
+
+    it('collapses a burst of backfill events for one user into a single trailing re-run', async () => {
+      const pending: (() => void)[] = [];
+      const handleEvent = vi.spyOn(service, 'handleEvent').mockImplementation(() => new Promise<void>((resolve) => pending.push(resolve)));
+      await service.onModuleInit();
+
+      events.emit(ACHIEVEMENT_EVENT_BACKFILL, { userId: 7 });
+      events.emit(ACHIEVEMENT_EVENT_BACKFILL, { userId: 7 });
+      events.emit(ACHIEVEMENT_EVENT_BACKFILL, { userId: 7 });
+      expect(handleEvent).toHaveBeenCalledOnce();
+
+      pending[0]!();
+      await vi.waitFor(() => expect(handleEvent).toHaveBeenCalledTimes(2));
+
+      pending[1]!();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(handleEvent).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not serialize backfill runs across users', async () => {
+      const handleEvent = vi.spyOn(service, 'handleEvent').mockImplementation(() => new Promise<void>(() => undefined));
+      await service.onModuleInit();
+
+      events.emit(ACHIEVEMENT_EVENT_BACKFILL, { userId: 7 });
+      events.emit(ACHIEVEMENT_EVENT_BACKFILL, { userId: 8 });
+
+      expect(handleEvent).toHaveBeenCalledTimes(2);
+      expect(handleEvent).toHaveBeenCalledWith(ACHIEVEMENT_EVENT_BACKFILL, { userId: 8 });
     });
   });
 
@@ -157,9 +200,62 @@ describe('AchievementService', () => {
 
       const result = await service.getCatalogue({ id: 1, isSuperuser: false } as never);
       const item = result.categories.find((c) => c.key === 'reading')?.achievements[0];
-      expect(item?.name).toBe('???');
-      expect(item?.description).toBe('Secret Achievement');
-      expect(item?.iconName).toBe('help-circle');
+      expect(item?.name).toBe('Secret Achievement');
+      expect(item?.description).toBe('Keep reading to reveal this achievement.');
+      expect(item?.iconName).toBe('lock');
+      expect(item?.threshold).toBeNull();
+      expect(item?.context).toBeNull();
+    });
+  });
+
+  describe('celebrations', () => {
+    const achievement = {
+      key: 'books_finished_1',
+      groupKey: 'books_finished',
+      tier: 1,
+      category: 'reading',
+      name: 'Ink Initiate',
+      description: 'Finish one book',
+      iconName: 'book-open',
+      rarity: 'common',
+      threshold: 1,
+      hidden: false,
+      sortOrder: 1,
+    };
+
+    it('does not claim when achievements are disabled', async () => {
+      userService.isAchievementEnabled.mockResolvedValue(false);
+
+      await expect(service.claimCelebration({ id: 1, isSuperuser: false } as never)).resolves.toBeNull();
+      expect(repo.claimNextCelebration).not.toHaveBeenCalled();
+    });
+
+    it('returns a typed claim with accessible related-book context', async () => {
+      repo.claimNextCelebration.mockResolvedValue({
+        achievement,
+        award: {
+          id: 3,
+          userId: 1,
+          achievementKey: achievement.key,
+          awardedAt: new Date('2026-07-22T12:00:00Z'),
+          contextJson: { bookId: 42, bookTitle: 'The Long Orbit' },
+        },
+      });
+      repo.findAccessibleBookIds.mockResolvedValue(new Set([42]));
+
+      const claim = await service.claimCelebration({ id: 1, isSuperuser: false } as never);
+
+      expect(claim?.claimId).toMatch(/^[0-9a-f-]{36}$/);
+      expect(claim?.achievement.contextBookId).toBe(42);
+      expect(claim?.achievement.contextBookTitle).toBe('The Long Orbit');
+      expect(repo.claimNextCelebration).toHaveBeenCalledOnce();
+    });
+
+    it('treats missing acknowledgement as idempotent and rejects foreign claims', async () => {
+      repo.acknowledgeCelebration.mockResolvedValueOnce('missing').mockResolvedValueOnce('foreign');
+
+      await expect(service.acknowledgeCelebration({ id: 1 } as never, 'claim')).resolves.toBeUndefined();
+      await expect(service.acknowledgeCelebration({ id: 1 } as never, 'claim')).rejects.toThrow('not found');
     });
   });
 
@@ -585,6 +681,16 @@ describe('AchievementService', () => {
       expect(registry.evaluate).not.toHaveBeenCalled();
     });
 
+    it('awards backfill achievements without notifying', async () => {
+      registry.evaluate.mockResolvedValueOnce([{ key: 'power_hour', context: { pages: 112 } }]).mockResolvedValueOnce([]);
+      repo.findAchievementByKey.mockResolvedValue({ key: 'power_hour', name: 'Power Hour', rarity: 'rare', iconName: 'zap' });
+
+      await service.handleEvent(ACHIEVEMENT_EVENT_BACKFILL, { userId: 1 });
+
+      expect(repo.award).toHaveBeenCalledWith(1, 'power_hour', { pages: 112 });
+      expect(notificationService.notify).not.toHaveBeenCalled();
+    });
+
     it('handles achievement preference lookup errors gracefully', async () => {
       userService.isAchievementEnabled.mockRejectedValue(new Error('Settings lookup failed'));
 
@@ -604,7 +710,7 @@ describe('AchievementService', () => {
       await service.onModuleInit();
       const removeListenerSpy = vi.spyOn(events, 'removeListener');
       service.onModuleDestroy();
-      expect(removeListenerSpy).toHaveBeenCalledTimes(7);
+      expect(removeListenerSpy).toHaveBeenCalledTimes(8);
     });
   });
 });

@@ -78,20 +78,29 @@ local function installClient(handle)
     local responses = handle.responses
     return {
         isConfigured = function() return true end,
-        matchCheck = function(_, hashes)
+        matchCheck = function(_, hashes, candidates)
             table.insert(handle.calls.match, hashes)
+            table.insert(handle.calls.match_candidates, candidates)
+            if responses.match_error then return nil, responses.match_error end
             local matches = {}
             for _, hash in ipairs(hashes) do
                 if responses.unmatched[hash] then
                     -- left out of the response on purpose
                 else
-                    table.insert(matches, { hash = hash, bookId = 1, bookFileId = 2 })
+                    local configured = responses.matches[hash] or {}
+                    local stored = handle.state and handle.state:getBook(hash) or {}
+                    table.insert(matches, {
+                        hash = hash,
+                        bookId = configured.bookId or stored.bookId or 1,
+                        bookFileId = configured.bookFileId or stored.fileId or 2,
+                    })
                 end
             end
             return { matches = matches, libraryVersion = responses.library_version }
         end,
         uploadPageStats = function(_, books)
             table.insert(handle.calls.page_stats, books)
+            if responses.page_stats then return responses.page_stats(books) end
             return { results = {}, unmatched = {} }
         end,
         uploadBookStates = function(_, batch)
@@ -118,9 +127,12 @@ opts:
 - books: statistics rows, { md5, id, title, authors, last_open }
 - events: map of statistics row id to { page, start_time, duration, total_pages }
 - history: ReadHistory entries, { file, time, text }
-- state: initial { books, unmatched, files, global }
+-- state: initial { books, unmatched, files, statsRows, global }
 - library_version: token every server response carries
 - unmatched: set of hashes match-check refuses to match
+- matches: map of hashes to custom { bookId, bookFileId } match results
+- match_error: HTTP or transport error returned by match-check
+- page_stats_response: function returning the server response for an upload
 - sidecar: overrides for the BookOrbitSidecar stub
 ]]
 function SweepHarness.install(opts)
@@ -141,13 +153,18 @@ function SweepHarness.install(opts)
         responses = {
             library_version = opts.library_version,
             unmatched = opts.unmatched or {},
+            matches = opts.matches or {},
+            match_error = opts.match_error,
+            page_stats = opts.page_stats_response,
         },
         calls = {
             match = {},
+            match_candidates = {},
             page_stats = {},
             book_states = {},
             progress = {},
             legacy_annotations = {},
+            annotation_exchanges = {},
             sweep_complete = 0,
             event_queries = 0,
             latest_event_queries = 0,
@@ -217,7 +234,7 @@ function SweepHarness.install(opts)
             handle.calls.scheduled = handle.calls.scheduled + 1
             handle.scheduler:scheduleIn(delay, callback)
         end,
-        show = function() end,
+        show = function(_, widget) handle.shown = widget end,
         close = function() end,
         setDirty = function() end,
     }
@@ -249,8 +266,9 @@ function SweepHarness.install(opts)
     package.loaded["bookorbit_sidecar"] = sidecar
 
     package.loaded["bookorbit_annotations"] = {
-        exchangeBook = function()
-            return { uploaded = 0, applied = 0, deleted = 0, failed = 0, had_errors = false }
+        exchangeBook = function(exchange_opts)
+            table.insert(handle.calls.annotation_exchanges, exchange_opts)
+            return { uploaded = #(exchange_opts.annotations or {}), applied = 0, deleted = 0, failed = 0, had_errors = false }
         end,
         readWatermark = function() return "" end,
         advanceWatermark = function() end,
@@ -281,6 +299,7 @@ function SweepHarness.install(opts)
         books = initial.books or {},
         unmatched = initial.unmatched or {},
         files = initial.files or {},
+        statsRows = initial.statsRows or {},
         global = initial.global or {},
     }, function()
         handle.flushes = handle.flushes + 1

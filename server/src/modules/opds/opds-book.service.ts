@@ -3,7 +3,7 @@ import { SQL, and, count, eq, gt, inArray, or, sql } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 
 import { DB } from '../../db';
-import { accentInsensitiveIlike } from '../../common/utils/accent-insensitive-search.utils';
+import { accentInsensitiveIlike, buildSearchPattern } from '../../common/utils/accent-insensitive-search.utils';
 import * as schema from '../../db/schema';
 import {
   authors,
@@ -21,8 +21,10 @@ import {
   userLibraryAccess,
 } from '../../db/schema';
 import { BookQueryBuilder } from '../book/book-query-builder.service';
-import type { ContentFilterRules, GroupRule } from '@bookorbit/types';
+import { isAudioFormat, type ContentFilterRules, type GroupRule } from '@bookorbit/types';
+import { rankFileRowsByBook, rankFilesByFormatPriority } from '../../common/utils/primary-file-selection.utils';
 import { buildContentFilterClauses } from '../../common/utils/content-filter-sql.utils';
+import { seriesIndexOrderBy } from '../../common/utils/series-index-sql.utils';
 
 type Db = NodePgDatabase<typeof schema>;
 
@@ -49,7 +51,7 @@ type ContextSeriesRow = {
   bookId: number;
   seriesId: number;
   seriesName: string;
-  seriesIndex: number | null;
+  seriesIndex: string | null;
 };
 
 type OpdsSortOrder =
@@ -77,8 +79,8 @@ const OPDS_SORT_MAP: Record<OpdsSortOrder, SQL[]> = {
   title_desc: [sql`${bookMetadata.title} DESC NULLS LAST`, sql`${books.id} ASC`],
   author_asc: [sql`min(${authors.sortName}) ASC NULLS LAST`, sql`${bookMetadata.title} ASC NULLS LAST`, sql`${books.id} ASC`],
   author_desc: [sql`min(${authors.sortName}) DESC NULLS LAST`, sql`${bookMetadata.title} ASC NULLS LAST`, sql`${books.id} ASC`],
-  series_asc: [sql`${bookMetadata.seriesName} ASC NULLS LAST`, sql`${bookMetadata.seriesIndex} ASC NULLS LAST`, sql`${books.id} ASC`],
-  series_desc: [sql`${bookMetadata.seriesName} DESC NULLS LAST`, sql`${bookMetadata.seriesIndex} DESC NULLS LAST`, sql`${books.id} ASC`],
+  series_asc: [sql`${bookMetadata.seriesName} ASC NULLS LAST`, ...seriesIndexOrderBy(bookMetadata.seriesIndex, 'ASC'), sql`${books.id} ASC`],
+  series_desc: [sql`${bookMetadata.seriesName} DESC NULLS LAST`, ...seriesIndexOrderBy(bookMetadata.seriesIndex, 'DESC'), sql`${books.id} ASC`],
 };
 
 const READ_STATUS_BUCKETS = {
@@ -87,8 +89,6 @@ const READ_STATUS_BUCKETS = {
 } as const;
 
 const ACTIVE_READ_STATUSES = [...READ_STATUS_BUCKETS.reading, ...READ_STATUS_BUCKETS.finished];
-
-const LIKE_SPECIAL_CHARS = /[%_\\]/g;
 
 export interface OpdsBookEntry {
   id: number;
@@ -99,7 +99,7 @@ export interface OpdsBookEntry {
   description: string | null;
   seriesId: number | null;
   seriesName: string | null;
-  seriesIndex: number | null;
+  seriesIndex: string | null;
   language: string | null;
   publisher: string | null;
   isbn13: string | null;
@@ -111,6 +111,7 @@ export interface OpdsBookEntry {
 export interface OpdsManifestFileRow {
   id: number;
   format: string;
+  mediaOverlayAvailable: boolean;
   sizeBytes: number | null;
   fileHash: string | null;
   filename: string | null;
@@ -124,13 +125,27 @@ export interface OpdsManifestBookRow {
   subtitle: string | null;
   authors: string[];
   seriesName: string | null;
-  seriesIndex: number | null;
+  seriesIndex: string | null;
   language: string | null;
   publisher: string | null;
   publishedYear: number | null;
   isbn10: string | null;
   isbn13: string | null;
   files: OpdsManifestFileRow[];
+}
+
+/**
+ * A read-along EPUB downloads over OPDS without its audio, so beside a plain EPUB of the same book
+ * it would be a second link to the same text. The plain one stands for both.
+ */
+function isRedundantReadAlong(
+  row: { bookId: number; id: number; format: string | null; mediaOverlayAvailable: boolean },
+  rows: readonly { bookId: number; id: number; format: string | null; mediaOverlayAvailable: boolean }[],
+): boolean {
+  if (row.format?.toLowerCase() !== 'epub' || !row.mediaOverlayAvailable) return false;
+  return rows.some(
+    (other) => other.bookId === row.bookId && other.id !== row.id && other.format?.toLowerCase() === 'epub' && !other.mediaOverlayAvailable,
+  );
 }
 
 @Injectable()
@@ -332,6 +347,7 @@ export class OpdsBookService {
           bookId: books.id,
           id: bookFiles.id,
           format: bookFiles.format,
+          mediaOverlayAvailable: bookFiles.mediaOverlayAvailable,
           sizeBytes: bookFiles.sizeBytes,
           fileHash: bookFiles.fileHash,
           absolutePath: bookFiles.absolutePath,
@@ -356,6 +372,7 @@ export class OpdsBookService {
       list.push({
         id: row.id,
         format: row.format ?? 'unknown',
+        mediaOverlayAvailable: row.mediaOverlayAvailable,
         sizeBytes: row.sizeBytes,
         fileHash: row.fileHash,
         // Only the basename leaves the server; the stored absolute path never does.
@@ -397,7 +414,7 @@ export class OpdsBookService {
     const term = q.trim();
     if (!term) return undefined;
 
-    const pattern = `%${term.replace(LIKE_SPECIAL_CHARS, '\\$&')}%`;
+    const pattern = buildSearchPattern(term);
     const existsAuthor = (() => {
       const sq = this.db
         .select({ one: sql`1` })
@@ -524,7 +541,7 @@ export class OpdsBookService {
     const where: SQL[] = [inArray(books.libraryId, accessibleIds)];
     const term = opts.q?.trim();
     if (term) {
-      where.push(accentInsensitiveIlike(authors.name, `%${term.replace(LIKE_SPECIAL_CHARS, '\\$&')}%`));
+      where.push(accentInsensitiveIlike(authors.name, buildSearchPattern(term)));
     }
 
     const rows = await this.db
@@ -558,7 +575,7 @@ export class OpdsBookService {
     const where: SQL[] = [inArray(books.libraryId, accessibleIds)];
     const term = opts.q?.trim();
     if (term) {
-      where.push(accentInsensitiveIlike(bookSeries.name, `%${term.replace(LIKE_SPECIAL_CHARS, '\\$&')}%`));
+      where.push(accentInsensitiveIlike(bookSeries.name, buildSearchPattern(term)));
     }
 
     const rows = await this.db
@@ -589,7 +606,7 @@ export class OpdsBookService {
       })
       .from(collections)
       .leftJoin(collectionBooks, eq(collectionBooks.collectionId, collections.id))
-      .where(eq(collections.userId, userId))
+      .where(and(eq(collections.userId, userId), eq(collections.mediaType, 'books')))
       .groupBy(collections.id)
       .orderBy(collections.name);
   }
@@ -598,7 +615,10 @@ export class OpdsBookService {
   // their list siblings compute. Counting collections through getUserCollections
   // would aggregate over collection_books just to read the row count back.
   async countUserCollections(userId: number): Promise<number> {
-    const [row] = await this.db.select({ total: count() }).from(collections).where(eq(collections.userId, userId));
+    const [row] = await this.db
+      .select({ total: count() })
+      .from(collections)
+      .where(and(eq(collections.userId, userId), eq(collections.mediaType, 'books')));
     return Number(row?.total ?? 0);
   }
 
@@ -606,7 +626,7 @@ export class OpdsBookService {
     const [row] = await this.db
       .select({ total: count() })
       .from(smartScopes)
-      .where(or(eq(smartScopes.userId, userId), eq(smartScopes.isPublic, true)));
+      .where(and(eq(smartScopes.mediaType, 'books'), or(eq(smartScopes.userId, userId), eq(smartScopes.isPublic, true))));
     return Number(row?.total ?? 0);
   }
 
@@ -627,7 +647,7 @@ export class OpdsBookService {
         icon: smartScopes.icon,
       })
       .from(smartScopes)
-      .where(or(eq(smartScopes.userId, userId), eq(smartScopes.isPublic, true)))
+      .where(and(eq(smartScopes.mediaType, 'books'), or(eq(smartScopes.userId, userId), eq(smartScopes.isPublic, true))))
       .orderBy(smartScopes.name);
   }
 
@@ -650,20 +670,41 @@ export class OpdsBookService {
     }
   }
 
-  async getBookFiles(bookId: number, fileId?: number): Promise<{ absolutePath: string; format: string; title: string; authorName: string } | null> {
-    const fileQuery = this.db
+  /**
+   * The file a download serves: the one asked for when it is a content file, otherwise the edition an
+   * OPDS reader can open, the primary unless that is an audiobook with a readable edition beside it.
+   */
+  async getBookFiles(
+    bookId: number,
+    fileId?: number,
+  ): Promise<{ absolutePath: string; format: string; readAlong: boolean; title: string; authorName: string } | null> {
+    const candidates = await this.db
       .select({
+        id: bookFiles.id,
         absolutePath: bookFiles.absolutePath,
         format: bookFiles.format,
+        role: bookFiles.role,
+        sizeBytes: bookFiles.sizeBytes,
+        mediaOverlayAvailable: bookFiles.mediaOverlayAvailable,
         title: bookMetadata.title,
+        primaryFileId: books.primaryFileId,
+        formatPriority: libraries.formatPriority,
       })
       .from(bookFiles)
-      .leftJoin(books, eq(books.id, bookFiles.bookId))
+      .innerJoin(books, eq(books.id, bookFiles.bookId))
+      .leftJoin(libraries, eq(libraries.id, books.libraryId))
       .leftJoin(bookMetadata, eq(bookMetadata.bookId, bookFiles.bookId))
-      .where(fileId ? and(eq(bookFiles.id, fileId), eq(bookFiles.bookId, bookId)) : and(eq(books.id, bookId), eq(bookFiles.id, books.primaryFileId)))
-      .limit(1);
+      .where(and(eq(bookFiles.bookId, bookId), eq(bookFiles.role, 'content')))
+      .orderBy(bookFiles.sortOrder, bookFiles.id);
 
-    const [file] = await fileQuery;
+    const first = candidates[0];
+    if (!first) return null;
+    const file = fileId
+      ? candidates.find((candidate) => candidate.id === fileId)
+      : (() => {
+          const ranked = rankFilesByFormatPriority(candidates, first.formatPriority as string[] | null, first.primaryFileId);
+          return ranked.find((candidate) => candidate.format != null && !isAudioFormat(candidate.format)) ?? ranked[0];
+        })();
     if (!file) return null;
 
     const [authorRow] = await this.db
@@ -677,6 +718,7 @@ export class OpdsBookService {
     return {
       absolutePath: file.absolutePath,
       format: file.format ?? 'unknown',
+      readAlong: file.format?.toLowerCase() === 'epub' && file.mediaOverlayAvailable,
       title: file.title ?? `book-${bookId}`,
       authorName: authorRow?.name ?? '',
     };
@@ -692,6 +734,8 @@ export class OpdsBookService {
     const [smartScope] = await this.db.select().from(smartScopes).where(eq(smartScopes.id, smartScopeId)).limit(1);
     if (!smartScope) return null;
     if (!smartScope.isPublic && smartScope.userId !== userId) return null;
+    // OPDS serves books. A podcast scope's rules are not a GroupRule and would not survive buildWhere.
+    if (smartScope.mediaType !== 'books') return null;
 
     const where = this.queryBuilder.buildWhere(smartScope.filter as GroupRule | null, {
       accessibleLibraryIds: accessibleIds,
@@ -810,9 +854,12 @@ export class OpdsBookService {
           publisher: bookMetadata.publisher,
           isbn13: bookMetadata.isbn13,
           coverSource: bookMetadata.coverSource,
+          primaryFileId: books.primaryFileId,
+          formatPriority: libraries.formatPriority,
         })
         .from(books)
         .leftJoin(bookMetadata, eq(bookMetadata.bookId, books.id))
+        .leftJoin(libraries, eq(libraries.id, books.libraryId))
         .where(inArray(books.id, bookIds)),
       this.db
         .select({ bookId: bookAuthors.bookId, name: authors.name })
@@ -821,7 +868,14 @@ export class OpdsBookService {
         .where(inArray(bookAuthors.bookId, bookIds))
         .orderBy(bookAuthors.displayOrder),
       this.db
-        .select({ bookId: books.id, id: bookFiles.id, format: bookFiles.format, role: bookFiles.role })
+        .select({
+          bookId: books.id,
+          id: bookFiles.id,
+          format: bookFiles.format,
+          role: bookFiles.role,
+          sizeBytes: bookFiles.sizeBytes,
+          mediaOverlayAvailable: bookFiles.mediaOverlayAvailable,
+        })
         .from(bookFiles)
         .innerJoin(books, eq(books.id, bookFiles.bookId))
         .where(and(inArray(bookFiles.bookId, bookIds), eq(bookFiles.role, 'content')))
@@ -836,9 +890,13 @@ export class OpdsBookService {
       authorsByBook.set(row.bookId, list);
     }
 
+    const rankedFileRows = rankFileRowsByBook(
+      fileRows,
+      new Map(metaRows.map((row) => [row.id, { formatPriority: row.formatPriority as string[] | null, primaryFileId: row.primaryFileId }])),
+    );
     const filesByBook = new Map<number, { id: number; format: string }[]>();
-    for (const row of fileRows) {
-      if (row.role !== 'content') continue;
+    for (const row of rankedFileRows) {
+      if (row.role !== 'content' || isRedundantReadAlong(row, rankedFileRows)) continue;
       const list = filesByBook.get(row.bookId) ?? [];
       list.push({ id: row.id, format: row.format ?? 'unknown' });
       filesByBook.set(row.bookId, list);
@@ -908,11 +966,7 @@ export class OpdsBookService {
 
   private buildContextSeriesOrder(sortOrder: OpdsSortOrder): SQL[] {
     const direction = sortOrder === 'series_desc' ? 'DESC' : 'ASC';
-    return [
-      sql`${bookSeriesMemberships.seriesIndex} ${sql.raw(direction)} NULLS LAST`,
-      sql`${bookMetadata.title} ASC NULLS LAST`,
-      sql`${books.id} ASC`,
-    ];
+    return [...seriesIndexOrderBy(bookSeriesMemberships.seriesIndex, direction), sql`${bookMetadata.title} ASC NULLS LAST`, sql`${books.id} ASC`];
   }
 
   private fetchContextSeriesRows(bookIds: number[], filter: SeriesFilter): Promise<ContextSeriesRow[]> {

@@ -1,8 +1,7 @@
 import { Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { join } from 'path';
 
-import { DEFAULT_UPLOAD_CHUNK_BYTES, type AppInfoResponse } from '@bookorbit/types';
+import type { AppInfoResponse } from '@bookorbit/types';
 
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { AppSettingsService } from '../app-settings/app-settings.service';
@@ -35,9 +34,6 @@ export class AppInfoService implements OnApplicationBootstrap {
   async getAppInfo(): Promise<AppInfoResponse> {
     const version = this.config.get<string>('app.version') ?? 'Local build';
     const enabled = await this.appSettingsService.isUpdateCheckEnabled();
-    const appDataPath = this.config.get<string>('storage.appDataPath') ?? '/data';
-    const bookDockPath = this.config.get<string>('storage.bookDockPath') ?? join(appDataPath, 'book-dock');
-
     if (enabled && SEMVER_RE.test(version)) {
       const now = Date.now();
       if (now - this.lastCheckTime > 600_000) {
@@ -52,9 +48,7 @@ export class AppInfoService implements OnApplicationBootstrap {
       version,
       updateAvailable: this.updateAvailable,
       latestVersion: this.latestVersion,
-      bookDockPath,
       maxUploadSizeMb,
-      uploadChunkSizeBytes: DEFAULT_UPLOAD_CHUNK_BYTES,
     };
   }
 

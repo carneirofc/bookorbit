@@ -39,6 +39,3 @@ test-results/
 
 # vite-plugin-pwa dev service worker output
 dev-dist
-
-# Local podman-only compose override (not portable to Docker)
-docker-compose.podman.yml

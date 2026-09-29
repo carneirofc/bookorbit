@@ -1,11 +1,14 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, count, countDistinct, desc, eq, gt, gte, isNotNull, isNull, lt, lte, ne, notInArray, sql, sum } from 'drizzle-orm';
+import { and, asc, count, countDistinct, desc, eq, gt, gte, inArray, isNotNull, isNull, lt, lte, ne, notInArray, or, sql, sum } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 
+import { addDateKeyDays } from '../../common/utils/reading-daily-stats.utils';
+import { resolveTimeZone, toDateKeyInTimeZone, toTimeZoneStartOfDay } from '../../common/utils/timezone.utils';
 import { DB } from '../../db';
 import * as schema from '../../db/schema';
 import {
   achievements,
+  appSettings,
   userAchievements,
   userBookStatus,
   userBookRatings,
@@ -28,6 +31,13 @@ import {
 import type { AchievementRow, NewAchievement, UserAchievementRow } from '../../db/schema';
 
 type Db = NodePgDatabase<typeof schema>;
+
+export interface ClaimedAchievementRow {
+  award: UserAchievementRow;
+  achievement: AchievementRow;
+}
+
+export type CelebrationAcknowledgementResult = 'acknowledged' | 'foreign' | 'missing';
 
 @Injectable()
 export class AchievementRepository {
@@ -63,6 +73,24 @@ export class AchievementRepository {
       } else {
         await tx.delete(achievements);
       }
+    });
+  }
+
+  async backfillExistingCelebrations(): Promise<number> {
+    return this.db.transaction(async (tx) => {
+      const [marker] = await tx
+        .insert(appSettings)
+        .values({ key: 'achievement_celebration_backfill_v1', value: 'complete' })
+        .onConflictDoNothing({ target: appSettings.key })
+        .returning({ key: appSettings.key });
+      if (!marker) return 0;
+
+      const rows = await tx
+        .update(userAchievements)
+        .set({ celebratedAt: sql`${userAchievements.awardedAt}` })
+        .where(isNull(userAchievements.celebratedAt))
+        .returning({ id: userAchievements.id });
+      return rows.length;
     });
   }
 
@@ -105,9 +133,91 @@ export class AchievementRepository {
     return row ?? null;
   }
 
+  async claimNextCelebration(userId: number, claimId: string, claimedAt: Date, expiresBefore: Date): Promise<ClaimedAchievementRow | null> {
+    return this.db.transaction(async (tx) => {
+      const [candidate] = await tx
+        .select({ award: userAchievements, achievement: achievements })
+        .from(userAchievements)
+        .innerJoin(achievements, eq(achievements.key, userAchievements.achievementKey))
+        .where(
+          and(
+            eq(userAchievements.userId, userId),
+            isNull(userAchievements.celebratedAt),
+            or(
+              isNull(userAchievements.celebrationClaimId),
+              isNull(userAchievements.celebrationClaimedAt),
+              lt(userAchievements.celebrationClaimedAt, expiresBefore),
+            ),
+          ),
+        )
+        .orderBy(asc(userAchievements.awardedAt), asc(userAchievements.id))
+        .limit(1)
+        .for('update', { of: userAchievements, skipLocked: true });
+
+      if (!candidate) return null;
+
+      const [award] = await tx
+        .update(userAchievements)
+        .set({ celebrationClaimId: claimId, celebrationClaimedAt: claimedAt })
+        .where(eq(userAchievements.id, candidate.award.id))
+        .returning();
+
+      return award ? { award, achievement: candidate.achievement } : null;
+    });
+  }
+
+  async acknowledgeCelebration(userId: number, claimId: string, celebratedAt: Date): Promise<CelebrationAcknowledgementResult> {
+    return this.db.transaction(async (tx) => {
+      const [claim] = await tx
+        .select({ id: userAchievements.id, userId: userAchievements.userId })
+        .from(userAchievements)
+        .where(eq(userAchievements.celebrationClaimId, claimId))
+        .limit(1)
+        .for('update');
+
+      if (!claim) return 'missing';
+      if (claim.userId !== userId) return 'foreign';
+
+      await tx
+        .update(userAchievements)
+        .set({
+          celebratedAt,
+          celebrationClaimId: null,
+          celebrationClaimedAt: null,
+        })
+        .where(and(eq(userAchievements.id, claim.id), eq(userAchievements.userId, userId)));
+      return 'acknowledged';
+    });
+  }
+
+  async findAccessibleBookIds(userId: number, isSuperuser: boolean, bookIds: number[]): Promise<Set<number>> {
+    const uniqueBookIds = Array.from(new Set(bookIds.filter((id) => Number.isInteger(id) && id > 0)));
+    if (uniqueBookIds.length === 0) return new Set();
+
+    if (isSuperuser) {
+      const rows = await this.db
+        .select({ id: books.id })
+        .from(books)
+        .where(and(inArray(books.id, uniqueBookIds), eq(books.status, 'present')));
+      return new Set(rows.map((row) => row.id));
+    }
+
+    const rows = await this.db
+      .select({ id: books.id })
+      .from(books)
+      .innerJoin(userLibraryAccess, eq(books.libraryId, userLibraryAccess.libraryId))
+      .where(and(inArray(books.id, uniqueBookIds), eq(books.status, 'present'), eq(userLibraryAccess.userId, userId)));
+    return new Set(rows.map((row) => row.id));
+  }
+
   async findUserIsSuperuser(userId: number): Promise<boolean> {
     const [row] = await this.db.select({ isSuperuser: users.isSuperuser }).from(users).where(eq(users.id, userId)).limit(1);
     return row?.isSuperuser ?? false;
+  }
+
+  async findUserTimeZone(userId: number): Promise<string> {
+    const [row] = await this.db.select({ settings: users.settings }).from(users).where(eq(users.id, userId)).limit(1);
+    return resolveTimeZone((row?.settings as { timezone?: unknown } | undefined)?.timezone, 'UTC');
   }
 
   async countFinishedBooks(userId: number): Promise<number> {
@@ -265,8 +375,11 @@ export class AchievementRepository {
     return row?.title ?? null;
   }
 
-  async getCurrentStreak(userId: number): Promise<number> {
-    // Count consecutive days with reading activity ending at today or yesterday
+  async getCurrentStreak(userId: number, timeZone: string): Promise<number> {
+    // Count consecutive days with reading activity ending at today or yesterday.
+    // `day` is bucketed in the reader's timezone, so the "is it still alive" cutoff
+    // has to be their today too, not the database server's CURRENT_DATE.
+    const today = toDateKeyInTimeZone(new Date(), timeZone);
     const result = await this.db.execute(sql`
       WITH daily AS (
         SELECT DISTINCT day::date as d
@@ -280,7 +393,7 @@ export class AchievementRepository {
       SELECT COUNT(*) as streak_length
       FROM streak
       WHERE grp = (
-        SELECT grp FROM streak WHERE d >= CURRENT_DATE - INTERVAL '1 day' ORDER BY d DESC LIMIT 1
+        SELECT grp FROM streak WHERE d >= ${today}::date - INTERVAL '1 day' ORDER BY d DESC LIMIT 1
       )
     `);
     const rows = (result as unknown as { rows: Array<{ streak_length: string }> }).rows;
@@ -679,9 +792,10 @@ export class AchievementRepository {
     return rows.length > 0 ? rows[0].cnt : 0;
   }
 
-  async countAnnotationsOnDay(userId: number, date: Date): Promise<number> {
-    const dayStart = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
-    const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
+  async countAnnotationsOnDay(userId: number, date: Date, timeZone: string): Promise<number> {
+    const day = toDateKeyInTimeZone(date, timeZone);
+    const dayStart = toTimeZoneStartOfDay(day, timeZone);
+    const dayEnd = toTimeZoneStartOfDay(addDateKeyDays(day, 1), timeZone);
     const [{ value }] = await this.db
       .select({ value: count() })
       .from(annotations)
@@ -988,9 +1102,10 @@ export class AchievementRepository {
     return Math.floor(Number(result?.value ?? 0));
   }
 
-  async getPagesOnDay(userId: number, day: Date): Promise<number> {
-    const dayStart = new Date(Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate()));
-    const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
+  async getPagesOnDay(userId: number, day: Date, timeZone: string): Promise<number> {
+    const dayKey = toDateKeyInTimeZone(day, timeZone);
+    const dayStart = toTimeZoneStartOfDay(dayKey, timeZone);
+    const dayEnd = toTimeZoneStartOfDay(addDateKeyDays(dayKey, 1), timeZone);
     const [result] = await this.db
       .select({
         value: sql<number>`coalesce(sum(${bookMetadata.pageCount} * least(greatest(${readingSessions.progressDelta}, 0), 100) / 100.0), 0)::float`,
@@ -1014,7 +1129,7 @@ export class AchievementRepository {
     return Math.floor(Number(result?.value ?? 0));
   }
 
-  async getMaxPagesInADay(userId: number): Promise<number> {
+  async getMaxPagesInADay(userId: number, timeZone: string): Promise<number> {
     const result = await this.db.execute<{ max_pages: number }>(sql`
       SELECT COALESCE(MAX(day_pages), 0)::float AS max_pages FROM (
         SELECT SUM(bm.page_count * LEAST(GREATEST(rs.progress_delta, 0), 100) / 100.0) AS day_pages
@@ -1025,7 +1140,7 @@ export class AchievementRepository {
           AND bm.page_count IS NOT NULL AND bm.page_count > 0
           AND rs.progress_delta IS NOT NULL AND rs.progress_delta > 0 AND rs.progress_delta <= 100
           AND rs.duration_seconds > 0
-        GROUP BY DATE_TRUNC('day', rs.started_at AT TIME ZONE 'UTC')
+        GROUP BY DATE_TRUNC('day', rs.started_at AT TIME ZONE ${timeZone})
       ) daily
     `);
     const rows = (result as unknown as { rows: Array<{ max_pages: number }> }).rows;
@@ -1092,17 +1207,32 @@ export class AchievementRepository {
   }
 
   async countDistinctSources(userId: number): Promise<number> {
-    const [web, koreader, kobo] = await Promise.all([this.hasWebSession(userId), this.hasKoreaderSync(userId), this.hasKoboSync(userId)]);
-    return (web ? 1 : 0) + (koreader ? 1 : 0) + (kobo ? 1 : 0);
+    const result = await this.db.execute<{ source_count: number }>(sql`
+      SELECT COUNT(DISTINCT src)::int AS source_count FROM (
+        SELECT source AS src
+        FROM reading_sessions
+        WHERE user_id = ${userId} AND source IN ('web', 'ios', 'watchos', 'android')
+        UNION
+        SELECT 'koreader' AS src
+        FROM koreader_device_progress
+        WHERE user_id = ${userId} AND orphaned = false
+        UNION
+        SELECT 'kobo' AS src
+        FROM kobo_reading_states
+        WHERE user_id = ${userId}
+      ) sources
+    `);
+    const rows = (result as unknown as { rows: Array<{ source_count: number }> }).rows;
+    return Number(rows[0]?.source_count ?? 0);
   }
 
   async maxSourcesOnSingleBook(userId: number): Promise<number> {
     const result = await this.db.execute<{ max_sources: number }>(sql`
       SELECT COALESCE(MAX(src_count), 0)::int AS max_sources FROM (
         SELECT book_id, COUNT(DISTINCT src) AS src_count FROM (
-          SELECT bf.book_id, 'web' AS src
-          FROM reading_sessions rs JOIN book_files bf ON bf.id = rs.book_file_id
-          WHERE rs.user_id = ${userId} AND rs.source = 'web'
+          SELECT rs.book_id, rs.source AS src
+          FROM reading_sessions rs
+          WHERE rs.user_id = ${userId} AND rs.source IN ('web', 'ios', 'watchos', 'android')
           UNION
           SELECT bf.book_id, 'koreader' AS src
           FROM koreader_device_progress kdp JOIN book_files bf ON bf.id = kdp.book_file_id

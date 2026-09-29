@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, desc, eq, inArray, notExists, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, notExists, or, sql } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 
 import { chunk } from '../../common/utils/batch.utils';
@@ -23,6 +23,48 @@ type KoreaderHashLinkMetadata = {
   authors?: string | null;
   lastOpen?: number | null;
 };
+
+type HashedResolvedBookFile = ResolvedBookFileByHashes & { hash: string | null };
+type CountedResolvedBookFile = ResolvedBookFileByHash & { matchingFileCount: number };
+
+function resolveUniqueBook<T extends { bookId: number }>(rows: T[]): T | null {
+  const first = rows[0];
+  if (!first) return null;
+  return rows.every((row) => row.bookId === first.bookId) ? first : null;
+}
+
+function hasDuplicateFileMatches(rows: CountedResolvedBookFile[]): boolean {
+  return rows.length > 1 || rows.some((row) => Number(row.matchingFileCount) > 1);
+}
+
+function withoutMatchCount(row: CountedResolvedBookFile): ResolvedBookFileByHash {
+  return { id: row.id, bookId: row.bookId, libraryId: row.libraryId, format: row.format };
+}
+
+function addUnambiguousHashMatches(rows: HashedResolvedBookFile[], result: Map<string, ResolvedBookFileByHashes>): Set<string> {
+  const rowsByHash = new Map<string, HashedResolvedBookFile[]>();
+
+  for (const row of rows) {
+    if (!row.hash) continue;
+    const matches = rowsByHash.get(row.hash);
+    if (matches) matches.push(row);
+    else rowsByHash.set(row.hash, [row]);
+  }
+
+  for (const [hash, matches] of rowsByHash) {
+    const resolved = resolveUniqueBook(matches);
+    if (resolved) {
+      result.set(hash, {
+        bookFileId: resolved.bookFileId,
+        bookId: resolved.bookId,
+        libraryId: resolved.libraryId,
+        format: resolved.format,
+      });
+    }
+  }
+
+  return new Set(rowsByHash.keys());
+}
 
 export interface ReadingProgressUpsert {
   bookFileId: number;
@@ -78,43 +120,57 @@ export class KoreaderRepository {
     await this.db.delete(schema.koreaderUsers).where(eq(schema.koreaderUsers.userId, userId));
   }
 
+  // KOReader's partial hash can collide for different files. Same-book matches have a safe
+  // deterministic fallback, while a user-scoped hash link preserves the exact downloaded file.
   async resolveBookFileByHash(hash: string, accessibleLibraryIds: number[] | null, userId?: number): Promise<ResolvedBookFileByHash | null> {
     if (accessibleLibraryIds !== null && accessibleLibraryIds.length === 0) return null;
 
     const libraryFilter = accessibleLibraryIds ? inArray(schema.books.libraryId, accessibleLibraryIds) : undefined;
 
-    const [byFileHash] = await this.db
-      .select({ id: schema.bookFiles.id, bookId: schema.bookFiles.bookId, libraryId: schema.books.libraryId, format: schema.bookFiles.format })
+    const byFileHash = await this.db
+      .selectDistinctOn([schema.bookFiles.bookId], {
+        id: schema.bookFiles.id,
+        bookId: schema.bookFiles.bookId,
+        libraryId: schema.books.libraryId,
+        format: schema.bookFiles.format,
+        matchingFileCount: sql<number>`count(*) over (partition by ${schema.bookFiles.fileHash})`,
+      })
       .from(schema.bookFiles)
       .innerJoin(schema.books, eq(schema.books.id, schema.bookFiles.bookId))
       .where(and(eq(schema.bookFiles.fileHash, hash), libraryFilter))
-      .limit(1);
+      .orderBy(asc(schema.bookFiles.bookId), asc(schema.bookFiles.id))
+      .limit(2);
 
-    if (byFileHash) return byFileHash;
+    if (byFileHash.length > 0) {
+      const resolved = resolveUniqueBook(byFileHash);
+      if (resolved && (!hasDuplicateFileMatches(byFileHash) || userId === undefined)) return withoutMatchCount(resolved);
+      if (userId === undefined) return null;
+      return (await this.resolveManualBookFileByHash(hash, accessibleLibraryIds, userId)) ?? (resolved ? withoutMatchCount(resolved) : null);
+    }
 
-    const [byFileHashHistory] = await this.db
-      .select({ id: schema.bookFiles.id, bookId: schema.bookFiles.bookId, libraryId: schema.books.libraryId, format: schema.bookFiles.format })
+    const byFileHashHistory = await this.db
+      .selectDistinctOn([schema.bookFiles.bookId], {
+        id: schema.bookFiles.id,
+        bookId: schema.bookFiles.bookId,
+        libraryId: schema.books.libraryId,
+        format: schema.bookFiles.format,
+        matchingFileCount: sql<number>`count(*) over (partition by ${schema.bookFileHashHistory.fileHash})`,
+      })
       .from(schema.bookFileHashHistory)
       .innerJoin(schema.bookFiles, eq(schema.bookFiles.id, schema.bookFileHashHistory.bookFileId))
       .innerJoin(schema.books, eq(schema.books.id, schema.bookFiles.bookId))
       .where(and(eq(schema.bookFileHashHistory.fileHash, hash), libraryFilter))
-      .limit(1);
+      .orderBy(asc(schema.bookFiles.bookId), asc(schema.bookFiles.id))
+      .limit(2);
 
-    if (byFileHashHistory) return byFileHashHistory;
-
-    if (userId !== undefined) {
-      const [byManualLink] = await this.db
-        .select({ id: schema.bookFiles.id, bookId: schema.bookFiles.bookId, libraryId: schema.books.libraryId, format: schema.bookFiles.format })
-        .from(schema.koreaderBookHashLinks)
-        .innerJoin(schema.bookFiles, eq(schema.bookFiles.id, schema.koreaderBookHashLinks.bookFileId))
-        .innerJoin(schema.books, eq(schema.books.id, schema.bookFiles.bookId))
-        .where(and(eq(schema.koreaderBookHashLinks.userId, userId), eq(schema.koreaderBookHashLinks.hash, hash), libraryFilter))
-        .limit(1);
-
-      if (byManualLink) return byManualLink;
+    if (byFileHashHistory.length > 0) {
+      const resolved = resolveUniqueBook(byFileHashHistory);
+      if (resolved && (!hasDuplicateFileMatches(byFileHashHistory) || userId === undefined)) return withoutMatchCount(resolved);
+      if (userId === undefined) return null;
+      return (await this.resolveManualBookFileByHash(hash, accessibleLibraryIds, userId)) ?? (resolved ? withoutMatchCount(resolved) : null);
     }
 
-    return null;
+    return userId === undefined ? null : this.resolveManualBookFileByHash(hash, accessibleLibraryIds, userId);
   }
 
   async resolveBookFilesByHashes(
@@ -138,38 +194,49 @@ export class KoreaderRepository {
       })
       .from(schema.bookFiles)
       .innerJoin(schema.books, eq(schema.books.id, schema.bookFiles.bookId))
-      .where(and(inArray(schema.bookFiles.fileHash, hashes), libraryFilter));
+      .where(and(inArray(schema.bookFiles.fileHash, hashes), libraryFilter))
+      .orderBy(asc(schema.bookFiles.id));
 
+    const directHashes = addUnambiguousHashMatches(direct, result);
+    const duplicateHashes = new Set<string>();
+    const directCounts = new Map<string, number>();
     for (const row of direct) {
-      if (row.hash && !result.has(row.hash)) {
-        result.set(row.hash, { bookFileId: row.bookFileId, bookId: row.bookId, libraryId: row.libraryId, format: row.format });
+      if (!row.hash) continue;
+      directCounts.set(row.hash, (directCounts.get(row.hash) ?? 0) + 1);
+    }
+    for (const [hash, count] of directCounts) {
+      if (count > 1) duplicateHashes.add(hash);
+    }
+
+    const missing = hashes.filter((hash) => !directHashes.has(hash));
+    if (missing.length > 0) {
+      const history = await this.db
+        .select({
+          hash: schema.bookFileHashHistory.fileHash,
+          bookFileId: schema.bookFiles.id,
+          bookId: schema.bookFiles.bookId,
+          libraryId: schema.books.libraryId,
+          format: schema.bookFiles.format,
+        })
+        .from(schema.bookFileHashHistory)
+        .innerJoin(schema.bookFiles, eq(schema.bookFiles.id, schema.bookFileHashHistory.bookFileId))
+        .innerJoin(schema.books, eq(schema.books.id, schema.bookFiles.bookId))
+        .where(and(inArray(schema.bookFileHashHistory.fileHash, missing), libraryFilter))
+        .orderBy(asc(schema.bookFiles.id));
+
+      addUnambiguousHashMatches(history, result);
+      const historyCounts = new Map<string, number>();
+      for (const row of history) {
+        if (!row.hash) continue;
+        historyCounts.set(row.hash, (historyCounts.get(row.hash) ?? 0) + 1);
+      }
+      for (const [hash, count] of historyCounts) {
+        if (count > 1) duplicateHashes.add(hash);
       }
     }
 
-    const missing = hashes.filter((hash) => !result.has(hash));
-    if (missing.length === 0) return result;
-
-    const history = await this.db
-      .select({
-        hash: schema.bookFileHashHistory.fileHash,
-        bookFileId: schema.bookFiles.id,
-        bookId: schema.bookFiles.bookId,
-        libraryId: schema.books.libraryId,
-        format: schema.bookFiles.format,
-      })
-      .from(schema.bookFileHashHistory)
-      .innerJoin(schema.bookFiles, eq(schema.bookFiles.id, schema.bookFileHashHistory.bookFileId))
-      .innerJoin(schema.books, eq(schema.books.id, schema.bookFiles.bookId))
-      .where(and(inArray(schema.bookFileHashHistory.fileHash, missing), libraryFilter));
-
-    for (const row of history) {
-      if (!result.has(row.hash)) {
-        result.set(row.hash, { bookFileId: row.bookFileId, bookId: row.bookId, libraryId: row.libraryId, format: row.format });
-      }
-    }
-
-    const stillMissing = missing.filter((hash) => !result.has(hash));
-    if (stillMissing.length === 0 || userId === undefined) return result;
+    const linkCandidates = hashes.filter((hash) => !result.has(hash) || duplicateHashes.has(hash));
+    if (linkCandidates.length === 0 || userId === undefined) return result;
 
     const manualLinks = await this.db
       .select({
@@ -182,15 +249,30 @@ export class KoreaderRepository {
       .from(schema.koreaderBookHashLinks)
       .innerJoin(schema.bookFiles, eq(schema.bookFiles.id, schema.koreaderBookHashLinks.bookFileId))
       .innerJoin(schema.books, eq(schema.books.id, schema.bookFiles.bookId))
-      .where(and(eq(schema.koreaderBookHashLinks.userId, userId), inArray(schema.koreaderBookHashLinks.hash, stillMissing), libraryFilter));
+      .where(and(eq(schema.koreaderBookHashLinks.userId, userId), inArray(schema.koreaderBookHashLinks.hash, linkCandidates), libraryFilter));
 
     for (const row of manualLinks) {
-      if (!result.has(row.hash)) {
-        result.set(row.hash, { bookFileId: row.bookFileId, bookId: row.bookId, libraryId: row.libraryId, format: row.format });
-      }
+      result.set(row.hash, { bookFileId: row.bookFileId, bookId: row.bookId, libraryId: row.libraryId, format: row.format });
     }
 
     return result;
+  }
+
+  private async resolveManualBookFileByHash(
+    hash: string,
+    accessibleLibraryIds: number[] | null,
+    userId: number,
+  ): Promise<ResolvedBookFileByHash | null> {
+    const libraryFilter = accessibleLibraryIds ? inArray(schema.books.libraryId, accessibleLibraryIds) : undefined;
+    const [byManualLink] = await this.db
+      .select({ id: schema.bookFiles.id, bookId: schema.bookFiles.bookId, libraryId: schema.books.libraryId, format: schema.bookFiles.format })
+      .from(schema.koreaderBookHashLinks)
+      .innerJoin(schema.bookFiles, eq(schema.bookFiles.id, schema.koreaderBookHashLinks.bookFileId))
+      .innerJoin(schema.books, eq(schema.books.id, schema.bookFiles.bookId))
+      .where(and(eq(schema.koreaderBookHashLinks.userId, userId), eq(schema.koreaderBookHashLinks.hash, hash), libraryFilter))
+      .limit(1);
+
+    return byManualLink ?? null;
   }
 
   async upsertUnmatchedBooks(userId: number, candidates: KoreaderUnmatchedCandidate[], deviceId?: string): Promise<void> {
@@ -650,14 +732,141 @@ export class KoreaderRepository {
     return byFile;
   }
 
+  /**
+   * The live reset marker for a file, or null when none is outstanding. A live marker means
+   * the user cleared this file's position server-side and no device has been told yet, so it
+   * outranks every stored position regardless of timestamps: a device that pushed after the
+   * reset carries a fresh push clock but a pre-reset position, and the two are
+   * indistinguishable on the wire.
+   */
+  async getProgressReset(bookFileId: number, userId: number) {
+    const [row] = await this.db
+      .select({ resetAt: schema.koreaderProgressResets.resetAt })
+      .from(schema.koreaderProgressResets)
+      .where(and(eq(schema.koreaderProgressResets.bookFileId, bookFileId), eq(schema.koreaderProgressResets.userId, userId)))
+      .limit(1);
+    return row?.resetAt ?? null;
+  }
+
+  async getProgressResetsForFiles(bookFileIds: number[], userId: number) {
+    const byFile = new Map<number, Date>();
+    for (const batch of chunk([...new Set(bookFileIds)], BATCH_QUERY_SIZE)) {
+      const rows = await this.db
+        .select({ bookFileId: schema.koreaderProgressResets.bookFileId, resetAt: schema.koreaderProgressResets.resetAt })
+        .from(schema.koreaderProgressResets)
+        .where(and(inArray(schema.koreaderProgressResets.bookFileId, batch), eq(schema.koreaderProgressResets.userId, userId)));
+      for (const row of rows) byFile.set(row.bookFileId, row.resetAt);
+    }
+    return byFile;
+  }
+
+  /**
+   * The file a book's KOReader progress hangs off, in the shape the shared-progress path needs:
+   * the copy this user's devices synced most recently, or the primary file when none has. A
+   * device syncs whichever copy it was given, and a Storyteller read-along EPUB becomes the
+   * primary while devices usually hold the original beside it. The book page reports one file's
+   * devices and holds, and the release action resolves through this same query, so it acts on
+   * the file the page showed rather than whichever one a marker happens to be found on first.
+   */
+  async findProgressBookFileByBookId(bookId: number, userId: number, accessibleLibraryIds: number[] | null) {
+    if (accessibleLibraryIds !== null && accessibleLibraryIds.length === 0) return null;
+    const lastDeviceSyncAt = sql`(
+      select max(${schema.koreaderDeviceProgress.updatedAt})
+      from ${schema.koreaderDeviceProgress}
+      where ${schema.koreaderDeviceProgress.bookFileId} = ${schema.bookFiles.id}
+        and ${schema.koreaderDeviceProgress.userId} = ${userId}
+        and ${schema.koreaderDeviceProgress.orphaned} = false
+    )`;
+    const [row] = await this.db
+      .select({
+        id: schema.bookFiles.id,
+        bookId: schema.bookFiles.bookId,
+        libraryId: schema.books.libraryId,
+        format: schema.bookFiles.format,
+      })
+      .from(schema.bookFiles)
+      .innerJoin(schema.books, eq(schema.books.id, schema.bookFiles.bookId))
+      .where(
+        and(
+          eq(schema.books.id, bookId),
+          or(eq(schema.books.primaryFileId, schema.bookFiles.id), sql`${lastDeviceSyncAt} is not null`),
+          // Scoped the same way every other entry point into this module is. A device progress
+          // row outlives the library grant that created it, so ownership of the row is not
+          // ownership of the book, and this path writes.
+          accessibleLibraryIds === null ? undefined : inArray(schema.books.libraryId, accessibleLibraryIds),
+        ),
+      )
+      .orderBy(sql`${lastDeviceSyncAt} desc nulls last`, asc(schema.bookFiles.id))
+      .limit(1);
+    return row ?? null;
+  }
+
+  async getDeviceProgressForDevice(bookFileId: number, userId: number, deviceId: string) {
+    const [row] = await this.db
+      .select()
+      .from(schema.koreaderDeviceProgress)
+      .where(
+        and(
+          eq(schema.koreaderDeviceProgress.bookFileId, bookFileId),
+          eq(schema.koreaderDeviceProgress.userId, userId),
+          eq(schema.koreaderDeviceProgress.deviceId, deviceId),
+          eq(schema.koreaderDeviceProgress.orphaned, false),
+        ),
+      )
+      .limit(1);
+    return row ?? null;
+  }
+
+  /** Device ids that have taken the outstanding reset for this file. */
+  async getConvergedResetDeviceIds(bookFileId: number, userId: number) {
+    const rows = await this.db
+      .select({ deviceId: schema.koreaderProgressResetDevices.deviceId })
+      .from(schema.koreaderProgressResetDevices)
+      .where(and(eq(schema.koreaderProgressResetDevices.bookFileId, bookFileId), eq(schema.koreaderProgressResetDevices.userId, userId)));
+    return new Set(rows.map((row) => row.deviceId));
+  }
+
+  async getConvergedResetDeviceIdsForFiles(bookFileIds: number[], userId: number) {
+    const byFile = new Map<number, Set<string>>();
+    for (const batch of chunk([...new Set(bookFileIds)], BATCH_QUERY_SIZE)) {
+      const rows = await this.db
+        .select({ bookFileId: schema.koreaderProgressResetDevices.bookFileId, deviceId: schema.koreaderProgressResetDevices.deviceId })
+        .from(schema.koreaderProgressResetDevices)
+        .where(and(inArray(schema.koreaderProgressResetDevices.bookFileId, batch), eq(schema.koreaderProgressResetDevices.userId, userId)));
+      for (const row of rows) {
+        const existing = byFile.get(row.bookFileId);
+        if (existing) existing.add(row.deviceId);
+        else byFile.set(row.bookFileId, new Set([row.deviceId]));
+      }
+    }
+    return byFile;
+  }
+
+  /**
+   * Records that a device has landed on the reset position. Deliberately per-device and not a
+   * retirement of the marker: another device may still be holding a pre-reset position, and it
+   * has to keep being held until it takes the reset itself.
+   */
+  async recordResetConvergence(bookFileId: number, userId: number, deviceId: string) {
+    await this.db.insert(schema.koreaderProgressResetDevices).values({ userId, bookFileId, deviceId }).onConflictDoNothing();
+  }
+
+  /** Retires a marker whose outcome is settled for every device, cascading the per-device rows. */
+  async clearProgressReset(bookFileId: number, userId: number) {
+    await this.db
+      .delete(schema.koreaderProgressResets)
+      .where(and(eq(schema.koreaderProgressResets.bookFileId, bookFileId), eq(schema.koreaderProgressResets.userId, userId)));
+  }
+
   async getDevicesList(userId: number) {
     const result = await this.db.execute<{
       device: string;
       device_id: string;
       last_sync_at: Date;
       last_book_title: string | null;
+      retired_at: Date | null;
     }>(sql`
-      SELECT device, device_id, last_sync_at, last_book_title
+      SELECT sub.device, sub.device_id, sub.last_sync_at, sub.last_book_title, r.retired_at
       FROM (
         SELECT DISTINCT ON (d.device, d.device_id)
           d.device,
@@ -670,7 +879,8 @@ export class KoreaderRepository {
         WHERE d.user_id = ${userId} AND d.orphaned = false
         ORDER BY d.device, d.device_id, d.updated_at DESC
       ) sub
-      ORDER BY last_sync_at DESC
+      LEFT JOIN koreader_device_retirements r ON r.user_id = ${userId} AND r.device_id = sub.device_id
+      ORDER BY sub.last_sync_at DESC
     `);
 
     return result.rows.map((r) => ({
@@ -678,7 +888,43 @@ export class KoreaderRepository {
       deviceId: r.device_id,
       lastSyncAt: new Date(r.last_sync_at),
       lastBookTitle: r.last_book_title ?? null,
+      retiredAt: r.retired_at ? new Date(r.retired_at) : null,
     }));
+  }
+
+  async listRetiredDeviceIds(userId: number): Promise<Map<string, Date>> {
+    const rows = await this.db
+      .select({ deviceId: schema.koreaderDeviceRetirements.deviceId, retiredAt: schema.koreaderDeviceRetirements.retiredAt })
+      .from(schema.koreaderDeviceRetirements)
+      .where(eq(schema.koreaderDeviceRetirements.userId, userId));
+    return new Map(rows.map((row) => [row.deviceId, row.retiredAt]));
+  }
+
+  /** True when any device-keyed table still knows this device, which is what makes it listable. */
+  async deviceExists(userId: number, deviceId: string): Promise<boolean> {
+    const result = await this.db.execute<{ device_exists: boolean }>(sql`
+      SELECT
+        EXISTS (SELECT 1 FROM koreader_device_progress WHERE user_id = ${userId} AND device_id = ${deviceId})
+        OR EXISTS (SELECT 1 FROM koreader_device_sweeps WHERE user_id = ${userId} AND device_id = ${deviceId})
+        OR EXISTS (SELECT 1 FROM koreader_device_settings WHERE user_id = ${userId} AND device_id = ${deviceId})
+        AS device_exists
+    `);
+    return result.rows[0]?.device_exists === true;
+  }
+
+  async retireDevice(userId: number, deviceId: string): Promise<void> {
+    await this.db
+      .insert(schema.koreaderDeviceRetirements)
+      .values({ userId, deviceId })
+      .onConflictDoNothing({
+        target: [schema.koreaderDeviceRetirements.userId, schema.koreaderDeviceRetirements.deviceId],
+      });
+  }
+
+  async restoreDevice(userId: number, deviceId: string): Promise<void> {
+    await this.db
+      .delete(schema.koreaderDeviceRetirements)
+      .where(and(eq(schema.koreaderDeviceRetirements.userId, userId), eq(schema.koreaderDeviceRetirements.deviceId, deviceId)));
   }
 
   async getKoreaderUserDefaultPattern(userId: number): Promise<string | null> {
@@ -762,6 +1008,11 @@ export class KoreaderRepository {
           .where(and(eq(schema.koreaderDeviceSettings.userId, userId), eq(schema.koreaderDeviceSettings.deviceId, deviceId)))
           .returning({ deviceId: schema.koreaderDeviceSettings.deviceId }),
       ]);
+
+      // Not counted towards the deleted-row total: a marker on its own never made the device listable.
+      await tx
+        .delete(schema.koreaderDeviceRetirements)
+        .where(and(eq(schema.koreaderDeviceRetirements.userId, userId), eq(schema.koreaderDeviceRetirements.deviceId, deviceId)));
 
       // Only drop unmatched-book rows this device orphaned - a hash still reported by another
       // device must stay visible until that device is removed (or the hash is matched/linked).

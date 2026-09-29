@@ -1,8 +1,20 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { isDateKey, isValidTimeZone, resolveTimeZone, toDateKeyInTimeZone, toTimeZoneStartOfDay } from './timezone.utils';
+import {
+  getYearInTimeZone,
+  isDateKey,
+  isValidTimeZone,
+  resolveSystemTimeZone,
+  resolveTimeZone,
+  toDateKeyInTimeZone,
+  toTimeZoneStartOfDay,
+} from './timezone.utils';
 
 describe('timezone utils', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it('validates IANA timezones and rejects invalid values', () => {
     expect(isValidTimeZone('UTC')).toBe(true);
     expect(isValidTimeZone('America/Denver')).toBe(true);
@@ -15,6 +27,17 @@ describe('timezone utils', () => {
     expect(resolveTimeZone('')).toBe('UTC');
     expect(resolveTimeZone(undefined)).toBe('UTC');
     expect(resolveTimeZone('Invalid/Zone', 'America/Denver')).toBe('America/Denver');
+  });
+
+  it('falls back to UTC when the system timezone is unusable', () => {
+    vi.spyOn(Intl.DateTimeFormat.prototype, 'resolvedOptions').mockReturnValue({
+      locale: 'en-US',
+      calendar: 'gregory',
+      numberingSystem: 'latn',
+      timeZone: 'Etc/Unknown',
+    });
+
+    expect(resolveSystemTimeZone()).toBe('UTC');
   });
 
   it('validates date keys with strict calendar checks', () => {
@@ -65,5 +88,12 @@ describe('timezone utils', () => {
 
   it('throws when date key is malformed', () => {
     expect(() => toTimeZoneStartOfDay('2026-02-30', 'UTC')).toThrow(RangeError);
+  });
+
+  it("reads the year in the given timezone, not the host's", () => {
+    const newYearsEveUtc = new Date('2026-12-31T23:30:00.000Z');
+    expect(getYearInTimeZone(newYearsEveUtc, 'UTC')).toBe(2026);
+    expect(getYearInTimeZone(newYearsEveUtc, 'Pacific/Auckland')).toBe(2027);
+    expect(getYearInTimeZone(newYearsEveUtc, 'America/New_York')).toBe(2026);
   });
 });

@@ -10,11 +10,41 @@ import {
   buildHelmetOptions,
   buildEmptyJsonBodyStream,
   registerEmptyBodyContentTypeParser,
+  applyDeclaredBodyLimit,
   shouldInjectEmptyJsonBody,
   isSecureProtocol,
   applyConditionalHsts,
   registerConditionalHsts,
+  isStaticAssetPath,
+  shouldServeSpaFallback,
 } from './bootstrap.utils';
+
+describe('SPA fallback routing', () => {
+  it.each([
+    '/assets/index-BMAlyH9T.js',
+    '/assets/index-D5CelejF.css',
+    '/sw.js',
+    '/manifest.webmanifest',
+    '/favicon.ico',
+    '/pwa-192x192.png',
+    '/assets/foliate/reader.js?v=2',
+  ])('treats %s as a static asset so a missing file 404s instead of returning index.html', (url) => {
+    expect(isStaticAssetPath(url)).toBe(true);
+    expect(shouldServeSpaFallback(url)).toBe(false);
+  });
+
+  it.each(['/', '/dashboard', '/book/123/files', '/library/12', '/settings/admin/audit-log', '/authors/42', '/read/1/2', '/collections?sort=name'])(
+    'serves the SPA shell for client route %s',
+    (url) => {
+      expect(shouldServeSpaFallback(url)).toBe(true);
+    },
+  );
+
+  it('ignores the query string and hash when deciding', () => {
+    expect(shouldServeSpaFallback('/assets/app-abc123.js?import&t=1')).toBe(false);
+    expect(shouldServeSpaFallback('/dashboard?tab=recent#top')).toBe(true);
+  });
+});
 
 describe('parseBooleanEnv', () => {
   it('returns fallback when value is undefined', () => {
@@ -69,19 +99,12 @@ describe('parseTrustProxy', () => {
     expect(parseTrustProxy('   ')).toBe('loopback,linklocal,uniquelocal');
   });
 
-  it.each(['false', '0', 'no', 'off'])('returns false for falsy string %s', (val) => {
+  it.each(['false', 'no', 'off'])('returns false for falsy string %s', (val) => {
     expect(parseTrustProxy(val)).toBe(false);
   });
 
-  it.each(['true', '1', 'yes', 'on'])('returns true for truthy string %s', (val) => {
+  it.each(['true', 'yes', 'on'])('returns true for truthy string %s', (val) => {
     expect(parseTrustProxy(val)).toBe(true);
-  });
-
-  it('parses non-negative integer hop counts', () => {
-    expect(parseTrustProxy('0')).toBe(false); // '0' is a falsy string, handled before hop-count check
-    expect(parseTrustProxy('1')).toBe(true); // '1' is a truthy string
-    expect(parseTrustProxy('2')).toBe(2);
-    expect(parseTrustProxy('10')).toBe(10);
   });
 
   it('returns the raw string for arbitrary proxy values', () => {
@@ -90,14 +113,8 @@ describe('parseTrustProxy', () => {
     expect(parseTrustProxy('loopback')).toBe('loopback');
   });
 
-  it('returns the raw string for decimal numbers (not valid integers)', () => {
-    expect(parseTrustProxy('1.5')).toBe('1.5');
-    expect(parseTrustProxy('2.9')).toBe('2.9');
-  });
-
-  it('returns the raw string for negative integers', () => {
-    expect(parseTrustProxy('-1')).toBe('-1');
-    expect(parseTrustProxy('-5')).toBe('-5');
+  it.each(['0', '1', '2', '10', '1.5', '2.9', '-1', '-5', '1e2'])('rejects numeric hop-count value %s', (value) => {
+    expect(() => parseTrustProxy(value)).toThrow('Numeric TRUST_PROXY hop counts are not supported; configure trusted proxy IP or CIDR ranges');
   });
 
   it('trims surrounding whitespace before evaluating', () => {
@@ -565,3 +582,32 @@ async function requestApp(
     req.end();
   });
 }
+
+describe('applyDeclaredBodyLimit', () => {
+  it('copies a declared limit onto the route option Fastify actually reads', () => {
+    const route: { config?: unknown; bodyLimit?: number } = { config: { bodyLimit: 6 * 1024 * 1024 } };
+    applyDeclaredBodyLimit(route);
+    expect(route.bodyLimit).toBe(6 * 1024 * 1024);
+  });
+
+  it('leaves a route without a declared limit on the Fastify default', () => {
+    const routes: Array<{ config?: unknown; bodyLimit?: number }> = [
+      {},
+      { config: {} },
+      { config: { bodyLimit: 0 } },
+      { config: { bodyLimit: -1 } },
+      { config: { bodyLimit: '6mb' } },
+      { config: { bodyLimit: 1.5 } },
+    ];
+    for (const route of routes) {
+      applyDeclaredBodyLimit(route);
+      expect(route.bodyLimit).toBeUndefined();
+    }
+  });
+
+  it('does not overwrite a limit already set on the route options', () => {
+    const route: { config?: unknown; bodyLimit?: number } = { config: {}, bodyLimit: 1024 };
+    applyDeclaredBodyLimit(route);
+    expect(route.bodyLimit).toBe(1024);
+  });
+});

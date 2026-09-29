@@ -19,7 +19,7 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
-const { items: uploadItems, isUploading, doneCount, overallProgress, addFiles, clearFinished, showTray } = useBookDockUpload()
+const { isUploading, addFiles, clearCompleted } = useBookDockUpload()
 const { hasPermission } = usePermissions()
 
 const fileInput = ref<HTMLInputElement | null>(null)
@@ -27,10 +27,9 @@ const rescanning = ref(false)
 const processingStateChanging = ref(false)
 
 const canManageBookDock = computed(() => hasPermission(Permission.ManageBookDock))
-const uploadSummary = computed(() => t('upload.tray.uploadingCount', { done: doneCount.value, total: uploadItems.value.length }))
 
 function openFilePicker() {
-  clearFinished()
+  clearCompleted()
   fileInput.value?.click()
 }
 
@@ -40,10 +39,6 @@ function onFilesSelected(event: Event) {
     addFiles(input.files)
     input.value = ''
   }
-}
-
-function handleShowUploads() {
-  showTray()
 }
 
 async function rescan() {
@@ -114,29 +109,13 @@ async function toggleProcessingState() {
     </button>
 
     <button
-      v-if="isUploading"
-      type="button"
-      data-testid="book-dock-upload-progress"
-      class="relative flex h-8 items-center gap-1.5 overflow-hidden rounded-lg bg-muted px-3 text-xs font-medium text-muted-foreground transition-all hover:text-foreground active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
-      :title="t('upload.tray.show')"
-      :aria-label="`${t('upload.tray.show')}: ${uploadSummary}, ${overallProgress}%`"
-      @click="handleShowUploads"
-    >
-      <Loader2 class="size-3.5 animate-spin" />
-      <span class="hidden sm:inline">{{ uploadSummary }}</span>
-      <span class="tabular-nums">{{ overallProgress }}%</span>
-      <span class="absolute inset-x-0 bottom-0 h-0.5 bg-primary/15">
-        <span class="block h-full bg-primary transition-[width] duration-300 ease-out" :style="{ width: `${overallProgress}%` }" />
-      </span>
-    </button>
-
-    <button
       type="button"
       data-testid="book-dock-upload"
       class="flex items-center gap-1.5 h-8 px-3 rounded-lg text-xs font-medium bg-primary text-primary-foreground hover:opacity-90 transition-all active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background"
       @click="openFilePicker"
     >
-      <Upload class="size-3.5" />
+      <Loader2 v-if="isUploading" class="size-3.5 animate-spin" />
+      <Upload v-else class="size-3.5" />
       {{ t('bookDock.uploadAction') }}
     </button>
   </div>

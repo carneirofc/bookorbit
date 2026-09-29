@@ -1,6 +1,6 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Readable } from 'stream';
-import { MAX_CHUNK_BYTES, Permission } from '@bookorbit/types';
+import { Permission } from '@bookorbit/types';
 
 import { FORBIDDEN_PERMISSION_KEY } from '../../common/decorators/forbid-permission.decorator';
 import { PERMISSION_KEY } from '../../common/decorators/require-permission.decorator';
@@ -33,16 +33,21 @@ function makeController() {
     bulkDiscard: vi.fn(),
     bulkApplyFetched: vi.fn(),
     bulkRetryFetch: vi.fn(),
+    refetchMetadata: vi.fn(),
     bulkSetTarget: vi.fn(),
     selectionSummary: vi.fn(),
     bulkEdit: vi.fn(),
     pauseProcessing: vi.fn(),
     resumeProcessing: vi.fn(),
   };
-  const ingestService = { ingestUpload: vi.fn(), ingestChunk: vi.fn(), abortChunkedUpload: vi.fn() };
+  const ingestService = { ingestUpload: vi.fn() };
   const finalizeService = { previewNames: vi.fn(), previewFinalize: vi.fn(), discardDuplicateCandidates: vi.fn(), finalize: vi.fn() };
   const watcherService = { rescan: vi.fn() };
-  const appSettings = { getMaxUploadSizeMb: vi.fn().mockResolvedValue(500) };
+  const appSettings = {
+    getMaxUploadSizeMb: vi.fn().mockResolvedValue(500),
+    getBookDockSettings: vi.fn(),
+    updateBookDockSettings: vi.fn(),
+  };
 
   const controller = new BookDockController(
     service as never,
@@ -62,14 +67,16 @@ describe('BookDockController', () => {
     vi.clearAllMocks();
   });
 
-  it('listFiles applies defaults before delegating', async () => {
+  it('listFiles applies defaults and propagates the ready-to-file predicate', async () => {
     const { controller, service } = makeController();
     service.listFiles.mockResolvedValue({ items: [], total: 0, page: 1, size: 20 });
 
-    await controller.listFiles(MOCK_USER, {});
+    await controller.listFiles(MOCK_USER, { readyToFile: true });
 
     expect(service.listFiles).toHaveBeenCalledWith({
       status: undefined,
+      needsReview: undefined,
+      readyToFile: true,
       page: 1,
       limit: 20,
       sort: 'createdAt',
@@ -113,7 +120,6 @@ describe('BookDockController', () => {
   it('upload rejects requests with no multipart file', async () => {
     const { controller } = makeController();
     const req = {
-      headers: {},
       file: vi.fn().mockResolvedValue(null),
     } as any;
 
@@ -123,7 +129,6 @@ describe('BookDockController', () => {
   it('upload ingests file and returns hydrated row', async () => {
     const { controller, ingestService, service } = makeController();
     const req = {
-      headers: {},
       file: vi.fn().mockResolvedValue({
         filename: 'book.epub',
         file: Readable.from('book'),
@@ -137,104 +142,22 @@ describe('BookDockController', () => {
     expect(service.getFile).toHaveBeenCalledWith(44, MOCK_USER.id, false);
   });
 
-  describe('chunked upload', () => {
-    function chunkRequest(overrides: Record<string, unknown> = {}) {
-      return {
-        headers: { 'x-upload-id': 'abc-123' },
-        file: vi.fn().mockResolvedValue({
-          filename: 'book.epub',
-          file: Readable.from('chunk'),
-          fields: {
-            uploadId: { value: 'abc-123' },
-            chunkIndex: { value: '1' },
-            totalChunks: { value: '3' },
-            chunkSize: { value: '16777216' },
-            totalSize: { value: '40000000' },
-            fileName: { value: 'dune.epub' },
-            ...(overrides.fields as object),
-          },
-        }),
-        ...overrides,
-      } as any;
-    }
-
-    it('caps a chunk request at the chunk size, not the whole-file limit', async () => {
-      const { controller, ingestService } = makeController();
-      const req = chunkRequest();
-      ingestService.ingestChunk.mockResolvedValue({ complete: false, fileId: null, receivedChunks: 1, totalChunks: 3, finalizing: false });
-
-      await controller.upload(MOCK_USER, req);
-
-      expect(req.file).toHaveBeenCalledWith(expect.objectContaining({ limits: expect.objectContaining({ fileSize: MAX_CHUNK_BYTES }) }));
-    });
-
-    it('caps a whole-file request at the configured upload limit', async () => {
-      const { controller, ingestService } = makeController();
-      const req = { headers: {}, file: vi.fn().mockResolvedValue({ filename: 'book.epub', file: Readable.from('book') }) } as any;
-      ingestService.ingestUpload.mockResolvedValue(1);
-
-      await controller.upload(MOCK_USER, req);
-
-      expect(req.file).toHaveBeenCalledWith(expect.objectContaining({ limits: expect.objectContaining({ fileSize: 500 * 1024 * 1024 }) }));
-    });
-
-    it('reports progress without hydrating a row while chunks are outstanding', async () => {
-      const { controller, ingestService, service } = makeController();
-      ingestService.ingestChunk.mockResolvedValue({ complete: false, fileId: null, receivedChunks: 2, totalChunks: 3, finalizing: false });
-
-      const result = await controller.upload(MOCK_USER, chunkRequest());
-
-      expect(result).toEqual({ chunked: true, complete: false, receivedChunks: 2, totalChunks: 3, finalizing: false });
-      expect(service.getFile).not.toHaveBeenCalled();
-    });
-
-    it('flags a request whose siblings are still assembling', async () => {
-      const { controller, ingestService } = makeController();
-      ingestService.ingestChunk.mockResolvedValue({ complete: false, fileId: null, receivedChunks: 3, totalChunks: 3, finalizing: true });
-
-      await expect(controller.upload(MOCK_USER, chunkRequest())).resolves.toMatchObject({ finalizing: true });
-    });
-
-    it('returns the hydrated row from the request that completed the upload', async () => {
-      const { controller, ingestService, service } = makeController();
-      ingestService.ingestChunk.mockResolvedValue({ complete: true, fileId: 88, receivedChunks: 3, totalChunks: 3, finalizing: false });
-      service.getFile.mockResolvedValue({ id: 88, fileName: 'dune.epub' });
-
-      await expect(controller.upload(MOCK_USER, chunkRequest())).resolves.toEqual({ id: 88, fileName: 'dune.epub' });
-    });
-
-    it('prefers the declared file name over the per-chunk multipart name', async () => {
-      const { controller, ingestService } = makeController();
-      ingestService.ingestChunk.mockResolvedValue({ complete: false, fileId: null, receivedChunks: 1, totalChunks: 3, finalizing: false });
-
-      await controller.upload(MOCK_USER, chunkRequest());
-
-      expect(ingestService.ingestChunk).toHaveBeenCalledWith(expect.objectContaining({ rawFilename: 'dune.epub', userId: MOCK_USER.id }));
-    });
-
-    it('cancels a session on behalf of its owner only', async () => {
-      const { controller, ingestService } = makeController();
-
-      await controller.cancelUpload(MOCK_USER, 'abc-123');
-
-      expect(ingestService.abortChunkedUpload).toHaveBeenCalledWith('abc-123', MOCK_USER.id);
-    });
-  });
-
   it('bulk and finalize endpoints delegate payload fields as expected', async () => {
     const { controller, service, finalizeService, watcherService } = makeController();
 
-    await controller.bulkDiscard(MOCK_USER, { fileIds: [1], selectAll: false, excludedIds: [2], status: 'error', search: 'x' });
-    await controller.applyFetched(MOCK_USER, { fileIds: [1], selectAll: true, excludedIds: [2], status: 'ready', search: 'x' });
-    await controller.retryFetch(MOCK_USER, { fileIds: [3], selectAll: false, excludedIds: [4], status: 'error', search: 'y' });
+    await controller.bulkDiscard(MOCK_USER, { fileIds: [1], selectAll: false, excludedIds: [2], status: 'error', search: 'x', readyToFile: true });
+    await controller.applyFetched(MOCK_USER, { fileIds: [1], selectAll: true, excludedIds: [2], status: 'ready', search: 'x', readyToFile: true });
+    await controller.retryFetch(MOCK_USER, { fileIds: [3], selectAll: false, excludedIds: [4], status: 'error', search: 'y', readyToFile: true });
+    await controller.refetchMetadata(MOCK_USER, 11);
     await controller.setTarget(MOCK_USER, {
       fileIds: [5],
       selectAll: false,
       excludedIds: [6],
       targetLibraryId: undefined,
       targetFolderId: undefined,
+      readyToFile: true,
     });
-    await controller.selectionSummary(MOCK_USER, { fileIds: [7], selectAll: false, excludedIds: [8] });
+    await controller.selectionSummary(MOCK_USER, { fileIds: [7], selectAll: false, excludedIds: [8], readyToFile: true });
     await controller.bulkEdit(MOCK_USER, {
       fileIds: [9],
       selectAll: false,
@@ -242,8 +165,9 @@ describe('BookDockController', () => {
       fields: { title: 'Edited' },
       enabledFields: ['title'],
       mergeArrays: false,
+      readyToFile: true,
     } as any);
-    await controller.previewNames(MOCK_USER, { fileIds: [10], selectAll: false, excludedIds: [], defaultLibraryId: 2 } as any);
+    await controller.previewNames(MOCK_USER, { fileIds: [10], selectAll: false, excludedIds: [], defaultLibraryId: 2, readyToFile: true } as any);
     await controller.previewFinalize(MOCK_USER, {
       fileIds: [10],
       selectAll: false,
@@ -251,6 +175,7 @@ describe('BookDockController', () => {
       defaultLibraryId: 2,
       defaultFolderId: 3,
       overrides: [],
+      readyToFile: true,
     } as any);
     await controller.discardFinalizeDuplicates(MOCK_USER, {
       fileIds: [10],
@@ -259,18 +184,38 @@ describe('BookDockController', () => {
       defaultLibraryId: 2,
       defaultFolderId: 3,
       overrides: [],
+      readyToFile: true,
     } as any);
     await controller.finalize(
       { id: 99, isSuperuser: true, permissions: [] } as any,
-      { fileIds: [1], defaultLibraryId: 2, defaultFolderId: 3, selectAll: false, excludedIds: [], overrides: [] } as any,
+      { fileIds: [1], defaultLibraryId: 2, defaultFolderId: 3, selectAll: false, excludedIds: [], overrides: [], readyToFile: true } as any,
     );
     await controller.rescan();
     await controller.pause();
     await controller.resume();
 
-    expect(service.bulkSetTarget).toHaveBeenCalledWith([5], false, [6], null, null, undefined, undefined, MOCK_USER.id, false, undefined);
-    expect(finalizeService.previewNames).toHaveBeenCalledWith([10], false, [], 2, MOCK_USER.id, false, undefined, undefined, undefined);
-    expect(finalizeService.previewFinalize).toHaveBeenCalledWith(1, false, false, [10], false, [], 2, 3, [], undefined, undefined, undefined);
+    expect(service.bulkDiscard).toHaveBeenCalledWith([1], false, [2], 'error', 'x', MOCK_USER.id, false, undefined, true);
+    expect(service.bulkApplyFetched).toHaveBeenCalledWith([1], true, [2], 'ready', 'x', MOCK_USER.id, false, undefined, true);
+    expect(service.bulkRetryFetch).toHaveBeenCalledWith([3], false, [4], 'error', 'y', MOCK_USER.id, false, undefined, true);
+    expect(service.bulkSetTarget).toHaveBeenCalledWith([5], false, [6], null, null, undefined, undefined, MOCK_USER.id, false, undefined, true);
+    expect(service.selectionSummary).toHaveBeenCalledWith([7], false, [8], undefined, undefined, MOCK_USER.id, false, undefined, true);
+    expect(service.bulkEdit).toHaveBeenCalledWith(
+      [9],
+      false,
+      [],
+      { title: 'Edited' },
+      ['title'],
+      false,
+      undefined,
+      undefined,
+      MOCK_USER.id,
+      false,
+      undefined,
+      true,
+    );
+    expect(service.refetchMetadata).toHaveBeenCalledWith(11, MOCK_USER.id, false);
+    expect(finalizeService.previewNames).toHaveBeenCalledWith([10], false, [], 2, MOCK_USER.id, false, undefined, undefined, undefined, true);
+    expect(finalizeService.previewFinalize).toHaveBeenCalledWith(1, false, false, [10], false, [], 2, 3, [], undefined, undefined, undefined, true);
     expect(finalizeService.discardDuplicateCandidates).toHaveBeenCalledWith(
       1,
       false,
@@ -284,11 +229,35 @@ describe('BookDockController', () => {
       undefined,
       undefined,
       undefined,
+      true,
     );
-    expect(finalizeService.finalize).toHaveBeenCalledWith(99, true, true, [1], false, [], 2, 3, [], undefined, undefined, undefined);
+    expect(finalizeService.finalize).toHaveBeenCalledWith(99, true, true, [1], false, [], 2, 3, [], undefined, undefined, undefined, true);
     expect(watcherService.rescan).toHaveBeenCalled();
     expect(service.pauseProcessing).toHaveBeenCalledTimes(1);
     expect(service.resumeProcessing).toHaveBeenCalledTimes(1);
+  });
+
+  it('reads and updates Book Dock settings through the scoped service methods', async () => {
+    const { controller, appSettings } = makeController();
+    const settings = {
+      bookDockPath: '/data/book-dock',
+      autoFetchMetadata: true,
+      autoFinalizeEnabled: false,
+      autoFinalizeThreshold: 85,
+      autoFinalizeLibraryId: null,
+      autoFinalizeFolderId: null,
+      autoFinalizeMetadataMode: 'safe_merge' as const,
+    };
+    const update = { ...settings };
+    delete (update as Partial<typeof settings>).bookDockPath;
+    appSettings.getBookDockSettings.mockResolvedValue(settings);
+    appSettings.updateBookDockSettings.mockResolvedValue(settings);
+
+    await expect(controller.getSettings()).resolves.toEqual(settings);
+    await expect(controller.updateSettings(update as any)).resolves.toEqual(settings);
+
+    expect(appSettings.getBookDockSettings).toHaveBeenCalledOnce();
+    expect(appSettings.updateBookDockSettings).toHaveBeenCalledWith(update);
   });
 
   it('marks bulk edit endpoint as demo-restricted', () => {
@@ -308,6 +277,8 @@ describe('BookDockController', () => {
     expect(Reflect.getMetadata(PERMISSION_KEY, BookDockController.prototype.pause)).toBe(Permission.ManageBookDock);
     expect(Reflect.getMetadata(PERMISSION_KEY, BookDockController.prototype.resume)).toBe(Permission.ManageBookDock);
     expect(Reflect.getMetadata(PERMISSION_KEY, BookDockController.prototype.rescan)).toBe(Permission.ManageBookDock);
+    expect(Reflect.getMetadata(PERMISSION_KEY, BookDockController.prototype.getSettings)).toBe(Permission.ManageBookDock);
+    expect(Reflect.getMetadata(PERMISSION_KEY, BookDockController.prototype.updateSettings)).toBe(Permission.ManageBookDock);
   });
 
   it('grants global scope only to superusers and Book Dock managers', async () => {
