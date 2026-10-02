@@ -1,0 +1,12 @@
+services:
+  app:
+    # Rootless podman maps host uid 1000 -> container uid 0, so the default
+    # mapping makes bind mounts owned by the host user appear as root:root
+    # while the app runs as PUID=1000. keep-id maps host 1000 -> container
+    # 1000 instead, so /books and /data are owned by the app user.
+    # Required for /mnt/data (ntfs3, uid=1000,gid=1000), where chown is refused.
+    userns_mode: keep-id:uid=1000,gid=1000
+    cap_add:
+      # cap_drop: ALL strips CAP_KILL, so tini cannot forward SIGTERM to node
+      # and every stop ends in SIGKILL with exit code 1.
+      - KILL
