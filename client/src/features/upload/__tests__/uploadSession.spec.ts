@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const api = vi.hoisted(() => vi.fn())
+const api = vi.hoisted(() => vi.fn<(url: string, init?: RequestInit) => Promise<unknown>>())
 vi.mock('@/lib/api', () => ({
   api,
-  getValidToken: vi.fn().mockResolvedValue('test-token'),
+  getValidToken: vi.fn<() => Promise<string>>().mockResolvedValue('test-token'),
 }))
 
 import { uploadViaSession, UploadSessionError } from '../uploadSession'
@@ -109,7 +109,7 @@ describe('uploadViaSession', () => {
     expect(progress.at(-1)).toBe(100)
     expect(progress.slice(0, -1).every((p) => p < 100)).toBe(true)
 
-    const createBody = JSON.parse(api.mock.calls[0]![1].body as string)
+    const createBody = JSON.parse(api.mock.calls[0]![1]!.body as string)
     expect(createBody).toMatchObject({ filename: 'book.epub', sizeBytes: 10, target: { kind: 'book_dock' }, contentType: 'application/epub+zip' })
     expect(typeof createBody.idempotencyKey).toBe('string')
   })

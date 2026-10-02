@@ -10,7 +10,7 @@ vi.mock('@/features/settings/composables/useAppInfo', () => ({
   }),
 }))
 
-const uploadViaSession = vi.hoisted(() => vi.fn())
+const uploadViaSession = vi.hoisted(() => vi.fn<(options: { onProgress: (percent: number) => void }) => Promise<unknown>>())
 vi.mock('@/features/upload/uploadSession', () => ({ uploadViaSession }))
 
 import { useAddBookFile, SUPPORTED_FORMATS, MAX_FILE_BYTES } from '../useAddBookFile'
