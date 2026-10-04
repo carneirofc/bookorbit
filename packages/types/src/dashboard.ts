@@ -103,6 +103,14 @@ export interface ScrollerConfig {
   smartScopeId?: number;
 }
 
+export type DashboardShelfLayout = "wide" | "two-columns";
+
+export interface DashboardShelfConfig {
+  syncAcrossSessions?: boolean;
+  scrollers?: ScrollerConfig[];
+  shelfLayout?: DashboardShelfLayout;
+}
+
 export const WIDGET_TYPE = {
   READING_STREAK: "reading-streak",
   CURRENTLY_READING: "currently-reading",
@@ -190,6 +198,9 @@ export interface HighlightOfTheDayWidgetData {
   chapterTitle: string | null;
   createdAt: string;
 }
+
+/** Bounded Home shelf returned by GET /dashboard/widgets/highlights. */
+export type HighlightsWidgetData = HighlightOfTheDayWidgetData[];
 
 export type ChallengeType = "short-read" | "genre-explorer" | "finish-oldest" | "streak-builder" | "new-author" | "page-milestone";
 

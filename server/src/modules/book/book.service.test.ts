@@ -16,6 +16,7 @@ import { BulkEditFieldsDto } from './dto/bulk-edit-metadata.dto';
 import { BookQueryBuilder } from './book-query-builder.service';
 import { BookService } from './book.service';
 import { BookMetadataLockService } from '../book-metadata-lock/book-metadata-lock.service';
+import { inspectEpubMediaOverlayFields } from '../reader/epub/epub-media-overlay-capability';
 import { EMPTY_CONTENT_FILTER_RULES } from '@bookorbit/types';
 
 vi.mock('fs/promises', async () => {
@@ -54,6 +55,11 @@ vi.mock('../metadata/lib/pdf-parser', () => ({
   parsePdfFile: vi.fn(),
 }));
 
+vi.mock('../reader/epub/epub-media-overlay-capability', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../reader/epub/epub-media-overlay-capability')>();
+  return { ...actual, inspectEpubMediaOverlayFields: vi.fn(actual.inspectEpubMediaOverlayFields) };
+});
+
 const mockRm = rm as MockedFunction<typeof rm>;
 const mockStat = stat as MockedFunction<typeof stat>;
 const mockExtractEpubMetadata = extractEpubMetadata as MockedFunction<typeof extractEpubMetadata>;
@@ -64,6 +70,7 @@ const mockExtractCb7Metadata = extractCb7Metadata as MockedFunction<typeof extra
 const mockParseFb2File = parseFb2File as MockedFunction<typeof parseFb2File>;
 const mockParseMobiFile = parseMobiFile as MockedFunction<typeof parseMobiFile>;
 const mockParsePdfFile = parsePdfFile as MockedFunction<typeof parsePdfFile>;
+const mockInspectMediaOverlayFields = vi.mocked(inspectEpubMediaOverlayFields);
 
 function makeUser(overrides?: Partial<RequestUser>): RequestUser {
   return {
@@ -449,6 +456,29 @@ describe('BookService', () => {
 
       expect(filename).toBe('Dune.pdf.epub');
     });
+
+    it('adds the readaloud marker only to a media-overlay EPUB', async () => {
+      const { service, appSettings, bookRepo } = makeService();
+      appSettings.getDownloadPattern.mockResolvedValue('{title}< ({readaloud})>');
+      bookRepo.findPatternMetadataByBookIds.mockResolvedValue([metaRow(10, { title: 'Dune' })]);
+
+      await expect(
+        service.resolveDownloadFilename({
+          bookId: 10,
+          absolutePath: '/books/read-along.epub',
+          format: 'epub',
+          mediaOverlayAvailable: true,
+        }),
+      ).resolves.toBe('Dune (readaloud).epub');
+      await expect(
+        service.resolveDownloadFilename({
+          bookId: 10,
+          absolutePath: '/books/plain.epub',
+          format: 'epub',
+          mediaOverlayAvailable: false,
+        }),
+      ).resolves.toBe('Dune.epub');
+    });
   });
 
   describe('export files', () => {
@@ -499,6 +529,29 @@ describe('BookService', () => {
       const plan = await service.getExportFiles([1], user, 'audio');
 
       expect(plan.archiveFilename).toBe('Frank Herbert - Dune.zip');
+    });
+
+    it('keeps the readaloud marker on an EPUB inside an export but not on the ZIP archive', async () => {
+      const { service, appSettings, bookRepo } = makeService();
+      const user = makeUser();
+
+      appSettings.getDownloadPattern.mockResolvedValue('{title}< ({readaloud})>');
+      bookRepo.findLibraryIdsByBookIds.mockResolvedValue([{ id: 1, libraryId: 77 }]);
+      bookRepo.findPrimaryFilesByBookIds.mockResolvedValue([
+        {
+          bookId: 1,
+          absolutePath: '/books/read-aloud.epub',
+          format: 'epub',
+          sizeBytes: 100,
+          mediaOverlayAvailable: true,
+        },
+      ]);
+      bookRepo.findPatternMetadataByBookIds.mockResolvedValue([metaRow(1, { title: 'Dune' })]);
+
+      const plan = await service.getExportFiles([1], user, 'primary');
+
+      expect(plan.archiveFilename).toBe('Dune.zip');
+      expect(plan.files).toEqual([{ absolutePath: '/books/read-aloud.epub', zipPath: 'Dune (readaloud).epub', sizeBytes: 100 }]);
     });
 
     it('uses the book title as originalFilename for single-book audiobook archive filenames', async () => {
@@ -4373,6 +4426,172 @@ describe('BookService', () => {
         expect.any(Array),
         100,
       );
+    });
+
+    function mockAudiobookDetail(
+      bookRepo: ReturnType<typeof makeService>['bookRepo'],
+      fileRows: { id: number; absolutePath: string; durationSeconds: number | null; sortOrder: number | null }[],
+    ) {
+      bookRepo.findById.mockResolvedValue({
+        book: {
+          books: {
+            id: 21,
+            libraryId: 3,
+            primaryFileId: fileRows[0]!.id,
+            status: 'present',
+            folderPath: '/audio',
+            addedAt: new Date('2026-02-01T00:00:00.000Z'),
+          },
+          libraries: { name: 'Main', formatPriority: null },
+          book_metadata: { title: 'Tracks', chapters: null, durationSeconds: null },
+        },
+        authorRows: [],
+        genreRows: [],
+        tagRows: [],
+        fileRows: fileRows.map((file) => ({
+          ...file,
+          format: 'mp3',
+          role: 'content',
+          sizeBytes: 10,
+          createdAt: new Date('2026-02-01T00:00:00.000Z'),
+        })),
+        narratorRows: [],
+        communityRatingRows: [],
+      });
+      bookRepo.findCollectionsByBookId.mockResolvedValue([]);
+      bookRepo.findRatingByBookAndUser.mockResolvedValue(null);
+    }
+
+    it('synthesizes chapters in manifest track order while the file list keeps name order', async () => {
+      const { service, bookRepo } = makeService();
+      vi.spyOn(service, 'verifyBookAccess').mockResolvedValue(undefined);
+      mockAudiobookDetail(bookRepo, [
+        { id: 1, absolutePath: '/audio/Part 01.mp3', durationSeconds: 30, sortOrder: 2 },
+        { id: 2, absolutePath: '/audio/Part 02.mp3', durationSeconds: 60, sortOrder: 1 },
+        { id: 3, absolutePath: '/audio/Bonus.mp3', durationSeconds: 10, sortOrder: null },
+      ]);
+
+      const result = await service.getDetail(21, makeUser());
+
+      expect(result.audioMetadata?.chapters).toEqual([
+        { title: 'Part 02', startMs: 0 },
+        { title: 'Part 01', startMs: 60_000 },
+        { title: 'Bonus', startMs: 90_000 },
+      ]);
+      expect(result.files.map((file) => file.filename)).toEqual(['Bonus.mp3', 'Part 01.mp3', 'Part 02.mp3']);
+    });
+
+    it('does not synthesize chapters while any track duration is unknown', async () => {
+      const { service, bookRepo } = makeService();
+      vi.spyOn(service, 'verifyBookAccess').mockResolvedValue(undefined);
+
+      for (const unknown of [null, 0]) {
+        mockAudiobookDetail(bookRepo, [
+          { id: 1, absolutePath: '/audio/Part 01.mp3', durationSeconds: 30, sortOrder: null },
+          { id: 2, absolutePath: '/audio/Part 02.mp3', durationSeconds: unknown, sortOrder: null },
+          { id: 3, absolutePath: '/audio/Part 03.mp3', durationSeconds: 20, sortOrder: null },
+        ]);
+
+        const result = await service.getDetail(21, makeUser());
+
+        expect(result.audioMetadata?.chapters).toBeNull();
+      }
+    });
+
+    function mockReadAlongDetail(
+      bookRepo: ReturnType<typeof makeService>['bookRepo'],
+      overlay: { mediaOverlayDurationSeconds: number | null; mediaOverlayCheckedAt: Date | null },
+    ) {
+      bookRepo.findById.mockResolvedValue({
+        book: {
+          books: {
+            id: 31,
+            libraryId: 3,
+            primaryFileId: 300,
+            status: 'present',
+            folderPath: '/books/me-talk',
+            addedAt: new Date('2026-02-01T00:00:00.000Z'),
+          },
+          libraries: { name: 'Main', formatPriority: null },
+          book_metadata: { title: 'Me Talk Pretty One Day', chapters: null, durationSeconds: null },
+        },
+        authorRows: [],
+        genreRows: [],
+        tagRows: [],
+        fileRows: [
+          {
+            id: 300,
+            format: 'epub',
+            role: 'primary',
+            sizeBytes: 10,
+            absolutePath: '/books/me-talk/readaloud.epub',
+            createdAt: new Date('2026-02-01T00:00:00.000Z'),
+            durationSeconds: null,
+            mediaOverlayAvailable: true,
+            ...overlay,
+          },
+          {
+            id: 301,
+            format: 'm4b',
+            role: 'content',
+            sizeBytes: 20,
+            absolutePath: '/books/me-talk/audiobook.m4b',
+            createdAt: new Date('2026-02-01T00:00:00.000Z'),
+            durationSeconds: 21103,
+            mediaOverlayAvailable: false,
+            mediaOverlayDurationSeconds: null,
+            mediaOverlayCheckedAt: null,
+          },
+        ],
+        narratorRows: [],
+        communityRatingRows: [],
+      });
+      bookRepo.findCollectionsByBookId.mockResolvedValue([]);
+      bookRepo.findRatingByBookAndUser.mockResolvedValue(null);
+    }
+
+    it('inspects a read-along EPUB again once its check is cleared, and bridges to the audiobook with the fresh duration', async () => {
+      const { service, bookRepo } = makeService();
+      vi.spyOn(service, 'verifyBookAccess').mockResolvedValue(undefined);
+      mockReadAlongDetail(bookRepo, { mediaOverlayDurationSeconds: null, mediaOverlayCheckedAt: null });
+      const inspected = {
+        mediaOverlayAvailable: true,
+        mediaOverlayDurationSeconds: 21103.35,
+        mediaOverlayCheckedAt: new Date('2026-10-01T00:00:00.000Z'),
+      };
+      mockInspectMediaOverlayFields.mockResolvedValueOnce(inspected);
+
+      const result = await service.getDetail(31, makeUser());
+
+      expect(mockInspectMediaOverlayFields).toHaveBeenCalledTimes(1);
+      expect(mockInspectMediaOverlayFields).toHaveBeenCalledWith('/books/me-talk/readaloud.epub', 'epub', expect.any(Function));
+      expect(bookRepo.updateBookFile).toHaveBeenCalledWith(300, inspected);
+      expect(result.files.find((file) => file.id === 300)?.mediaOverlay).toEqual({ available: true, durationSeconds: 21103.35 });
+      expect(result.readAloudSync).toEqual(
+        expect.objectContaining({
+          overlayFileId: 300,
+          audioDurationSeconds: 21103,
+          overlayDurationSeconds: 21103.35,
+          state: 'enabled',
+          unavailableReason: null,
+        }),
+      );
+    });
+
+    it.each([
+      ['an unknown duration', null, 'unavailable', 'missing_duration'],
+      ['a measured duration', 21103.35, 'enabled', null],
+    ] as const)('trusts a checked read-along EPUB with %s without opening it again', async (_case, durationSeconds, state, unavailableReason) => {
+      const { service, bookRepo } = makeService();
+      vi.spyOn(service, 'verifyBookAccess').mockResolvedValue(undefined);
+      mockReadAlongDetail(bookRepo, { mediaOverlayDurationSeconds: durationSeconds, mediaOverlayCheckedAt: new Date('2026-09-30T00:00:00.000Z') });
+
+      const result = await service.getDetail(31, makeUser());
+
+      expect(mockInspectMediaOverlayFields).not.toHaveBeenCalled();
+      expect(bookRepo.updateBookFile).not.toHaveBeenCalled();
+      expect(result.files.find((file) => file.id === 300)?.mediaOverlay).toEqual({ available: true, durationSeconds });
+      expect(result.readAloudSync).toEqual(expect.objectContaining({ overlayDurationSeconds: durationSeconds, state, unavailableReason }));
     });
 
     it('preserves null personal detail fields when no user-specific state exists', async () => {

@@ -76,7 +76,7 @@ function handleClose() {
 <template>
   <DialogRoot :open="open" @update:open="handleOpenChange">
     <DialogPortal>
-      <DialogOverlay class="fixed inset-0 z-50 bg-foreground/50 backdrop-blur-sm" />
+      <DialogOverlay class="fixed inset-0 z-50 bg-scrim backdrop-blur-sm" />
       <DialogContent
         aria-modal="true"
         class="fixed left-1/2 top-1/2 z-50 flex max-h-[90vh] w-[calc(100%-2rem)] max-w-xl -translate-x-1/2 -translate-y-1/2 flex-col rounded-lg border border-border bg-card shadow-2xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"

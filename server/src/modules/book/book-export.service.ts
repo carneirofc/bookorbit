@@ -27,7 +27,7 @@ const SIZE_SCAN_CHUNK = 1000;
 const STREAM_BATCH_SIZE = 200;
 const MISSING_FILES_ENTRY = 'MISSING_FILES.txt';
 
-type ExportFileRow = { bookId: number; absolutePath: string; format: string | null; sizeBytes: number | null };
+type ExportFileRow = { bookId: number; absolutePath: string; format: string | null; sizeBytes: number | null; mediaOverlayAvailable: boolean };
 type PlannedEntry = { absolutePath: string; zipPath: string; stats: Stats };
 type BatchPlan = { entries: PlannedEntry[]; missing: string[] };
 
