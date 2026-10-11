@@ -164,6 +164,7 @@ describe('CoverSlotReconciler on real files', () => {
   let root: string;
   let dataPath: string;
   let ffmpegPath: string;
+  let ffprobePath: string;
   let repository: MemoryCoverRepository;
   let reconciler: CoverSlotReconcilerType;
   let nextBookId = 1;
@@ -171,20 +172,21 @@ describe('CoverSlotReconciler on real files', () => {
   beforeAll(async () => {
     root = await mkdtemp(join(tmpdir(), 'bookorbit-cover-reconcile-'));
     ffmpegPath = (requireInstaller('@ffmpeg-installer/ffmpeg') as { path: string }).path;
-    const ffprobePath = join(root, 'ffprobe');
+    ffprobePath = join(root, 'ffprobe');
     await copyFile((requireInstaller('@ffprobe-installer/ffprobe') as { path: string }).path, ffprobePath);
     await chmod(ffprobePath, 0o755);
-    vi.stubEnv('FFMPEG_PATH', ffmpegPath);
-    vi.stubEnv('FFPROBE_PATH', ffprobePath);
-    vi.resetModules();
   });
 
   afterAll(async () => {
-    vi.unstubAllEnvs();
     await rm(root, { recursive: true, force: true });
   });
 
   beforeEach(async () => {
+    // unstubEnvs in vitest.config.ts clears env stubs before every test, so a stub set in
+    // beforeAll is gone before the extractor module reads FFPROBE_PATH and FFMPEG_PATH.
+    vi.stubEnv('FFMPEG_PATH', ffmpegPath);
+    vi.stubEnv('FFPROBE_PATH', ffprobePath);
+    vi.resetModules();
     dataPath = await mkdtemp(join(root, 'data-'));
     const helpers = await import('../book-cover-store/book-cover-store.repository');
     const { BookCoverStore } = await import('../book-cover-store/book-cover-store.service');
