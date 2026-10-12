@@ -108,3 +108,12 @@ export type AddBookFileResult = {
   mediaOverlay?: EpubMediaOverlayCapability | null;
   bookStatus: string;
 };
+
+export type ReplaceBookFileResult = {
+  id: number;
+  bookId: number;
+  format: string;
+  sizeBytes: number;
+  filename: string;
+  isPrimary: boolean;
+};
