@@ -6010,6 +6010,7 @@
         },
         "renameFailed": "Failed to rename file",
         "deleteFailed": "Failed to delete file",
+        "replaceFailed": "Failed to replace file",
         "addFile": "Add File",
         "lastSynced": "Last synced: {time}",
         "sort": {
@@ -6033,6 +6034,7 @@
         "download": "Download",
         "moreActions": "More actions",
         "rename": "Rename",
+        "replace": "Replace file",
         "empty": {
           "title": "No files attached",
           "description": "This book has no associated files."
@@ -6048,6 +6050,14 @@
           "description": "Are you sure you want to delete \"{filename}\"? This action cannot be undone."
         },
         "deleting": "Deleting...",
+        "replaceModal": {
+          "title": "Replace file",
+          "description": "Upload a new version of \"{filename}\". The book keeps its reading progress, highlights, notes and collections.",
+          "positionNote": "If chapters were added or reordered, your saved reading position may point to a different spot in the new file.",
+          "chooseFile": "Choose replacement file",
+          "formatMismatch": "The replacement must be a {format} file"
+        },
+        "replacing": "Replacing...",
         "folderAria": "Folder location",
         "folderContents": "Folder contents",
         "inspectorAria": "Selected file",

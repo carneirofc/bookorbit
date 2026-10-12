@@ -67,6 +67,7 @@ describe('Architecture boundaries', () => {
       'src/modules/book-dock/book-dock-finalize.service.ts',
       'src/modules/book-dock/book-dock.service.ts',
       'src/modules/book/book-author-sort-key-backfill.service.ts',
+      'src/modules/upload/book-file-replace.service.ts',
       'src/modules/upload/upload-processor.service.ts',
       'src/modules/upload/upload.service.ts',
       'src/modules/app-settings/oidc-group-mapping-admin.service.ts',

@@ -7,6 +7,7 @@ import { FileWriteModule } from '../file-write/file-write.module';
 import { LibraryModule } from '../library/library.module';
 import { MetadataModule } from '../metadata/metadata.module';
 import { PathModule } from '../path/path.module';
+import { BookFileReplaceService } from './book-file-replace.service';
 import { BookFileUploadController } from './book-file-upload.controller';
 import { UploadController } from './upload.controller';
 import { UploadProcessorService } from './upload-processor.service';
@@ -20,7 +21,15 @@ import { UploadSessionService } from './upload-session.service';
 @Module({
   imports: [AppSettingsModule, BookCoverStoreModule, LibraryModule, MetadataModule, BookMetadataFetchModule, FileWriteModule, PathModule],
   controllers: [UploadController, BookFileUploadController, UploadSessionController],
-  providers: [UploadService, UploadValidatorService, UploadStorageService, UploadProcessorService, UploadSessionRepository, UploadSessionService],
+  providers: [
+    UploadService,
+    BookFileReplaceService,
+    UploadValidatorService,
+    UploadStorageService,
+    UploadProcessorService,
+    UploadSessionRepository,
+    UploadSessionService,
+  ],
   exports: [UploadValidatorService, UploadStorageService, UploadProcessorService, UploadService],
 })
 export class UploadModule {}

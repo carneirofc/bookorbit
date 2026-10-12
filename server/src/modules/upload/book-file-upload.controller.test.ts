@@ -17,7 +17,11 @@ describe('BookFileUploadController', () => {
     getMaxUploadSizeMb: () => Promise.resolve(500),
   };
 
-  const controller = new BookFileUploadController(uploadService as any, appSettings as any);
+  const replaceService = {
+    replaceFile: vi.fn(),
+  };
+
+  const controller = new BookFileUploadController(uploadService as any, appSettings as any, replaceService as any);
 
   beforeEach(() => {
     vi.resetAllMocks();
@@ -81,6 +85,41 @@ describe('BookFileUploadController', () => {
       uploadService.addFileToBook.mockRejectedValue(new ForbiddenException('No access'));
 
       await expect(controller.addFileToBook(1, makeUser(), req as any)).rejects.toBeInstanceOf(ForbiddenException);
+    });
+  });
+
+  describe('replaceBookFile', () => {
+    it('requires LibraryUpload permission', () => {
+      const permission = Reflect.getMetadata(PERMISSION_KEY, BookFileUploadController.prototype.replaceBookFile);
+      expect(permission).toBe(Permission.LibraryUpload);
+    });
+
+    it('throws BadRequestException when no multipart file is present', async () => {
+      const req = { file: vi.fn().mockResolvedValue(undefined) };
+
+      await expect(controller.replaceBookFile(1, 2, makeUser(), req as any)).rejects.toBeInstanceOf(BadRequestException);
+      expect(replaceService.replaceFile).not.toHaveBeenCalled();
+    });
+
+    it('delegates to replaceService.replaceFile with the size limit applied', async () => {
+      const stream = {};
+      const user = makeUser({ id: 3 });
+      const req = { file: vi.fn().mockResolvedValue({ filename: 'fic.epub', file: stream }) };
+      const serviceResult = { id: 12, bookId: 7, format: 'epub', sizeBytes: 2048, filename: 'fic.epub', isPrimary: true };
+      replaceService.replaceFile.mockResolvedValue(serviceResult);
+
+      const result = await controller.replaceBookFile(7, 12, user, req as any);
+
+      expect(req.file).toHaveBeenCalledWith({ limits: { fileSize: 500 * 1024 * 1024 } });
+      expect(replaceService.replaceFile).toHaveBeenCalledWith(7, 12, 'fic.epub', stream, user);
+      expect(result).toEqual(serviceResult);
+    });
+
+    it('propagates NotFoundException from the service', async () => {
+      const req = { file: vi.fn().mockResolvedValue({ filename: 'book.epub', file: {} }) };
+      replaceService.replaceFile.mockRejectedValue(new NotFoundException('File not found'));
+
+      await expect(controller.replaceBookFile(1, 999, makeUser(), req as any)).rejects.toBeInstanceOf(NotFoundException);
     });
   });
 

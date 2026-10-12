@@ -11,6 +11,7 @@ import { copyToClipboard } from '@/lib/clipboard'
 import { useBookDownload } from '@/features/book/composables/useBookDownload'
 import { usePermissions } from '@/features/auth/composables/usePermissions'
 import { useBookFileTree, type SortKey, type TreeFile } from '@/features/book/composables/useBookFileTree'
+import { fileExtension, useReplaceBookFile } from '@/features/book/composables/useReplaceBookFile'
 import FilesHeroBar from '../files/FilesHeroBar.vue'
 import FileListCard from '../files/FileListCard.vue'
 import FileDetailCard from '../files/FileDetailCard.vue'
@@ -46,6 +47,7 @@ const canUpload = computed(() => hasPermission(Permission.LibraryUpload))
 const canDownload = computed(() => hasPermission('library_download'))
 const canEdit = computed(() => hasPermission('library_edit_metadata'))
 const canDelete = computed(() => hasPermission('library_delete_books'))
+const canReplaceSelected = computed(() => canUpload.value && selectedFile.value?.editionKey != null)
 
 /**
  * The rail turns into a sheet on the CSS side at 40rem of *tab* width, so the decision to open one
@@ -156,6 +158,12 @@ const renameError = ref<string | null>(null)
 const deleteTarget = ref<TreeFile | null>(null)
 const deleting = ref(false)
 const deleteError = ref<string | null>(null)
+const replaceTarget = ref<TreeFile | null>(null)
+const replacement = ref<File | null>(null)
+const replaceFormatError = ref<string | null>(null)
+const { replacing, error: replaceRequestError, replaceFile, resetError: resetReplaceError } = useReplaceBookFile()
+const replaceError = computed(() => replaceFormatError.value ?? replaceRequestError.value)
+const replaceAccept = computed(() => (replaceTarget.value?.formatKey ? `.${replaceTarget.value.formatKey}` : undefined))
 
 function openAddFileModal() {
   addFileModalOpen.value = true
@@ -206,6 +214,39 @@ function openDeleteModal(file: TreeFile) {
 function closeDeleteModal() {
   if (deleting.value) return
   deleteTarget.value = null
+}
+
+function openReplaceModal(file: TreeFile) {
+  replaceTarget.value = file
+  replacement.value = null
+  replaceFormatError.value = null
+  resetReplaceError()
+}
+function closeReplaceModal() {
+  if (replacing.value) return
+  replaceTarget.value = null
+}
+
+function onReplacementPicked(event: Event) {
+  const input = event.target as HTMLInputElement
+  const picked = input.files?.[0] ?? null
+  resetReplaceError()
+  replaceFormatError.value = null
+  replacement.value = picked
+  const expected = replaceTarget.value?.formatKey
+  if (picked && expected && fileExtension(picked.name) !== expected) {
+    replaceFormatError.value = t('book.detail.files.replaceModal.formatMismatch', { format: expected.toUpperCase() })
+  }
+}
+
+async function confirmReplace() {
+  const target = replaceTarget.value
+  const file = replacement.value
+  if (!target || !file || replaceFormatError.value) return
+  const result = await replaceFile(props.book.id, target.id, file, t('book.detail.files.replaceFailed'))
+  if (!result) return
+  replaceTarget.value = null
+  emit('refetch')
 }
 
 async function confirmDelete() {
@@ -313,10 +354,12 @@ async function confirmDelete() {
             :can-download="canDownload"
             :can-edit="canEdit"
             :can-delete="canDelete"
+            :can-replace="canReplaceSelected"
             @open="openFile"
             @download="downloadFile"
             @rename="openRenameModal"
             @remove="openDeleteModal"
+            @replace="openReplaceModal"
             @copy-path="copyPath"
           />
 
@@ -358,6 +401,46 @@ async function confirmDelete() {
             @click="submitRename"
           >
             {{ renaming ? t('book.detail.files.saving') : t('common.save') }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Replace -->
+    <div v-if="replaceTarget" class="fixed inset-0 z-[70] flex items-end justify-center md:items-center md:px-4" @click.self="closeReplaceModal">
+      <button class="absolute inset-0 bg-scrim" :aria-label="t('common.cancel')" @click="closeReplaceModal" />
+      <div
+        class="relative w-full rounded-t-lg border border-border bg-card p-4 shadow-xl md:max-w-md md:rounded-lg md:p-5"
+        role="dialog"
+        aria-modal="true"
+      >
+        <p class="text-base font-semibold">{{ t('book.detail.files.replaceModal.title') }}</p>
+        <p class="mt-1 text-sm text-muted-foreground">
+          {{ t('book.detail.files.replaceModal.description', { filename: replaceTarget.leaf }) }}
+        </p>
+        <p class="mt-2 text-xs text-muted-foreground">{{ t('book.detail.files.replaceModal.positionNote') }}</p>
+        <label class="mt-4 block">
+          <span class="sr-only">{{ t('book.detail.files.replaceModal.chooseFile') }}</span>
+          <input
+            type="file"
+            class="block w-full text-sm file:mr-3 file:rounded-md file:border file:border-border file:bg-background file:px-3 file:py-1.5 file:text-sm file:text-foreground hover:file:bg-muted"
+            :accept="replaceAccept"
+            :disabled="replacing"
+            :aria-invalid="replaceError ? 'true' : undefined"
+            @change="onReplacementPicked"
+          />
+        </label>
+        <p v-if="replaceError" role="alert" class="mt-2 text-xs text-destructive">{{ replaceError }}</p>
+        <div class="mt-4 flex items-center justify-end gap-2">
+          <button class="rounded-md border border-border px-3 py-2 text-sm transition-colors hover:bg-muted" @click="closeReplaceModal">
+            {{ t('common.cancel') }}
+          </button>
+          <button
+            class="rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+            :disabled="replacing || !replacement || replaceFormatError != null"
+            @click="confirmReplace"
+          >
+            {{ replacing ? t('book.detail.files.replacing') : t('book.detail.files.replace') }}
           </button>
         </div>
       </div>
