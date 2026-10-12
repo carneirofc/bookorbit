@@ -82,14 +82,13 @@ export class BookFileReplaceService {
       throw uploadError.empty();
     }
 
-    let isPrimary: boolean;
+    let replaced: { absolutePath: string; isPrimary: boolean };
     try {
       await this.validator.validateContent(tempPath, format);
-      await this.pathPolicy.assertWithinRoot(target.absolutePath, target.libraryFolderPath);
       const fileHash = await computeFileHash(tempPath);
 
-      isPrimary = await this.lockService.withLock(bookOperationLockKey(bookId), () =>
-        this.lockService.withLock(target.absolutePath, () => this.swapAndCommit(target, tempPath, format, fileHash, sizeBytes)),
+      replaced = await this.lockService.withLock(bookOperationLockKey(bookId), () =>
+        this.replaceLocked(bookId, fileId, tempPath, format, fileHash, sizeBytes),
       );
     } catch (err) {
       const errorClass = err instanceof Error ? err.name : 'Error';
@@ -101,13 +100,32 @@ export class BookFileReplaceService {
       throw err;
     }
 
-    this.queuePostProcessing(bookId, target.absolutePath, format, isPrimary);
+    const { absolutePath, isPrimary } = replaced;
+    this.queuePostProcessing(bookId, absolutePath, format, isPrimary);
 
     this.logger.log(
       `[${event}] [end] bookId=${bookId} fileId=${fileId} userId=${user.id} format=${format} sizeBytes=${sizeBytes} isPrimary=${isPrimary} durationMs=${Date.now() - startedAt} - replace book file completed`,
     );
 
-    return { id: fileId, bookId, format, sizeBytes, filename: basename(target.absolutePath), isPrimary };
+    return { id: fileId, bookId, format, sizeBytes, filename: basename(absolutePath), isPrimary };
+  }
+
+  /**
+   * The path is resolved again under the book lock because a rename or move can relocate the file
+   * while the upload streams, after which its old path may hold another book's file.
+   */
+  private async replaceLocked(
+    bookId: number,
+    fileId: number,
+    tempPath: string,
+    format: string,
+    fileHash: string,
+    sizeBytes: number,
+  ): Promise<{ absolutePath: string; isPrimary: boolean }> {
+    const target = await this.findTarget(bookId, fileId);
+    await this.pathPolicy.assertWithinRoot(target.absolutePath, target.libraryFolderPath);
+    const isPrimary = await this.lockService.withLock(target.absolutePath, () => this.swapAndCommit(target, tempPath, format, fileHash, sizeBytes));
+    return { absolutePath: target.absolutePath, isPrimary };
   }
 
   private async findTarget(bookId: number, fileId: number): Promise<ReplaceTarget> {

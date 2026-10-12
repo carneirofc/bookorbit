@@ -190,6 +190,26 @@ describe('BookFileReplaceService', () => {
 
       expect(tx.insert).not.toHaveBeenCalled();
     });
+
+    it('swaps the file at its current path when the book was renamed while the upload streamed', async () => {
+      const renamedPath = '/library/Fic/renamed.epub';
+      storage.streamToTemp.mockImplementation(() => {
+        // Another book can now own ORIGINAL_PATH; replacing it would hand that book this upload.
+        db.select.mockReturnValue(targetSelectChain([targetRow({ absolutePath: renamedPath })]));
+        return Promise.resolve({ tempPath: '/tmp/upload.bin', sizeBytes: 4096 });
+      });
+
+      const result = await service.replaceFile(7, 12, 'fic.epub', {} as any, user);
+
+      const touchedPaths = renamedPaths().flat();
+      expect(touchedPaths).not.toContain(ORIGINAL_PATH);
+      const [[originalFrom], [, stagingTo]] = renamedPaths();
+      expect(originalFrom).toBe(renamedPath);
+      expect(stagingTo).toBe(renamedPath);
+      expect(pathPolicy.assertWithinRoot).toHaveBeenCalledWith(renamedPath, '/library');
+      expect(result.filename).toBe('renamed.epub');
+      expect(processor.extractMetadataAsync).toHaveBeenCalledWith(7, renamedPath, 'epub');
+    });
   });
 
   describe('rejection before touching disk', () => {
