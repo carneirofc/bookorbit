@@ -2493,6 +2493,50 @@ describe('cross-library transfer', () => {
     expect(notificationService.notify).not.toHaveBeenCalledWith(expect.objectContaining({ type: NotificationType.BooksUnavailable }));
   });
 
+  it('does not transfer a missing book onto an unrelated file that reuses its inode', async () => {
+    const destinationFile = makeFileStat({
+      absolutePath: '/dest/Inbox/other.epub',
+      relPath: 'Inbox/other.epub',
+      ino: 4242n,
+      sizeBytes: 98765,
+      mtime: new Date('2026-10-12'),
+    });
+    const sourceFile = makeBookFile({
+      id: 500,
+      bookId: 42,
+      libraryFolderId: 10,
+      absolutePath: '/source/Book/book.epub',
+      relPath: 'Book/book.epub',
+      ino: 4242n,
+      fileHash: 'deleted-book-hash',
+    });
+    const sourceContext = { file: sourceFile, libraryId: 1, bookStatus: 'missing', folderPath: '/source/Book', libraryFolderPath: '/source' };
+
+    const repo = makeRepo({
+      findLibraryFolders: vi.fn().mockResolvedValue([{ id: 20, path: '/dest', libraryId: 2 }]),
+      findMissingBookFileWithContextByIno: vi.fn().mockResolvedValue(sourceContext),
+      findBookFileWithContextByIno: vi.fn().mockResolvedValue(sourceContext),
+      createBook: vi.fn().mockResolvedValue({ id: 77, status: 'present', libraryFolderId: 20, folderPath: '/dest/Inbox', libraryId: 2 }),
+    });
+    mockFindCandidates.mockResolvedValue({
+      candidates: [makeCandidate('/dest/Inbox', [destinationFile])],
+      skippedDirs: new Set(),
+      unchangedDirs: new Set(),
+      dirMtimes: new Map(),
+    });
+    mockStat.mockRejectedValue(Object.assign(new Error('not found'), { code: 'ENOENT' }));
+
+    const done = awaitScan(repo);
+    const { service } = makeService(repo);
+    await service.startScan(2, 'manual');
+    await done;
+
+    expect(repo.moveBookToLibrary).not.toHaveBeenCalled();
+    expect(repo.updateBookFile).not.toHaveBeenCalledWith(500, expect.anything());
+    expect(repo.createBook).toHaveBeenCalled();
+    expect(repo.createBookFile).toHaveBeenCalledWith(expect.objectContaining({ bookId: 77, absolutePath: '/dest/Inbox/other.epub' }));
+  });
+
   it('transfers a source book when inode matches and the previous path no longer exists', async () => {
     const destinationFile = makeFileStat({
       absolutePath: '/dest/Inbox/book.epub',
@@ -3056,6 +3100,47 @@ describe('reassigned file metadata extraction', () => {
     await done;
 
     expect(mockMetadata.extractAndSave).not.toHaveBeenCalled();
+  });
+
+  it('does not hand a deleted book an unrelated new file that reuses its inode', async () => {
+    const fileStat = makeFileStat({
+      absolutePath: '/library/Author/Book/other.epub',
+      relPath: 'Author/Book/other.epub',
+      ino: 7777n,
+      sizeBytes: 98765,
+      mtime: new Date('2026-10-12'),
+    });
+    const repo = makeRepo({
+      findBooksByLibraryFolder: vi
+        .fn()
+        .mockResolvedValue([{ id: 999, libraryId: 1, libraryFolderId: 1, folderPath: '/library/Deleted/Book', status: 'missing' }]),
+      findBookFilesByLibraryFolder: vi.fn().mockResolvedValue([
+        makeBookFile({
+          id: 5,
+          bookId: 999,
+          absolutePath: '/library/Deleted/Book/book.epub',
+          relPath: 'Deleted/Book/book.epub',
+          ino: 7777n,
+        }),
+      ]),
+    });
+    mockFindCandidates.mockResolvedValue({
+      candidates: [makeCandidate('/library/Author/Book', [fileStat])],
+      skippedDirs: new Set(),
+      unchangedDirs: new Set(),
+      dirMtimes: new Map(),
+    });
+    mockStat.mockRejectedValue(Object.assign(new Error('not found'), { code: 'ENOENT' }));
+
+    const done = awaitScan(repo);
+    const { service } = makeService(repo);
+    await service.startScan(1, 'manual');
+    await done;
+
+    expect(repo.updateBookFolderPath).not.toHaveBeenCalledWith(999, expect.anything());
+    expect(repo.updateBookFile).not.toHaveBeenCalledWith(5, expect.anything());
+    expect(repo.createBook).toHaveBeenCalled();
+    expect(repo.createBookFile).toHaveBeenCalledWith(expect.objectContaining({ bookId: 1, absolutePath: fileStat.absolutePath }));
   });
 
   it('extracts metadata when a content file is renamed and changed via inode match', async () => {
