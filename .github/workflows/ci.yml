@@ -94,6 +94,7 @@ jobs:
         shell: bash
         env:
           GH_REPO: ${{ github.repository }}
+          UPSTREAM_REPO: bookorbit/bookorbit
           GH_TOKEN: ${{ github.token }}
           PR_BRANCH: ${{ github.head_ref }}
           PR_BODY: ${{ github.event.pull_request.body }}
@@ -140,6 +141,35 @@ jobs:
             rm -f "${response_file}"
           }
 
+          issue_exists_in() {
+            local issue_repo="$1"
+            local issue_number="$2"
+            local response_file
+            local http_code
+            local exists=1
+
+            response_file="$(mktemp)"
+            http_code="$(curl -sS -o "${response_file}" -w "%{http_code}" \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${issue_repo}/issues/${issue_number}" || true)"
+            if [[ "${http_code}" == "200" ]] && jq -e '.pull_request == null' "${response_file}" > /dev/null; then
+              exists=0
+            fi
+            rm -f "${response_file}"
+            return "${exists}"
+          }
+
+          # Forks keep upstream BO-<n> branch names and bare #<n> references, so fall back to the upstream tracker.
+          resolve_issue_repo() {
+            local issue_number="$1"
+            if [[ "${GH_REPO}" != "${UPSTREAM_REPO}" ]] && ! issue_exists_in "${GH_REPO}" "${issue_number}"; then
+              echo "${UPSTREAM_REPO}"
+            else
+              echo "${GH_REPO}"
+            fi
+          }
+
           if [[ "${PR_BRANCH}" =~ ^BO-([0-9]+)- ]]; then
             branch_issue_number="${BASH_REMATCH[1]}"
           else
@@ -147,7 +177,7 @@ jobs:
             exit 1
           fi
 
-          validate_issue_exists "${GH_REPO}" "${branch_issue_number}" "Branch name"
+          validate_issue_exists "$(resolve_issue_repo "${branch_issue_number}")" "${branch_issue_number}" "Branch name"
 
           closing_keyword_pattern='(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)'
           issue_reference_pattern="(^|[^[:alnum:]_])${closing_keyword_pattern}([[:space:]]*:[[:space:]]*|[[:space:]]+)([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#[1-9][0-9]*"
@@ -169,8 +199,8 @@ jobs:
               issue_repo="${BASH_REMATCH[1]}"
               issue_number="${BASH_REMATCH[2]}"
             elif [[ "${issue_ref}" =~ ^#([1-9][0-9]*)$ ]]; then
-              issue_repo="${GH_REPO}"
               issue_number="${BASH_REMATCH[1]}"
+              issue_repo="$(resolve_issue_repo "${issue_number}")"
             else
               echo "::error::Unable to parse issue reference '${issue_ref}' in PR description."
               exit 1
