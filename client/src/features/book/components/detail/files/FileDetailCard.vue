@@ -23,6 +23,7 @@ const props = defineProps<{
   canDownload: boolean
   canEdit: boolean
   canDelete: boolean
+  canReplace: boolean
 }>()
 
 const emit = defineEmits<{
@@ -30,6 +31,7 @@ const emit = defineEmits<{
   download: [file: TreeFile]
   rename: [file: TreeFile]
   remove: [file: TreeFile]
+  replace: [file: TreeFile]
   copyPath: [file: TreeFile]
 }>()
 
@@ -93,6 +95,9 @@ function handleRename() {
 }
 function handleRemove() {
   emit('remove', props.file)
+}
+function handleReplace() {
+  emit('replace', props.file)
 }
 function handleCopyPath() {
   emit('copyPath', props.file)
@@ -264,6 +269,7 @@ function handleCopyPath() {
           <DropdownMenuContent align="end">
             <DropdownMenuItem @click="handleCopyPath">{{ t('book.detail.files.copyPath') }}</DropdownMenuItem>
             <DropdownMenuItem v-if="canEdit" @click="handleRename">{{ t('book.detail.files.rename') }}</DropdownMenuItem>
+            <DropdownMenuItem v-if="canReplace" @click="handleReplace">{{ t('book.detail.files.replace') }}</DropdownMenuItem>
             <DropdownMenuItem v-if="canDelete" class="text-destructive focus:text-destructive" @click="handleRemove">
               {{ t('common.delete') }}
             </DropdownMenuItem>
