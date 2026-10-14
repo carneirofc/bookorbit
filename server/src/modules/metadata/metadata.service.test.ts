@@ -833,6 +833,53 @@ describe('MetadataService', () => {
     );
   });
 
+  it('extractAndSave(cbz) persists ComicInfo Tags as tags alongside Genre', async () => {
+    const { db } = makeDb();
+    const service = makeService(db);
+    vi.spyOn(service, 'replaceAuthors').mockResolvedValue([]);
+    const replaceGenresSpy = vi.spyOn(service, 'replaceGenres').mockResolvedValue(undefined);
+    const replaceTagsSpy = vi.spyOn(service, 'replaceTags').mockResolvedValue(undefined);
+    const comicTags = ['Full Color', 'University', 'Hentai', 'Uncensored', 'Spread', 'color', 'schoolgirl outfit', 'unlimited'];
+
+    mockExtractCbzMetadata.mockResolvedValue({
+      title: 'Spread Issue',
+      subtitle: null,
+      seriesName: null,
+      seriesIndex: null,
+      seriesTotalBooks: null,
+      description: null,
+      publisher: null,
+      publishedDate: null,
+      publishedYear: null,
+      language: null,
+      pageCount: null,
+      rating: null,
+      isbn10: null,
+      isbn13: null,
+      authors: [],
+      genres: ['Spread'],
+      tags: comicTags,
+      googleBooksId: null,
+      goodreadsId: null,
+      amazonId: null,
+      hardcoverId: null,
+      hardcoverEditionId: null,
+      openLibraryId: null,
+      ranobedbId: null,
+      koboId: null,
+      comicvineId: null,
+      lubimyczytacId: null,
+      aladinId: null,
+      itunesId: null,
+      comicMetadata: null,
+    });
+
+    await service.extractAndSave(26, '/tmp/book.cbz', 'cbz');
+
+    expect(replaceGenresSpy).toHaveBeenCalledWith(26, ['Spread']);
+    expect(replaceTagsSpy).toHaveBeenCalledWith(26, comicTags);
+  });
+
   describe('extractAndSave(cbz) series length from ComicInfo Count', () => {
     function comicMetadata(overrides: Partial<ParsedCbzMetadata> = {}): ParsedCbzMetadata {
       return {
