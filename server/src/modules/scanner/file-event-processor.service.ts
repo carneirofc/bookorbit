@@ -9,6 +9,7 @@ import { selectPrimaryFile } from '../../common/utils/primary-file-selection.uti
 import { BookCoverStore } from '../book-cover-store/book-cover-store.service';
 import { CoverSlotReconciler } from '../metadata/cover-slot-reconciler.service';
 import { classifyFile, DEFAULT_FORMAT_PRIORITY } from './lib/classify';
+import { matchesRecordedFileState } from './lib/file-identity';
 import { ScannerRepository } from './scanner.repository';
 import { inspectEpubMediaOverlayFields } from '../reader/epub/epub-media-overlay-capability';
 
@@ -402,6 +403,7 @@ export class FileEventProcessorService {
 
     const match = await this.scannerRepo.findBookFileWithContextByIno(ino, scopeLibraryId);
     if (!match || match.file.absolutePath === newAbsolutePath) return { type: 'noop' };
+    if (!matchesRecordedFileState(match.file, { sizeBytes: Number(fileStat.size), mtime: fileStat.mtime })) return { type: 'noop' };
 
     const { file, libraryId: rowLibraryId, folderPath: oldFolderPath, libraryFolderPath } = match;
 

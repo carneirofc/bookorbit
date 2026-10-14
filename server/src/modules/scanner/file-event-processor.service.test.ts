@@ -701,7 +701,7 @@ describe('handleCreate — move detection', () => {
     mockRepo.findBookFileByAbsolutePath.mockResolvedValue(null);
     mockRepo.findMissingBookByFolderPath.mockResolvedValue(null);
     mockRepo.findBookFileWithContextByIno.mockResolvedValue({
-      file: { id: 50, bookId: 30, absolutePath: '/books/OldAuthor/book.epub' },
+      file: { id: 50, bookId: 30, absolutePath: '/books/OldAuthor/book.epub', sizeBytes: 70000, mtime: new Date('2024-01-01') },
       libraryId: 2,
       folderPath: '/books/OldAuthor',
       libraryFolderPath: '/books',
@@ -717,6 +717,27 @@ describe('handleCreate — move detection', () => {
     expect(mockRepo.updateBookFolderPath).toHaveBeenCalledWith(30, '/books/NewAuthor');
     expect(mockRepo.markBooksAsPresent).toHaveBeenCalledWith([30]);
     expect(result).toEqual({ type: 'book-moved', libraryId: 2, bookIds: [30] });
+  });
+
+  it('does not hand a deleted book an unrelated new file that reuses its inode', async () => {
+    const fileStat = makeFileStat({ ino: 4000n, size: 98765, mtime: new Date('2026-10-12') });
+    mockStat.mockResolvedValueOnce(fileStat);
+    mockRepo.findBookFileByAbsolutePath.mockResolvedValue(null);
+    mockRepo.findMissingBookByFolderPath.mockResolvedValue(null);
+    mockRepo.findBookFileWithContextByIno.mockResolvedValue({
+      file: { id: 50, bookId: 30, absolutePath: '/books/Deleted Author/Deleted Book.epub', sizeBytes: 70000, mtime: new Date('2024-01-01') },
+      libraryId: 2,
+      folderPath: '/books/Deleted Author',
+      libraryFolderPath: '/books',
+      bookStatus: 'missing',
+    } as any);
+
+    const result = await makeService().handleCreate('/books/Other Author/Other Book.epub');
+
+    expect(mockRepo.updateBookFile).not.toHaveBeenCalled();
+    expect(mockRepo.updateBookFolderPath).not.toHaveBeenCalled();
+    expect(mockRepo.markBooksAsPresent).not.toHaveBeenCalled();
+    expect(result).toEqual({ type: 'scan-required', scope: 'file' });
   });
 
   it('requires a scan when the path lookup misses even if inode lookup reports the same path', async () => {
@@ -745,7 +766,7 @@ describe('handleCreate — move detection', () => {
     mockRepo.findBookFileByAbsolutePath.mockResolvedValue(null);
     mockRepo.findMissingBookByFolderPath.mockResolvedValue(null);
     mockRepo.findBookFileWithContextByIno.mockResolvedValue({
-      file: { id: 50, bookId: 30, absolutePath: '/books/Author/old.epub' },
+      file: { id: 50, bookId: 30, absolutePath: '/books/Author/old.epub', sizeBytes: 70000, mtime: new Date('2024-01-01') },
       libraryId: 2,
       folderPath: '/books/Author',
       libraryFolderPath: '/books',
@@ -767,7 +788,7 @@ describe('handleCreate — move detection', () => {
     mockRepo.findBookFileByAbsolutePath.mockResolvedValue(null);
     mockRepo.findMissingBookByFolderPath.mockResolvedValue(null);
     mockRepo.findBookFileWithContextByIno.mockResolvedValue({
-      file: { id: 51, bookId: 31, absolutePath: oldPath },
+      file: { id: 51, bookId: 31, absolutePath: oldPath, sizeBytes: 70000, mtime: new Date('2024-01-01') },
       libraryId: 2,
       folderPath: '/books/Author',
       libraryFolderPath: '/books',
@@ -788,7 +809,7 @@ describe('handleCreate — move detection', () => {
     mockRepo.findBookFileByAbsolutePath.mockResolvedValue(null);
     mockRepo.findMissingBookByFolderPath.mockResolvedValue(null);
     mockRepo.findBookFileWithContextByIno.mockResolvedValue({
-      file: { id: 60, bookId: 40, absolutePath: '/books/old.epub' },
+      file: { id: 60, bookId: 40, absolutePath: '/books/old.epub', sizeBytes: 12345, mtime: new Date('2024-01-01') },
       libraryId: 3,
       folderPath: '/books/old.epub',
       libraryFolderPath: '/books',
@@ -808,7 +829,7 @@ describe('handleCreate — move detection', () => {
     mockRepo.findMissingBookByFolderPath.mockResolvedValue(null);
     mockRepo.findLibrarySettings.mockResolvedValue({ organizationMode: 'book_per_file', formatPriority: ['epub'] } as any);
     mockRepo.findBookFileWithContextByIno.mockResolvedValue({
-      file: { id: 61, bookId: 41, absolutePath: '/books/old.epub' },
+      file: { id: 61, bookId: 41, absolutePath: '/books/old.epub', sizeBytes: 12345, mtime: new Date('2024-01-01') },
       libraryId: 3,
       folderPath: '/books/old.epub',
       libraryFolderPath: '/books',
@@ -846,7 +867,7 @@ describe('handleCreate — directory move detection', () => {
     mockRepo.findMissingBooksByFolderPath.mockResolvedValue([]);
     mockReaddir.mockResolvedValue([{ isFile: () => true, name: 'book.epub', parentPath: '/books/NewAuthor' }] as any);
     mockRepo.findBookFileWithContextByIno.mockResolvedValue({
-      file: { id: 70, bookId: 50, absolutePath: '/books/OldAuthor/book.epub' },
+      file: { id: 70, bookId: 50, absolutePath: '/books/OldAuthor/book.epub', sizeBytes: 90000, mtime: new Date('2024-01-01') },
       libraryId: 4,
       folderPath: '/books/OldAuthor',
       libraryFolderPath: '/books',

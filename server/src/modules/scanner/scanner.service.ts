@@ -34,6 +34,7 @@ import { basename, dirname, relative, sep } from 'path';
 import { readdir, stat } from 'fs/promises';
 
 import { classifyFile, DEFAULT_FORMAT_PRIORITY, FileRole, isAudioFormat } from './lib/classify';
+import { matchesRecordedFileState } from './lib/file-identity';
 import { computeFileHash } from './lib/hash';
 import { waitForStability } from '../../common/utils/fs-stability.utils';
 import {
@@ -2186,7 +2187,7 @@ export class ScannerService implements OnApplicationBootstrap {
     for (const file of contentFiles) {
       if (file.ino === 0n) continue;
       const byIno = fileByIno.get(file.ino);
-      if (!byIno || byIno.absolutePath === file.absolutePath) continue;
+      if (!byIno || byIno.absolutePath === file.absolutePath || !matchesRecordedFileState(byIno, file)) continue;
       sourceBookId = byIno.bookId;
       break;
     }
@@ -2319,7 +2320,8 @@ export class ScannerService implements OnApplicationBootstrap {
     for (const file of contentFiles) {
       if (file.ino === 0n) continue;
       const byIno = await this.scannerRepo.findMissingBookFileWithContextByIno(file.ino);
-      if (!byIno || (await this.pathExistsAsDistinctEntry(byIno.file.absolutePath, file.absolutePath))) continue;
+      if (!byIno || !matchesRecordedFileState(byIno.file, file)) continue;
+      if (await this.pathExistsAsDistinctEntry(byIno.file.absolutePath, file.absolutePath)) continue;
       sourceBookId = byIno.file.bookId;
       sourceLibraryId = byIno.libraryId;
       break;
@@ -2329,7 +2331,7 @@ export class ScannerService implements OnApplicationBootstrap {
       for (const file of contentFiles) {
         if (file.ino === 0n) continue;
         const byIno = await this.scannerRepo.findBookFileWithContextByIno(file.ino);
-        if (!byIno || byIno.file.absolutePath === file.absolutePath) continue;
+        if (!byIno || byIno.file.absolutePath === file.absolutePath || !matchesRecordedFileState(byIno.file, file)) continue;
         if (await this.fileExistsAsDistinctEntry(byIno.file.absolutePath, file.absolutePath)) continue;
         sourceBookId = byIno.file.bookId;
         sourceLibraryId = byIno.libraryId;
@@ -2543,6 +2545,7 @@ export class ScannerService implements OnApplicationBootstrap {
   ): Promise<(ProcessedFileResult & { fileId: number }) | null> {
     const byIno = fileByIno.get(fileStat.ino);
     if (!byIno) return null;
+    if (byIno.bookId !== bookId && !matchesRecordedFileState(byIno, fileStat)) return null;
 
     const oldAbsolutePath = byIno.absolutePath;
     if (await this.pathExistsAsDistinctEntry(oldAbsolutePath, fileStat.absolutePath)) return null;
@@ -2615,6 +2618,7 @@ export class ScannerService implements OnApplicationBootstrap {
     ) {
       return null;
     }
+    if (globalByIno.file.bookId !== bookId && !matchesRecordedFileState(globalByIno.file, fileStat)) return null;
     if (await this.pathExistsAsDistinctEntry(globalByIno.file.absolutePath, fileStat.absolutePath)) return null;
 
     const oldAbsolutePath = globalByIno.file.absolutePath;
