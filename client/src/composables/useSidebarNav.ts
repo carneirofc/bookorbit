@@ -1,7 +1,7 @@
 import { computed, type Component } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, type RouteLocationNormalizedLoaded, type RouteLocationRaw } from 'vue-router'
-import { BookPlus, Highlighter, LayoutDashboard, Library, ListMusic, PackageOpen, Users, Wrench } from '@lucide/vue'
+import { BookPlus, Highlighter, LayoutDashboard, Library, ListMusic, PackageOpen, Tags, Users, Wrench } from '@lucide/vue'
 import { Permission, type BrowseCounts, type LibraryType, type SidebarSectionId } from '@bookorbit/types'
 import { usePermissions } from '@/features/auth/composables/usePermissions'
 import { useBookDockSummary } from '@/features/book-dock/composables/useBookDockSummary'
@@ -161,6 +161,15 @@ export const SIDEBAR_NAV_REGISTRY: readonly SidebarNavEntry[] = [
     to: { name: 'series' },
     isActive: (route) => route.name === 'series' || route.name === 'series-detail',
     badge: browseBadge('series'),
+  },
+  {
+    id: 'tag-browser',
+    labelKey: 'components.sidebar.tags',
+    icon: Tags,
+    zone: 'browse',
+    modes: ['books'],
+    to: { name: 'tag-browser' },
+    isActive: (route) => route.name === 'tag-browser',
   },
   {
     id: 'annotations',

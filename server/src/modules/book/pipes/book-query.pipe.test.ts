@@ -1,6 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
 
-import { BookQueryPipe, JumpBucketsQueryPipe } from './book-query.pipe';
+import { BookQueryPipe, JumpBucketsQueryPipe, TagFacetsQueryPipe } from './book-query.pipe';
 
 describe('BookQueryPipe', () => {
   let pipe: BookQueryPipe;
@@ -209,5 +209,48 @@ describe('JumpBucketsQueryPipe', () => {
   it('rejects bucket counts outside the supported range', () => {
     expect(() => pipe.transform({ maxBuckets: 7 })).toThrow(BadRequestException);
     expect(() => pipe.transform({ maxBuckets: 65 })).toThrow(BadRequestException);
+  });
+});
+
+describe('TagFacetsQueryPipe', () => {
+  const pipe = new TagFacetsQueryPipe();
+
+  it('applies defaults for an empty body', () => {
+    expect(pipe.transform(undefined)).toEqual({ excludeTags: [], sort: 'count', limit: 200 });
+  });
+
+  it('accepts a tag filter with exclusions, search and name sort', () => {
+    const result = pipe.transform({
+      filter: { type: 'group', join: 'AND', rules: [{ type: 'rule', field: 'tag', operator: 'includesAll', value: ['fantasy'] }] },
+      excludeTags: ['fantasy'],
+      tagSearch: 'mag',
+      sort: 'name',
+      limit: 50,
+    });
+    expect(result.filter).toBeDefined();
+    expect(result).toMatchObject({ excludeTags: ['fantasy'], tagSearch: 'mag', sort: 'name', limit: 50 });
+  });
+
+  it('accepts a bounded onlyTags list', () => {
+    expect(pipe.transform({ onlyTags: ['fantasy', 'magic'] }).onlyTags).toEqual(['fantasy', 'magic']);
+  });
+
+  it('rejects an empty or oversized onlyTags list', () => {
+    expect(() => pipe.transform({ onlyTags: [] })).toThrow(BadRequestException);
+    expect(() => pipe.transform({ onlyTags: Array.from({ length: 21 }, (_, i) => `tag-${i}`) })).toThrow(BadRequestException);
+  });
+
+  it('rejects a limit above the facet cap', () => {
+    expect(() => pipe.transform({ limit: 501 })).toThrow(BadRequestException);
+  });
+
+  it('rejects an unknown sort', () => {
+    expect(() => pipe.transform({ sort: 'random' })).toThrow(BadRequestException);
+  });
+
+  it('rejects unknown keys in the filter rules', () => {
+    expect(() =>
+      pipe.transform({ filter: { type: 'group', join: 'AND', rules: [{ type: 'rule', field: 'nope', operator: 'eq', value: 'x' }] } }),
+    ).toThrow(BadRequestException);
   });
 });

@@ -1,5 +1,5 @@
 import { BadRequestException, Inject, Injectable, Optional } from '@nestjs/common';
-import { SQL, and, asc, count, eq, inArray, isNotNull, isNull, lte, ne, or, sql } from 'drizzle-orm';
+import { SQL, and, asc, count, desc, eq, inArray, isNotNull, isNull, lte, ne, notInArray, or, sql } from 'drizzle-orm';
 import { SUPPORTED_BOOK_FORMATS } from '../upload/upload-validator.service';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 
@@ -10,6 +10,8 @@ import type {
   JumpBucketsResponse,
   SortField,
   SortSpec,
+  TagFacet,
+  TagFacetSort,
   TemporalJumpBucketPrecision,
   TemporalJumpBucketUnit,
 } from '@bookorbit/types';
@@ -17,7 +19,7 @@ import type { UnscopedBookRecommendation } from '@bookorbit/types';
 import { isAudioFormat, isComicFormat, normalizeCoverAspectRatio } from '@bookorbit/types';
 import { buildContentFilterClauses } from '../../common/utils/content-filter-sql.utils';
 import { rankFileRowsByBook } from '../../common/utils/primary-file-selection.utils';
-import { accentInsensitiveIlike } from '../../common/utils/accent-insensitive-search.utils';
+import { accentInsensitiveIlike, buildSearchPattern } from '../../common/utils/accent-insensitive-search.utils';
 import { advanceIsoTimestamp } from '../../common/utils/iso-timestamp.utils';
 import { parsePgTimestamptz } from '../../common/utils/pg-timestamp.utils';
 import { scanStateInvalidationPaths } from '../../common/utils/scan-state-paths.utils';
@@ -1914,6 +1916,50 @@ export class BookRepository {
       .leftJoin(bookMetadata, eq(bookMetadata.bookId, books.id))
       .where(this.visibleWhere(where));
     return Number(total);
+  }
+
+  /**
+   * Tag occurrence counts over the books matching `where`. The matching set stays a subquery so
+   * Postgres aggregates `book_tags` once instead of shipping book ids back and forth. One extra
+   * row past `limit` is read so the caller can tell the list was cut short.
+   */
+  async findTagFacets(opts: {
+    where: SQL | undefined;
+    userId: number;
+    excludeTags: string[];
+    onlyTags?: string[];
+    tagSearch?: string;
+    sort: TagFacetSort;
+    limit: number;
+  }): Promise<{ tags: TagFacet[]; truncated: boolean }> {
+    const matchedBookIds = this.db
+      .select({ id: books.id })
+      .from(books)
+      .innerJoin(libraries, eq(libraries.id, books.libraryId))
+      .leftJoin(bookMetadata, eq(bookMetadata.bookId, books.id))
+      .leftJoin(userBookRatings, and(eq(userBookRatings.bookId, books.id), eq(userBookRatings.userId, opts.userId)))
+      .where(this.visibleWhere(opts.where));
+
+    const predicates: SQL[] = [inArray(bookTags.bookId, matchedBookIds)];
+    if (opts.excludeTags.length > 0) predicates.push(notInArray(tags.name, opts.excludeTags));
+    if (opts.onlyTags?.length) predicates.push(inArray(tags.name, opts.onlyTags));
+    const search = opts.tagSearch?.trim();
+    if (search) predicates.push(accentInsensitiveIlike(tags.name, buildSearchPattern(search)));
+
+    const bookCount = sql<number>`count(*)::int`;
+    const orderBy = opts.sort === 'name' ? [asc(tags.name)] : [desc(bookCount), asc(tags.name)];
+
+    const rows = await this.db
+      .select({ id: tags.id, name: tags.name, count: bookCount })
+      .from(bookTags)
+      .innerJoin(tags, eq(tags.id, bookTags.tagId))
+      .where(and(...predicates))
+      .groupBy(tags.id, tags.name)
+      .orderBy(...orderBy)
+      .limit(opts.limit + 1);
+
+    const truncated = rows.length > opts.limit;
+    return { tags: (truncated ? rows.slice(0, opts.limit) : rows).map((row) => ({ ...row, count: Number(row.count) })), truncated };
   }
 
   async findLibraryIdsByBookIds(bookIds: number[]): Promise<{ id: number; libraryId: number }[]> {

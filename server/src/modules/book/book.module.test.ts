@@ -15,6 +15,8 @@ import { BookQueryBuilder } from './book-query-builder.service';
 import { BookReadService } from './book-read.service';
 import { BookSortBuilder } from './book-sort-builder.service';
 import { BookController } from './book.controller';
+import { BookTagFacetsController } from './book-tag-facets.controller';
+import { BookTagFacetsService } from './book-tag-facets.service';
 import { BookModule } from './book.module';
 import { BookRepository } from './book.repository';
 import { BookService } from './book.service';
@@ -27,7 +29,7 @@ import { AudiolessEpubService } from './audioless-epub.service';
 
 describe('BookModule', () => {
   it('registers expected controller/providers/exports', () => {
-    expect(Reflect.getMetadata('controllers', BookModule)).toEqual([BookController, ReadingAttemptController]);
+    expect(Reflect.getMetadata('controllers', BookModule)).toEqual([BookController, BookTagFacetsController, ReadingAttemptController]);
     expect(Reflect.getMetadata('providers', BookModule)).toEqual([
       BookService,
       BookExportService,
@@ -39,6 +41,7 @@ describe('BookModule', () => {
       BookAuthorSortKeyBackfillService,
       AudiobookEbookProgressSyncService,
       AudiolessEpubService,
+      BookTagFacetsService,
     ]);
     // AudiolessEpubService is exported so the Kobo download path can strip narration itself,
     // without routing through BookService and its RequestUser-based access checks.

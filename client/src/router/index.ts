@@ -688,6 +688,12 @@ export const routes: RouteRecordRaw[] = [
         },
       },
       {
+        path: '/tags',
+        name: 'tag-browser',
+        component: () => import('@/features/tag-browser/views/TagBrowserView.vue'),
+        meta: { title: () => t('titles.tagBrowser') },
+      },
+      {
         path: '/tools',
         component: () => import('@/features/tools/views/ToolsView.vue'),
         children: [

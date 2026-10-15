@@ -489,6 +489,67 @@ describe('BookRepository', () => {
     expect(chain.offset).toHaveBeenCalledWith(40);
   });
 
+  describe('findTagFacets', () => {
+    function makeFacetsDb(rows: Array<{ id: number; name: string; count: number | string }>) {
+      const matchedChain = makeSelectChain('where', []);
+      matchedChain.where.mockReturnValue(matchedChain);
+      const facetsChain = {
+        from: vi.fn(),
+        innerJoin: vi.fn(),
+        where: vi.fn(),
+        groupBy: vi.fn(),
+        orderBy: vi.fn(),
+        limit: vi.fn().mockResolvedValue(rows),
+      };
+      facetsChain.from.mockReturnValue(facetsChain);
+      facetsChain.innerJoin.mockReturnValue(facetsChain);
+      facetsChain.where.mockReturnValue(facetsChain);
+      facetsChain.groupBy.mockReturnValue(facetsChain);
+      facetsChain.orderBy.mockReturnValue(facetsChain);
+      const db = { select: vi.fn().mockReturnValueOnce(matchedChain).mockReturnValueOnce(facetsChain) };
+      return { db, matchedChain, facetsChain };
+    }
+
+    it('reads one row past the limit and reports truncation', async () => {
+      const { db, facetsChain } = makeFacetsDb([
+        { id: 1, name: 'fantasy', count: '12' },
+        { id: 2, name: 'magic', count: 7 },
+        { id: 3, name: 'dragons', count: 3 },
+      ]);
+      const repo = new BookRepository(db as never);
+
+      const result = await repo.findTagFacets({ where: undefined, userId: 7, excludeTags: [], sort: 'count', limit: 2 });
+
+      expect(facetsChain.limit).toHaveBeenCalledWith(3);
+      expect(result).toEqual({
+        tags: [
+          { id: 1, name: 'fantasy', count: 12 },
+          { id: 2, name: 'magic', count: 7 },
+        ],
+        truncated: true,
+      });
+    });
+
+    it('returns every row when the limit is not exceeded', async () => {
+      const { db, facetsChain } = makeFacetsDb([{ id: 4, name: 'sci-fi', count: 2 }]);
+      const repo = new BookRepository(db as never);
+
+      const result = await repo.findTagFacets({
+        where: undefined,
+        userId: 7,
+        excludeTags: ['fantasy'],
+        onlyTags: ['sci-fi', 'space'],
+        tagSearch: 'sci',
+        sort: 'name',
+        limit: 10,
+      });
+
+      expect(result).toEqual({ tags: [{ id: 4, name: 'sci-fi', count: 2 }], truncated: false });
+      expect(facetsChain.groupBy).toHaveBeenCalledOnce();
+      expect(facetsChain.orderBy.mock.calls[0]).toHaveLength(1);
+    });
+  });
+
   it('findById returns null when no matching book exists', async () => {
     const db = {
       select: vi.fn().mockReturnValue(makeSelectChain('limit', [])),
