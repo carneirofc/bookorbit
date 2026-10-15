@@ -30,6 +30,7 @@ export * from "./metadata-fetch";
 export * from "./pattern-resolver";
 export * from "./query";
 export * from "./jump-buckets";
+export * from "./tag-browser";
 export * from "./reader-settings";
 export * from "./scanner";
 export * from "./search";

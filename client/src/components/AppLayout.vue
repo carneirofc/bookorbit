@@ -32,6 +32,7 @@ const GRID_VIEW_NAMES = [
   'SeriesView',
   'SeriesDetailView',
   'AuthorDetailView',
+  'TagBrowserView',
   'LibrariesView',
   'PodcastLibrariesView',
   'PodcastCollectionView',

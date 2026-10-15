@@ -71,7 +71,7 @@ describe('sidebar nav registry', () => {
   })
 
   it('shows only ungated destinations to a user with no permissions', () => {
-    expect(allowedIds(makeContext())).toEqual(['dashboard', 'authors', 'series', 'annotations'])
+    expect(allowedIds(makeContext())).toEqual(['dashboard', 'authors', 'series', 'tag-browser', 'annotations'])
   })
 
   it('places Dashboard, Book Dock, Requests, Tools and the podcast Queue in the primary zone, above the entity sections', () => {
@@ -226,6 +226,6 @@ describe('sidebar nav registry', () => {
     const booksModeIds = SIDEBAR_NAV_REGISTRY.filter((candidate) => entryVisibleInMode(candidate, 'books')).map((candidate) => candidate.id)
 
     expect(podcastModeIds).toEqual(['dashboard', 'podcast-queue'])
-    expect(booksModeIds).toEqual(['dashboard', 'book-dock', 'book-requests', 'tools', 'authors', 'series', 'annotations'])
+    expect(booksModeIds).toEqual(['dashboard', 'book-dock', 'book-requests', 'tools', 'authors', 'series', 'tag-browser', 'annotations'])
   })
 })

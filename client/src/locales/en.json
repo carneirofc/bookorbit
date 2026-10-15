@@ -7935,7 +7935,8 @@
       "noPlaylists": "No smart playlists yet",
       "filterPlaylists": "Filter smart playlists",
       "filterPlaylistsPlaceholder": "Filter smart playlists...",
-      "seeAllPlaylists": "See all smart playlists ({count})"
+      "seeAllPlaylists": "See all smart playlists ({count})",
+      "tags": "Tags"
     },
     "selectionActionBar": {
       "setReadingStatus": "Set reading status",
@@ -12108,6 +12109,7 @@
     "statistics": "Statistics",
     "authors": "Authors",
     "series": "Series",
+    "tagBrowser": "Tag Browser",
     "entityManager": "Entity Manager",
     "bulkRename": "Bulk Rename",
     "duplicateBooks": "Duplicate Books",
@@ -12271,6 +12273,108 @@
     },
     "errors": {
       "generic": "TTS error"
+    }
+  },
+  "tagBrowser": {
+    "title": "Tag Browser",
+    "searchPlaceholder": "Search books...",
+    "reset": "Reset",
+    "libraries": {
+      "label": "Libraries",
+      "selected": "{selected} of {total}",
+      "selectAll": "Select all",
+      "none": "No book libraries yet.",
+      "noneSelected": "Select at least one library to browse its tags."
+    },
+    "filters": {
+      "toggle": "Filters",
+      "title": "Additional filters",
+      "hint": "These filters narrow the books before tags are counted.",
+      "sortTitle": "Sort results"
+    },
+    "tagOrder": {
+      "label": "Tag order",
+      "count": "Most books",
+      "name": "A-Z"
+    },
+    "panels": {
+      "show": "Show tag panels",
+      "hide": "Hide tag panels"
+    },
+    "panel": {
+      "title": "Tags {index}",
+      "books": "{count, plural, one {# book} other {# books}}",
+      "searchPlaceholder": "Find a tag...",
+      "clearSearch": "Clear tag search",
+      "removeTag": "Remove {name}",
+      "matchLabel": "Match books with",
+      "matchAny": "Any",
+      "matchAll": "All",
+      "clear": "Clear",
+      "empty": "No more tags for these books.",
+      "noMatches": "No tags match your search.",
+      "error": "Could not load tags.",
+      "truncated": "Showing the top {count} tags. Search to find others.",
+      "selectionLimit": "Up to {count} tags per panel.",
+      "matchAnyHint": "Books with at least one of these tags",
+      "matchAllHint": "Books with every one of these tags"
+    },
+    "results": {
+      "empty": "No books match these tags and filters.",
+      "error": "Could not load books."
+    },
+    "row": {
+      "related": "Related tags for {name}",
+      "include": "Include {name}",
+      "exclude": "Exclude {name}"
+    },
+    "group": {
+      "toggle": "Group by prefix",
+      "toggleHint": "Group tags that share a prefix, such as \"genre: fantasy\" or \"Fiction/Epic\"",
+      "tags": "{count, plural, one {# tag} other {# tags}}",
+      "includeAll": "Match any tag in {prefix}",
+      "excludeAll": "Exclude every tag in {prefix}",
+      "other": "Other tags"
+    },
+    "selection": {
+      "books": "Books",
+      "anyTags": "with any tags",
+      "and": "and",
+      "or": "or",
+      "matching": "{count, plural, one {# match} other {# matches}}",
+      "without": "Without",
+      "removeExcluded": "Stop excluding {name}",
+      "clearExcluded": "Clear exclusions"
+    },
+    "insight": {
+      "summary": "{count, plural, one {# book} other {# books}} · {share} of browsed books",
+      "include": "Include",
+      "included": "Included",
+      "exclude": "Exclude",
+      "excluded": "Excluded",
+      "relatedTitle": "Related tags",
+      "sortLabel": "Sort related tags",
+      "sort": {
+        "together": "Most shared",
+        "affinity": "Strongest link"
+      },
+      "togetherHint": "Tags that appear most often on the same books.",
+      "affinityHint": "Tags found together more often than chance would suggest. ×2 means twice as likely as average.",
+      "affinityTitle": "Affinity: how much more often this pair occurs than chance would suggest",
+      "together": "{count, plural, one {# book together} other {# books together}}",
+      "shareOfTag": "{share} of {tag} books",
+      "shareOfRelated": "{share} of {tag} books",
+      "noRelated": "No other tags appear on these books.",
+      "error": "Could not load related tags.",
+      "scopeNote": "Counted across the selected libraries, filters and exclusions. Panel selections are not applied here."
+    },
+    "overlap": {
+      "title": "Tag overlap",
+      "hint": "Books sharing each pair of picked tags. Darker cells are more closely linked.",
+      "hidden": "Showing the first {max}, {count} more hidden.",
+      "error": "Could not load the overlap.",
+      "diagonalTitle": "{count, plural, one {# book} other {# books}} tagged {tag}",
+      "cellTitle": "{count, plural, one {# book has} other {# books have}} both {a} and {b} ({shareA} of {a}, {shareB} of {b})"
     }
   }
 }
