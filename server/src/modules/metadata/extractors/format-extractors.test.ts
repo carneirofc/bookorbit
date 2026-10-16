@@ -427,6 +427,7 @@ describe('metadata format extractors', () => {
         publishedYear: 2014,
         authors: [],
         genres: [],
+        tags: [],
         comicvineId: null,
       }),
     );
@@ -454,6 +455,7 @@ describe('metadata format extractors', () => {
       expect.objectContaining({
         title: 'Batman',
         genres: ['Comics'],
+        tags: ['Superhero'],
         ranobedbId: 'comic-ranobe',
         comicvineId: '140529',
         comicMetadata: { issueNumber: '55', volumeName: 'Batman' },

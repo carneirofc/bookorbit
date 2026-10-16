@@ -4721,7 +4721,7 @@ describe('BookService', () => {
         ranobedbId: 'ranobe-file',
         authors: [{ name: 'Frank Herbert', sortName: null }],
         genres: ['Sci-Fi'],
-        tags: [],
+        tags: ['Favorites'],
       } as never);
 
       await expect(service.getMetadataFromFile(5, makeUser())).resolves.toEqual(
@@ -4733,7 +4733,32 @@ describe('BookService', () => {
           ranobedbId: 'ranobe-file',
           authors: ['Frank Herbert'],
           genres: ['Sci-Fi'],
+          tags: ['Favorites'],
         }),
+      );
+    });
+
+    it('omits tags when the file carries none', async () => {
+      const { service, bookRepo } = makeService();
+      vi.spyOn(service, 'verifyBookAccess').mockResolvedValue(undefined);
+      bookRepo.findPrimaryFile.mockResolvedValue({ absolutePath: '/books/plain.epub', format: 'epub' });
+      mockExtractEpubMetadata.mockResolvedValue({ title: 'Plain', authors: [], genres: ['Sci-Fi'], tags: [] } as never);
+
+      const result = await service.getMetadataFromFile(5, makeUser());
+
+      expect(result.genres).toEqual(['Sci-Fi']);
+      expect(result.tags).toBeUndefined();
+    });
+
+    it('returns ComicInfo Tags as tags alongside Genre for comic archives', async () => {
+      const { service, bookRepo } = makeService();
+      vi.spyOn(service, 'verifyBookAccess').mockResolvedValue(undefined);
+      bookRepo.findPrimaryFile.mockResolvedValue({ absolutePath: '/books/spread.cbz', format: 'cbz' });
+      const comicTags = ['Full Color', 'University', 'Hentai', 'Uncensored', 'Spread', 'color', 'schoolgirl outfit', 'unlimited'];
+      mockExtractCbzMetadata.mockResolvedValue({ title: 'Spread Issue', authors: [], genres: ['Spread'], tags: comicTags } as never);
+
+      await expect(service.getMetadataFromFile(5, makeUser())).resolves.toEqual(
+        expect.objectContaining({ title: 'Spread Issue', genres: ['Spread'], tags: comicTags }),
       );
     });
 
@@ -4836,6 +4861,7 @@ describe('BookService', () => {
             ranobedbId: 'pdf-ranobe',
             authors: [{ name: 'Author One', sortName: null }],
             genres: ['Tech'],
+            tags: ['Reference'],
           } as never;
         },
       );
@@ -4848,6 +4874,7 @@ describe('BookService', () => {
           ranobedbId: 'pdf-ranobe',
           authors: ['Author One'],
           genres: ['Tech'],
+          tags: ['Reference'],
         }),
       );
       expect(warnSpy).toHaveBeenCalled();
@@ -4897,6 +4924,7 @@ describe('BookService', () => {
         seriesIndex: 2,
         authors: ['Author'],
         genres: ['Drama'],
+        tags: ['Classic'],
       } as never);
 
       await expect(service.getMetadataFromFile(5, makeUser())).resolves.toEqual(
@@ -4910,6 +4938,8 @@ describe('BookService', () => {
         expect.objectContaining({
           title: 'Comic Title',
           ranobedbId: 'comic-ranobe',
+          genres: ['Comics'],
+          tags: ['Comics'],
           comicMetadata: { issueNumber: '4' },
         }),
       );
@@ -4917,6 +4947,7 @@ describe('BookService', () => {
         expect.objectContaining({
           title: 'FB2 Title',
           genres: ['Drama'],
+          tags: ['Classic'],
         }),
       );
     });

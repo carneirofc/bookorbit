@@ -3558,6 +3558,7 @@ export class BookService {
           customMetadata: customMetadata.length > 0 ? customMetadata : undefined,
           authors: parsed.authors.length > 0 ? parsed.authors.map((a) => a.name) : undefined,
           genres: parsed.genres.length > 0 ? parsed.genres : undefined,
+          tags: parsed.tags.length > 0 ? parsed.tags : undefined,
         };
       }
       case 'pdf': {
@@ -3592,6 +3593,7 @@ export class BookService {
           aladinId: parsed.aladinId,
           authors: parsed.authors.length > 0 ? parsed.authors.map((a) => a.name) : undefined,
           genres: parsed.genres.length > 0 ? parsed.genres : undefined,
+          tags: parsed.tags.length > 0 ? parsed.tags : undefined,
         };
       }
       case 'mobi':
@@ -3646,6 +3648,7 @@ export class BookService {
           aladinId: parsed.aladinId,
           authors: parsed.authors.length > 0 ? parsed.authors.map((a) => a.name) : undefined,
           genres: cbzGenres.length > 0 ? cbzGenres : undefined,
+          tags: parsed.tags.length > 0 ? parsed.tags : undefined,
           comicMetadata: parsed.comicMetadata ?? undefined,
         };
       }
@@ -3662,6 +3665,7 @@ export class BookService {
           seriesIndex: parsed.seriesIndex,
           authors: parsed.authors.length > 0 ? parsed.authors.map((a) => a.name) : undefined,
           genres: parsed.genres.length > 0 ? parsed.genres : undefined,
+          tags: parsed.tags.length > 0 ? parsed.tags : undefined,
         };
       }
       default: {
