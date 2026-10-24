@@ -4,7 +4,12 @@ import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { ChevronDown, ChevronUp, FolderOpen, FolderTree, RotateCcw, SlidersHorizontal } from '@lucide/vue'
 import type { BookCard, GroupRule, SortSpec, TagFacetSort } from '@bookorbit/types'
-import ViewHeader from '@/components/ViewHeader.vue'
+import BrowseHeader from '@/components/browse-header/BrowseHeader.vue'
+import BrowseSearchField from '@/components/browse-header/BrowseSearchField.vue'
+import BrowseViewControls from '@/components/browse-header/BrowseViewControls.vue'
+import { barDivider } from '@/components/browse-header/browse-header'
+import ViewHeaderDisplayControls from '@/components/view-header/ViewHeaderDisplayControls.vue'
+import { formatNumber } from '@/i18n/formatters'
 import VirtualBookGrid from '@/features/book/components/VirtualBookGrid.vue'
 import BookFilterBuilder from '@/features/book/components/BookFilterBuilder.vue'
 import BookSortBuilder from '@/features/book/components/BookSortBuilder.vue'
@@ -92,6 +97,7 @@ function loadMore() {
 }
 
 useBookViewContext(slots, total, loadMore)
+const foldedCount = computed(() => formatNumber(total.value))
 
 const {
   pendingId: deleteBookId,
@@ -122,6 +128,18 @@ onMounted(() => {
 
 function handleSearchQuery(value: string) {
   q.value = value
+}
+
+function handleClearSearch() {
+  q.value = ''
+}
+
+function handleCoverSizeUpdate(value: number) {
+  coverSize.value = value
+}
+
+function handleGridGapUpdate(value: number) {
+  gridGap.value = value
 }
 
 function handleToggleLibrary(id: number) {
@@ -236,22 +254,40 @@ function handleCollectionDone() {
 
 <template>
   <section class="flex h-full flex-col">
-    <ViewHeader
+    <BrowseHeader
+      :eyebrow="t('components.browseHeader.eyebrow.browse')"
       :title="t('tagBrowser.title')"
       icon="Tags"
       fallback-icon="Tags"
-      :total="total"
-      view-mode="grid"
-      :show-selection="false"
-      :show-view-mode-toggle="false"
-      :allowed-view-modes="['grid']"
-      searchable
-      :search-query="q"
-      :search-placeholder="t('tagBrowser.searchPlaceholder')"
-      v-model:coverSize="coverSize"
-      v-model:gridGap="gridGap"
-      @update:search-query="handleSearchQuery"
-    />
+      :folded-count="foldedCount"
+      :scroll-container="scrollRef"
+    >
+      <template #facts>
+        <span class="truncate">{{ t('components.browseHeader.facts.books', { count: total }) }}</span>
+      </template>
+
+      <template #bar>
+        <BrowseSearchField
+          :model-value="q"
+          :placeholder="t('tagBrowser.searchPlaceholder')"
+          :active="q.length > 0"
+          @update:model-value="handleSearchQuery"
+          @clear="handleClearSearch"
+        />
+        <span :class="barDivider" aria-hidden="true" />
+        <BrowseViewControls view-mode="grid" :allowed-view-modes="['grid']" :show-selection="false">
+          <template #display>
+            <ViewHeaderDisplayControls
+              view-mode="grid"
+              :cover-size="coverSize"
+              :grid-gap="gridGap"
+              @update:cover-size="handleCoverSizeUpdate"
+              @update:grid-gap="handleGridGapUpdate"
+            />
+          </template>
+        </BrowseViewControls>
+      </template>
+    </BrowseHeader>
 
     <div ref="scrollRef" class="min-h-0 flex-1 overflow-y-auto">
       <div class="flex flex-col gap-4 px-4 py-4 sm:px-6">

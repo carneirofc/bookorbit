@@ -50,13 +50,13 @@ describe('ComicFormatExtractor with a real CBZ file', () => {
     expect(result?.tags).toEqual(['Full Color', 'University', 'Hentai', 'Uncensored', 'Spread', 'color', 'schoolgirl outfit', 'unlimited']);
   });
 
-  it('falls back to Tags for genres when Genre is empty, and still reports the tags', async () => {
+  it('reports Tags as tags only when Genre is empty', async () => {
     const cbzPath = join(rootPath, 'tags-only.cbz');
     await writeCbz(cbzPath, `<ComicInfo><Title>Tags Only</Title><Tags>Action, Drama</Tags></ComicInfo>`);
 
     const result = await new ComicFormatExtractor('cbz').extract(cbzPath);
 
-    expect(result?.genres).toEqual(['Action', 'Drama']);
+    expect(result?.genres).toEqual([]);
     expect(result?.tags).toEqual(['Action', 'Drama']);
   });
 });

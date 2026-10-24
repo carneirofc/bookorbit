@@ -1,6 +1,7 @@
 import type { UploadSessionResponse, UploadTarget } from '@bookorbit/types'
 
 import { api, getValidToken } from '@/lib/api'
+import { createUuid } from '@/lib/uuid'
 
 const SESSIONS_URL = '/api/v1/uploads'
 const MAX_CHUNK_ATTEMPTS = 5
@@ -16,6 +17,10 @@ export class UploadSessionError extends Error {
     message: string,
     readonly status: number,
     readonly errorCode?: string,
+    /** The server's own reason, or null when the response carried none worth showing. */
+    readonly serverMessage: string | null = null,
+    /** False when the error page came from something in front of BookOrbit, such as a reverse proxy. */
+    readonly fromBookOrbit = false,
   ) {
     super(message)
     this.name = 'UploadSessionError'
@@ -33,6 +38,8 @@ interface ErrorBody {
   message?: string | string[]
   errorCode?: string
   expectedOffset?: number
+  statusCode?: unknown
+  requestId?: unknown
 }
 
 function parseErrorBody(text: string): ErrorBody {
@@ -45,7 +52,26 @@ function parseErrorBody(text: string): ErrorBody {
 
 function toError(status: number, body: ErrorBody): UploadSessionError {
   const message = Array.isArray(body.message) ? body.message.join(', ') : body.message
-  return new UploadSessionError(message ?? (status === 0 ? 'Network error' : `Upload failed (${status})`), status, body.errorCode)
+  const first = Array.isArray(body.message) ? body.message[0] : body.message
+  const serverMessage = typeof first === 'string' && first.trim() ? first.trim() : null
+  const fromBookOrbit = typeof body.statusCode === 'number' && typeof body.requestId === 'string'
+  return new UploadSessionError(
+    message ?? (status === 0 ? 'Network error' : `Upload failed (${status})`),
+    status,
+    typeof body.errorCode === 'string' ? body.errorCode : undefined,
+    serverMessage,
+    fromBookOrbit,
+  )
+}
+
+function sessionError(session: UploadSessionResponse): UploadSessionError {
+  return new UploadSessionError(
+    session.errorMessage ?? `Upload ${session.status}`,
+    200,
+    session.errorCode ?? undefined,
+    session.errorMessage ?? null,
+    true,
+  )
 }
 
 function isTransient(status: number): boolean {
@@ -60,12 +86,6 @@ function isRetryableError(err: unknown): boolean {
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-function newIdempotencyKey(): string {
-  // randomUUID is secure-context only, and a self-hosted install is often reached over plain HTTP.
-  if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID()
-  return `${Date.now()}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`
 }
 
 async function requestJson(input: string, init?: RequestInit): Promise<UploadSessionResponse> {
@@ -131,7 +151,7 @@ async function waitForImport(sessionId: string): Promise<UploadSessionResponse> 
     }
     if (session.status === 'completed') return session
     if (session.status !== 'processing') {
-      throw new UploadSessionError(session.errorMessage ?? `Upload ${session.status}`, 200, session.errorCode ?? undefined)
+      throw sessionError(session)
     }
     delay = Math.min(delay * 1.5, POLL_MAX_DELAY_MS)
   }
@@ -152,7 +172,7 @@ export async function uploadViaSession({ file, target, onProgress }: SessionUplo
     body: JSON.stringify({
       filename: file.name,
       sizeBytes: file.size,
-      idempotencyKey: newIdempotencyKey(),
+      idempotencyKey: createUuid(),
       target,
       ...(file.type ? { contentType: file.type } : {}),
     }),
@@ -199,7 +219,7 @@ export async function uploadViaSession({ file, target, onProgress }: SessionUplo
   session = await completeSession(session.id)
   if (session.status === 'processing') session = await waitForImport(session.id)
   if (session.status !== 'completed') {
-    throw new UploadSessionError(session.errorMessage ?? `Upload ${session.status}`, 200, session.errorCode ?? undefined)
+    throw sessionError(session)
   }
 
   onProgress?.(100)

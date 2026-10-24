@@ -157,6 +157,33 @@ describe('uploadViaSession', () => {
     expect(chunkCalls).toHaveLength(1)
   })
 
+  it('keeps the first server message and marks a BookOrbit error envelope as its own', async () => {
+    serveApi()
+    respondToChunk = () => ({
+      status: 400,
+      body: { statusCode: 400, requestId: 'req-1', message: ['  file must be provided  ', 'second'], errorCode: 'UPLOAD_CONTENT_INVALID' },
+    })
+
+    await expect(uploadViaSession({ file, target: { kind: 'book_dock' } })).rejects.toMatchObject({
+      status: 400,
+      errorCode: 'UPLOAD_CONTENT_INVALID',
+      serverMessage: 'file must be provided',
+      fromBookOrbit: true,
+    })
+  })
+
+  it('marks an error page from in front of BookOrbit as not its own', async () => {
+    serveApi()
+    respondToChunk = () => ({ status: 413, body: '<html><body><h1>413 Request Entity Too Large</h1></body></html>' })
+
+    await expect(uploadViaSession({ file, target: { kind: 'book_dock' } })).rejects.toMatchObject({
+      status: 413,
+      errorCode: undefined,
+      serverMessage: null,
+      fromBookOrbit: false,
+    })
+  })
+
   it('surfaces the reason an import failed after every byte arrived', async () => {
     serveApi({ polls: [session({ status: 'failed', errorCode: 'UPLOAD_CHECKSUM_MISMATCH', errorMessage: 'File checksum does not match' })] })
 
