@@ -22,6 +22,9 @@ overrides:
   piscina: ^4.9.3
   qs: ^6.15.2
   typescript-eslint: ^8.71.1
+  "undici@>=6.0.0 <6.29.1": ^6.29.1
+  "undici@>=7.0.0 <7.30.1": ^7.30.1
+  "undici@>=8.0.0 <8.12.2": ^8.12.2
   ws: ^8.21.3
 packageExtensions:
   "@embedpdf/utils@2.15.1":
