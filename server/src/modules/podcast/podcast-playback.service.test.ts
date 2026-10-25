@@ -182,7 +182,7 @@ describe('PodcastPlaybackService', () => {
 
     await playbackService.updateEpisodeState(11, requestUser(), { positionSeconds: 95, progressPercent: 95 });
 
-    expect(libraries.verifyUserAccessLevel).toHaveBeenCalledWith(5, 7, false, 'viewer');
+    expect(libraries.verifyUserAccessLevel).toHaveBeenCalledWith(expect.objectContaining({ id: 5, isSuperuser: false }), 7, 'viewer');
     expect(repo.upsertEpisodeState).toHaveBeenCalledWith(
       5,
       11,
@@ -439,7 +439,7 @@ describe('PodcastPlaybackService', () => {
     });
 
     expect(repo.addPodcastEpisodesToQueue).toHaveBeenCalledWith(5, 3);
-    expect(libraries.verifyUserAccessLevel).toHaveBeenCalledWith(5, 7, false, 'viewer');
+    expect(libraries.verifyUserAccessLevel).toHaveBeenCalledWith(expect.objectContaining({ id: 5, isSuperuser: false }), 7, 'viewer');
   });
 
   it('queues the episodes a playlist matches, bounded by the requested limit', async () => {
@@ -503,7 +503,7 @@ describe('PodcastPlaybackService', () => {
     await playbackService.updateBookmark(9, requestUser(), { title: ' Key point ', note: '  ' });
 
     expect(repo.updateBookmark).toHaveBeenCalledWith(5, 9, { title: 'Key point', note: null });
-    expect(libraries.verifyUserAccessLevel).toHaveBeenCalledWith(5, 7, false, 'viewer');
+    expect(libraries.verifyUserAccessLevel).toHaveBeenCalledWith(expect.objectContaining({ id: 5, isSuperuser: false }), 7, 'viewer');
   });
 
   it('revalidates library access before changing an existing bookmark', async () => {
@@ -571,7 +571,7 @@ describe('PodcastPlaybackService', () => {
       requestUser(),
     );
 
-    expect(libraries.verifyUserAccessLevel).toHaveBeenCalledWith(5, 7, false, 'editor');
+    expect(libraries.verifyUserAccessLevel).toHaveBeenCalledWith(expect.objectContaining({ id: 5, isSuperuser: false }), 7, 'editor');
     expect(repo.updateEpisodeMetadata).toHaveBeenCalledWith(
       11,
       {

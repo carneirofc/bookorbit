@@ -49,8 +49,8 @@ describe('EmailBookAccessService', () => {
 
     expect(bookReadService.findLibraryIdsByBookIds).toHaveBeenCalledWith([1, 2]);
     expect(libraryService.verifyUserAccess).toHaveBeenCalledTimes(2);
-    expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(user.id, 10, user.isSuperuser);
-    expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(user.id, 11, user.isSuperuser);
+    expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(expect.objectContaining({ id: user.id, isSuperuser: user.isSuperuser }), 10);
+    expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(expect.objectContaining({ id: user.id, isSuperuser: user.isSuperuser }), 11);
   });
 
   it('throws NotFoundException when any requested book is missing', async () => {

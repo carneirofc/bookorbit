@@ -316,7 +316,7 @@ export class UploadSessionService implements OnApplicationBootstrap {
     if (target.kind === 'library') {
       const library = await this.repo.findLibrary(target.libraryId);
       if (!library) throw uploadError.invalidTarget('Library not found');
-      await this.libraryService.verifyUserAccess(user.id, library.id, user.isSuperuser);
+      await this.libraryService.verifyUserAccess(user, library.id);
       if (library.type !== 'books') throw uploadError.invalidTarget('Files can only be uploaded to a book library');
       if (target.folderId) {
         if (!(await this.repo.folderBelongsToLibrary(target.folderId, target.libraryId))) {
@@ -328,7 +328,7 @@ export class UploadSessionService implements OnApplicationBootstrap {
     }
     const book = await this.repo.findBookTarget(target.bookId);
     if (!book) throw uploadError.invalidTarget('Book not found');
-    await this.libraryService.verifyUserAccess(user.id, book.libraryId, user.isSuperuser);
+    await this.libraryService.verifyUserAccess(user, book.libraryId);
     if (book.libraryType !== 'books') throw uploadError.invalidTarget('Files can only be uploaded to a book library');
     if (book.organizationMode === 'book_per_file') throw uploadError.invalidTarget('This library does not allow multiple files per book');
     await this.assertBookFolderIsADirectory(book.folderPath);

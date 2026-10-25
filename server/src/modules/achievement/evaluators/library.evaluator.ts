@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 
+import { LibraryAccessService } from '../../library/library-access.service';
 import { AchievementRepository } from '../achievement.repository';
 import {
   ACHIEVEMENT_EVENT_ANNOTATION_CREATED,
@@ -33,7 +34,10 @@ const BOX_OF_CRAYONS_COLORS = 5;
 
 @Injectable()
 export class LibraryEvaluator implements IAchievementEvaluator {
-  constructor(private readonly repo: AchievementRepository) {}
+  constructor(
+    private readonly repo: AchievementRepository,
+    private readonly libraryAccess: LibraryAccessService,
+  ) {}
 
   supports(eventName: string): boolean {
     return (
@@ -97,7 +101,7 @@ export class LibraryEvaluator implements IAchievementEvaluator {
     const unearnedTiers = LIBRARY_BUILDER_TIERS.filter((t) => !earnedKeys.has(t.key));
     if (unearnedTiers.length === 0) return;
 
-    const count = await this.repo.countAccessibleBooks(userId, isSuperuser);
+    const count = await this.repo.countAccessibleBooks(await this.libraryAccess.findAccessibleLibraryIds({ id: userId, isSuperuser }));
 
     for (const tier of unearnedTiers) {
       if (count >= tier.threshold) {
@@ -121,7 +125,7 @@ export class LibraryEvaluator implements IAchievementEvaluator {
 
   private async evaluateMultiFormat(userId: number, isSuperuser: boolean, earnedKeys: Set<string>, awards: AchievementAward[]): Promise<void> {
     if (earnedKeys.has('multi_format')) return;
-    const formatCount = await this.repo.countDistinctFormats(userId, isSuperuser);
+    const formatCount = await this.repo.countDistinctFormats(await this.libraryAccess.findAccessibleLibraryIds({ id: userId, isSuperuser }));
     if (formatCount >= 3) {
       awards.push({ key: 'multi_format', context: { formatCount } });
     }

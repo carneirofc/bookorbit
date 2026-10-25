@@ -166,8 +166,8 @@ describe('PodcastEventsService', () => {
     service.publishRefreshComplete({ libraryId: 7, podcastId: 2, newEpisodes: 1, consecutiveFailures: 0, lastError: null });
     await flush();
 
-    expect(libraries.verifyUserAccess).toHaveBeenNthCalledWith(1, 42, 9, false);
-    expect(libraries.verifyUserAccess).toHaveBeenNthCalledWith(2, 42, 7, false);
+    expect(libraries.verifyUserAccess).toHaveBeenNthCalledWith(1, expect.objectContaining({ id: 42, isSuperuser: false }), 9);
+    expect(libraries.verifyUserAccess).toHaveBeenNthCalledWith(2, expect.objectContaining({ id: 42, isSuperuser: false }), 7);
     expect(received.slice(1).map((event) => (event.data as { podcastId: number }).podcastId)).toEqual([2]);
   });
 

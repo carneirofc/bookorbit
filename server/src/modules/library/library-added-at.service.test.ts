@@ -1,6 +1,7 @@
 import { Test, type TestingModule } from '@nestjs/testing';
 import { BadRequestException, ConflictException, ForbiddenException, ServiceUnavailableException } from '@nestjs/common';
 import { LibraryAddedAtService } from './library-added-at.service';
+import { LibraryAccessService } from './library-access.service';
 import { LibraryRepository } from './library.repository';
 import { PathPolicyService } from '../path/path-policy.service';
 import type { RequestUser } from '../../common/types/request-user';
@@ -41,7 +42,12 @@ describe('LibraryAddedAtService', () => {
     vi.mocked(realpath).mockImplementation((path) => Promise.resolve(String(path)));
     vi.mocked(stat).mockResolvedValue({ birthtime: oldTime, mtime: newTime, isFile: () => true } as Awaited<ReturnType<typeof stat>>);
     module = await Test.createTestingModule({
-      providers: [LibraryAddedAtService, { provide: LibraryRepository, useValue: repo }, { provide: PathPolicyService, useValue: pathPolicy }],
+      providers: [
+        LibraryAddedAtService,
+        { provide: LibraryRepository, useValue: repo },
+        { provide: PathPolicyService, useValue: pathPolicy },
+        { provide: LibraryAccessService, useValue: new LibraryAccessService(repo as any) },
+      ],
     }).compile();
     service = module.get(LibraryAddedAtService);
   });

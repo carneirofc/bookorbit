@@ -287,7 +287,7 @@ export class BookDockController {
   previewFinalize(@CurrentUser() user: RequestUser, @Body() dto: FinalizeBookDockDto) {
     return this.finalizeService.previewFinalize(
       user.id,
-      user.isSuperuser,
+      user,
       this.canManageAll(user),
       dto.fileIds,
       dto.selectAll,
@@ -308,7 +308,7 @@ export class BookDockController {
   discardFinalizeDuplicates(@CurrentUser() user: RequestUser, @Body() dto: FinalizeBookDockDto) {
     return this.finalizeService.discardDuplicateCandidates(
       user.id,
-      user.isSuperuser,
+      user,
       this.canManageAll(user),
       dto.fileIds,
       dto.selectAll,
@@ -336,10 +336,9 @@ export class BookDockController {
     },
   })
   finalize(@CurrentUser() user: RequestUser, @Body() dto: FinalizeBookDockDto) {
-    const isSuperuser = user.isSuperuser;
     return this.finalizeService.finalize(
       user.id,
-      isSuperuser,
+      user,
       this.canManageAll(user),
       dto.fileIds,
       dto.selectAll,

@@ -5,6 +5,8 @@ import { tmpdir } from 'os';
 import { EMPTY_CONTENT_FILTER_RULES, Permission, type AccessLevel } from '@bookorbit/types';
 import type { RequestUser } from '../../common/types/request-user';
 import { LibraryRepository } from '../library/library.repository';
+import { LibraryAccessRepository } from '../library/library-access.repository';
+import { LibraryAccessService } from '../library/library-access.service';
 import { LibraryService } from '../library/library.service';
 import { MetadataService } from '../metadata/metadata.service';
 import { MetadataFetchPipeline } from '../metadata-fetch/metadata-fetch-pipeline';
@@ -113,6 +115,7 @@ async function createContext(role: AccessLevel | null = 'viewer') {
     [UserBookStatusService, { autoUpdate: vi.fn(), findOne: vi.fn() }],
     [ConfigService, { get: vi.fn().mockReturnValue(tmpdir()) }],
     [LibraryRepository, libraryRepo],
+    [LibraryAccessRepository, libraryRepo],
     [BookRepository, bookRepo],
     [BookReadService, bookRepo],
     [MetadataService, metadata],
@@ -122,7 +125,7 @@ async function createContext(role: AccessLevel | null = 'viewer') {
     [FileWriteService, fileWrite],
     [FileRenameService, fileRename],
   ]);
-  const module = await Test.createTestingModule({ providers: [BookService, LibraryService, CoverService] })
+  const module = await Test.createTestingModule({ providers: [BookService, LibraryService, LibraryAccessService, CoverService] })
     .useMocker((token) => mocks.get(token) ?? {})
     .compile();
   const service = module.get(BookService);

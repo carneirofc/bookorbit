@@ -7,7 +7,7 @@ import { DEFAULT_FORMAT_PRIORITY } from '@bookorbit/types';
 
 import { DB } from '../../db';
 import * as schema from '../../db/schema';
-import { authors, bookAuthors, bookFiles, bookGenres, bookMetadata, books, genres, libraries, userLibraryAccess } from '../../db/schema';
+import { authors, bookAuthors, bookFiles, bookGenres, bookMetadata, books, genres, libraries } from '../../db/schema';
 import { buildContentFilterClauses } from '../../common/utils/content-filter-sql.utils';
 
 type Db = NodePgDatabase<typeof schema>;
@@ -16,29 +16,20 @@ type Db = NodePgDatabase<typeof schema>;
 export class StatisticsRepository {
   constructor(@Inject(DB) private readonly db: Db) {}
 
-  private async getAccessibleLibraryIds(userId: number, isSuperuser: boolean): Promise<number[] | null> {
-    if (isSuperuser) return null;
-    const rows = await this.db.select({ libraryId: userLibraryAccess.libraryId }).from(userLibraryAccess).where(eq(userLibraryAccess.userId, userId));
-    return rows.map((r) => r.libraryId);
-  }
-
-  private intersectLibraryIds(accessible: number[] | null, requested: number[] | number | undefined): number[] | null {
+  private intersectLibraryIds(accessible: number[], requested: number[] | number | undefined): number[] {
     const requestedIds = Array.isArray(requested) ? requested : requested == null ? [] : [requested];
     if (requestedIds.length === 0) return accessible;
-    if (accessible === null) return requestedIds;
     const set = new Set(accessible);
     return requestedIds.filter((id) => set.has(id));
   }
 
-  private libraryFilter(libraryIds: number[] | null) {
-    if (libraryIds === null) return undefined;
+  private libraryFilter(libraryIds: number[]) {
     if (libraryIds.length === 0) return sql`false`;
     return inArray(books.libraryId, libraryIds);
   }
 
-  private async resolveLibraryFilter(userId: number, isSuperuser: boolean, requestedLibraryIds?: number[]) {
-    const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
-    return this.libraryFilter(this.intersectLibraryIds(accessible, requestedLibraryIds));
+  private resolveLibraryFilter(accessibleLibraryIds: number[], requestedLibraryIds?: number[]) {
+    return this.libraryFilter(this.intersectLibraryIds(accessibleLibraryIds, requestedLibraryIds));
   }
 
   private contentFilterClauses(isSuperuser: boolean, contentFilters?: ContentFilterRules): SQL[] {
@@ -88,13 +79,17 @@ export class StatisticsRepository {
     };
   }
 
-  async formatDistribution(userId: number, isSuperuser: boolean, contentFilters?: ContentFilterRules | number[], filterLibraryIds?: number[]) {
-    const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
+  async formatDistribution(
+    accessibleLibraryIds: number[],
+    isSuperuser: boolean,
+    contentFilters?: ContentFilterRules | number[],
+    filterLibraryIds?: number[],
+  ) {
     const { contentFilters: resolvedContentFilters, filterLibraryIds: resolvedFilterLibraryIds } = this.resolveOptionalFilters(
       contentFilters,
       filterLibraryIds,
     );
-    const filter = this.libraryFilter(this.intersectLibraryIds(accessible, resolvedFilterLibraryIds));
+    const filter = this.libraryFilter(this.intersectLibraryIds(accessibleLibraryIds, resolvedFilterLibraryIds));
     const cfClauses = this.contentFilterClauses(isSuperuser, resolvedContentFilters);
     return this.db
       .select({
@@ -108,13 +103,17 @@ export class StatisticsRepository {
       .orderBy(desc(sql<number>`count(distinct ${bookFiles.bookId})`));
   }
 
-  async languageDistribution(userId: number, isSuperuser: boolean, contentFilters?: ContentFilterRules | number[], filterLibraryIds?: number[]) {
-    const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
+  async languageDistribution(
+    accessibleLibraryIds: number[],
+    isSuperuser: boolean,
+    contentFilters?: ContentFilterRules | number[],
+    filterLibraryIds?: number[],
+  ) {
     const { contentFilters: resolvedContentFilters, filterLibraryIds: resolvedFilterLibraryIds } = this.resolveOptionalFilters(
       contentFilters,
       filterLibraryIds,
     );
-    const filter = this.libraryFilter(this.intersectLibraryIds(accessible, resolvedFilterLibraryIds));
+    const filter = this.libraryFilter(this.intersectLibraryIds(accessibleLibraryIds, resolvedFilterLibraryIds));
     const cfClauses = this.contentFilterClauses(isSuperuser, resolvedContentFilters);
 
     const items = await this.db
@@ -138,7 +137,7 @@ export class StatisticsRepository {
   }
 
   async booksAddedOverTime(
-    userId: number,
+    accessibleLibraryIds: number[],
     isSuperuser: boolean,
     contentFilters?: ContentFilterRules | number[],
     filterLibraryIds?: number[] | StatisticsGranularity,
@@ -151,8 +150,7 @@ export class StatisticsRepository {
       granularity: resolvedGranularity,
       range: resolvedRange,
     } = this.resolveBooksAddedOverTimeInputs(contentFilters, filterLibraryIds, granularity, range);
-    const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
-    const libFilter = this.libraryFilter(this.intersectLibraryIds(accessible, resolvedFilterLibraryIds));
+    const libFilter = this.libraryFilter(this.intersectLibraryIds(accessibleLibraryIds, resolvedFilterLibraryIds));
     const cfClauses = this.contentFilterClauses(isSuperuser, resolvedContentFilters);
 
     const rangeFilter =
@@ -187,13 +185,17 @@ export class StatisticsRepository {
       .orderBy(sql`extract(year from ${books.addedAt})`, sql`extract(month from ${books.addedAt})`);
   }
 
-  async metadataScoreDistribution(userId: number, isSuperuser: boolean, contentFilters?: ContentFilterRules | number[], filterLibraryIds?: number[]) {
-    const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
+  async metadataScoreDistribution(
+    accessibleLibraryIds: number[],
+    isSuperuser: boolean,
+    contentFilters?: ContentFilterRules | number[],
+    filterLibraryIds?: number[],
+  ) {
     const { contentFilters: resolvedContentFilters, filterLibraryIds: resolvedFilterLibraryIds } = this.resolveOptionalFilters(
       contentFilters,
       filterLibraryIds,
     );
-    const filter = this.libraryFilter(this.intersectLibraryIds(accessible, resolvedFilterLibraryIds));
+    const filter = this.libraryFilter(this.intersectLibraryIds(accessibleLibraryIds, resolvedFilterLibraryIds));
     const cfClauses = this.contentFilterClauses(isSuperuser, resolvedContentFilters);
 
     const bucketExpr = sql`(least(floor(${bookMetadata.metadataScore} / 10.0), 9) * 10)`;
@@ -241,17 +243,16 @@ export class StatisticsRepository {
   }
 
   async libraryMetadataCompleteness(
-    userId: number,
+    accessibleLibraryIds: number[],
     isSuperuser: boolean,
     contentFilters?: ContentFilterRules | number[],
     filterLibraryIds?: number[],
   ) {
-    const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
     const { contentFilters: resolvedContentFilters, filterLibraryIds: resolvedFilterLibraryIds } = this.resolveOptionalFilters(
       contentFilters,
       filterLibraryIds,
     );
-    const filter = this.libraryFilter(this.intersectLibraryIds(accessible, resolvedFilterLibraryIds));
+    const filter = this.libraryFilter(this.intersectLibraryIds(accessibleLibraryIds, resolvedFilterLibraryIds));
     const cfClauses = this.contentFilterClauses(isSuperuser, resolvedContentFilters);
 
     return this.db
@@ -284,13 +285,17 @@ export class StatisticsRepository {
       .orderBy(libraries.name);
   }
 
-  async formatShareOverTime(userId: number, isSuperuser: boolean, contentFilters?: ContentFilterRules | number[], filterLibraryIds?: number[]) {
-    const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
+  async formatShareOverTime(
+    accessibleLibraryIds: number[],
+    isSuperuser: boolean,
+    contentFilters?: ContentFilterRules | number[],
+    filterLibraryIds?: number[],
+  ) {
     const { contentFilters: resolvedContentFilters, filterLibraryIds: resolvedFilterLibraryIds } = this.resolveOptionalFilters(
       contentFilters,
       filterLibraryIds,
     );
-    const filter = this.libraryFilter(this.intersectLibraryIds(accessible, resolvedFilterLibraryIds));
+    const filter = this.libraryFilter(this.intersectLibraryIds(accessibleLibraryIds, resolvedFilterLibraryIds));
     const cfClauses = this.contentFilterClauses(isSuperuser, resolvedContentFilters);
     const yearExpr = sql`extract(year from ${books.addedAt})`;
     const monthExpr = sql`extract(month from ${books.addedAt})`;
@@ -310,17 +315,16 @@ export class StatisticsRepository {
   }
 
   async pageCountDistributionByFormat(
-    userId: number,
+    accessibleLibraryIds: number[],
     isSuperuser: boolean,
     contentFilters?: ContentFilterRules | number[],
     filterLibraryIds?: number[],
   ) {
-    const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
     const { contentFilters: resolvedContentFilters, filterLibraryIds: resolvedFilterLibraryIds } = this.resolveOptionalFilters(
       contentFilters,
       filterLibraryIds,
     );
-    const filter = this.libraryFilter(this.intersectLibraryIds(accessible, resolvedFilterLibraryIds));
+    const filter = this.libraryFilter(this.intersectLibraryIds(accessibleLibraryIds, resolvedFilterLibraryIds));
     const cfClauses = this.contentFilterClauses(isSuperuser, resolvedContentFilters);
 
     const [items, [unknown]] = await Promise.all([
@@ -360,13 +364,17 @@ export class StatisticsRepository {
     return { items, unknownCount: unknown?.unknownCount ?? 0 };
   }
 
-  async storageByFormat(userId: number, isSuperuser: boolean, contentFilters?: ContentFilterRules | number[], filterLibraryIds?: number[]) {
-    const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
+  async storageByFormat(
+    accessibleLibraryIds: number[],
+    isSuperuser: boolean,
+    contentFilters?: ContentFilterRules | number[],
+    filterLibraryIds?: number[],
+  ) {
     const { contentFilters: resolvedContentFilters, filterLibraryIds: resolvedFilterLibraryIds } = this.resolveOptionalFilters(
       contentFilters,
       filterLibraryIds,
     );
-    const filter = this.libraryFilter(this.intersectLibraryIds(accessible, resolvedFilterLibraryIds));
+    const filter = this.libraryFilter(this.intersectLibraryIds(accessibleLibraryIds, resolvedFilterLibraryIds));
     const cfClauses = this.contentFilterClauses(isSuperuser, resolvedContentFilters);
     return this.db
       .select({
@@ -388,12 +396,17 @@ export class StatisticsRepository {
       .orderBy(desc(sql<number>`sum(${bookFiles.sizeBytes})`));
   }
 
-  async publicationYearTimeline(userId: number, isSuperuser: boolean, contentFilters?: ContentFilterRules | number[], filterLibraryIds?: number[]) {
+  async publicationYearTimeline(
+    accessibleLibraryIds: number[],
+    isSuperuser: boolean,
+    contentFilters?: ContentFilterRules | number[],
+    filterLibraryIds?: number[],
+  ) {
     const { contentFilters: resolvedContentFilters, filterLibraryIds: resolvedFilterLibraryIds } = this.resolveOptionalFilters(
       contentFilters,
       filterLibraryIds,
     );
-    const filter = await this.resolveLibraryFilter(userId, isSuperuser, resolvedFilterLibraryIds);
+    const filter = this.resolveLibraryFilter(accessibleLibraryIds, resolvedFilterLibraryIds);
     const cfClauses = this.contentFilterClauses(isSuperuser, resolvedContentFilters);
     const rankedTitleRows = this.db
       .select({
@@ -458,13 +471,17 @@ export class StatisticsRepository {
     };
   }
 
-  async publicationDecade(userId: number, isSuperuser: boolean, contentFilters?: ContentFilterRules | number[], filterLibraryIds?: number[]) {
-    const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
+  async publicationDecade(
+    accessibleLibraryIds: number[],
+    isSuperuser: boolean,
+    contentFilters?: ContentFilterRules | number[],
+    filterLibraryIds?: number[],
+  ) {
     const { contentFilters: resolvedContentFilters, filterLibraryIds: resolvedFilterLibraryIds } = this.resolveOptionalFilters(
       contentFilters,
       filterLibraryIds,
     );
-    const filter = this.libraryFilter(this.intersectLibraryIds(accessible, resolvedFilterLibraryIds));
+    const filter = this.libraryFilter(this.intersectLibraryIds(accessibleLibraryIds, resolvedFilterLibraryIds));
     const cfClauses = this.contentFilterClauses(isSuperuser, resolvedContentFilters);
 
     const items = await this.db
@@ -487,13 +504,17 @@ export class StatisticsRepository {
     return { items, unknownCount };
   }
 
-  async topAuthors(userId: number, isSuperuser: boolean, contentFilters?: ContentFilterRules | number[], filterLibraryIds?: number[]) {
-    const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
+  async topAuthors(
+    accessibleLibraryIds: number[],
+    isSuperuser: boolean,
+    contentFilters?: ContentFilterRules | number[],
+    filterLibraryIds?: number[],
+  ) {
     const { contentFilters: resolvedContentFilters, filterLibraryIds: resolvedFilterLibraryIds } = this.resolveOptionalFilters(
       contentFilters,
       filterLibraryIds,
     );
-    const filter = this.libraryFilter(this.intersectLibraryIds(accessible, resolvedFilterLibraryIds));
+    const filter = this.libraryFilter(this.intersectLibraryIds(accessibleLibraryIds, resolvedFilterLibraryIds));
     const cfClauses = this.contentFilterClauses(isSuperuser, resolvedContentFilters);
 
     return this.db
@@ -509,12 +530,17 @@ export class StatisticsRepository {
       .orderBy(desc(sql<number>`count(distinct ${bookAuthors.bookId})`));
   }
 
-  async metadataCompleteness(userId: number, isSuperuser: boolean, contentFilters?: ContentFilterRules | number[], filterLibraryIds?: number[]) {
+  async metadataCompleteness(
+    accessibleLibraryIds: number[],
+    isSuperuser: boolean,
+    contentFilters?: ContentFilterRules | number[],
+    filterLibraryIds?: number[],
+  ) {
     const { contentFilters: resolvedContentFilters, filterLibraryIds: resolvedFilterLibraryIds } = this.resolveOptionalFilters(
       contentFilters,
       filterLibraryIds,
     );
-    const filter = await this.resolveLibraryFilter(userId, isSuperuser, resolvedFilterLibraryIds);
+    const filter = this.resolveLibraryFilter(accessibleLibraryIds, resolvedFilterLibraryIds);
     const cfClauses = this.contentFilterClauses(isSuperuser, resolvedContentFilters);
 
     const [row] = await this.db
@@ -555,13 +581,17 @@ export class StatisticsRepository {
     );
   }
 
-  async genreDistribution(userId: number, isSuperuser: boolean, contentFilters?: ContentFilterRules | number[], filterLibraryIds?: number[]) {
-    const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
+  async genreDistribution(
+    accessibleLibraryIds: number[],
+    isSuperuser: boolean,
+    contentFilters?: ContentFilterRules | number[],
+    filterLibraryIds?: number[],
+  ) {
     const { contentFilters: resolvedContentFilters, filterLibraryIds: resolvedFilterLibraryIds } = this.resolveOptionalFilters(
       contentFilters,
       filterLibraryIds,
     );
-    const filter = this.libraryFilter(this.intersectLibraryIds(accessible, resolvedFilterLibraryIds));
+    const filter = this.libraryFilter(this.intersectLibraryIds(accessibleLibraryIds, resolvedFilterLibraryIds));
     const cfClauses = this.contentFilterClauses(isSuperuser, resolvedContentFilters);
 
     const items = await this.db
@@ -585,13 +615,17 @@ export class StatisticsRepository {
     return { items, unknownCount };
   }
 
-  async getSummary(userId: number, isSuperuser: boolean, contentFilters?: ContentFilterRules | number[], filterLibraryIds?: number[]) {
-    const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
+  async getSummary(
+    accessibleLibraryIds: number[],
+    isSuperuser: boolean,
+    contentFilters?: ContentFilterRules | number[],
+    filterLibraryIds?: number[],
+  ) {
     const { contentFilters: resolvedContentFilters, filterLibraryIds: resolvedFilterLibraryIds } = this.resolveOptionalFilters(
       contentFilters,
       filterLibraryIds,
     );
-    const filter = this.libraryFilter(this.intersectLibraryIds(accessible, resolvedFilterLibraryIds));
+    const filter = this.libraryFilter(this.intersectLibraryIds(accessibleLibraryIds, resolvedFilterLibraryIds));
     const cfClauses = this.contentFilterClauses(isSuperuser, resolvedContentFilters);
 
     const [[booksRow], [authorsRow], [seriesRow], [publishersRow], [storageRow], [genresRow], [languagesRow], [pubRangeRow], [thisYearRow]] =
@@ -660,7 +694,7 @@ export class StatisticsRepository {
   }
 
   async getGenreCooccurrence(
-    userId: number,
+    accessibleLibraryIds: number[],
     isSuperuser: boolean,
     contentFilters?: ContentFilterRules | number[],
     filterLibraryIds?: number[] | number,
@@ -671,8 +705,7 @@ export class StatisticsRepository {
       filterLibraryIds: resolvedFilterLibraryIds,
       limit: resolvedLimit,
     } = this.resolveGenreCooccurrenceInputs(contentFilters, filterLibraryIds, limit);
-    const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
-    const filter = this.libraryFilter(this.intersectLibraryIds(accessible, resolvedFilterLibraryIds));
+    const filter = this.libraryFilter(this.intersectLibraryIds(accessibleLibraryIds, resolvedFilterLibraryIds));
     const cfClauses = this.contentFilterClauses(isSuperuser, resolvedContentFilters);
 
     const topGenresRows = await this.db
@@ -706,7 +739,7 @@ export class StatisticsRepository {
       inner join books on books.id = bg1.book_id
       where bg1.genre_id in (${topGenreIdList})
         and bg2.genre_id in (${topGenreIdList})
-        ${filter ? sql`and ${filter}` : sql``}
+        and ${filter}
         ${contentFilterWhere ? sql`and ${contentFilterWhere}` : sql``}
       group by g1.name, g2.name
       having count(distinct bg1.book_id) >= 1
@@ -719,13 +752,17 @@ export class StatisticsRepository {
     };
   }
 
-  async metadataFreshnessGauge(userId: number, isSuperuser: boolean, contentFilters?: ContentFilterRules | number[], filterLibraryIds?: number[]) {
-    const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
+  async metadataFreshnessGauge(
+    accessibleLibraryIds: number[],
+    isSuperuser: boolean,
+    contentFilters?: ContentFilterRules | number[],
+    filterLibraryIds?: number[],
+  ) {
     const { contentFilters: resolvedContentFilters, filterLibraryIds: resolvedFilterLibraryIds } = this.resolveOptionalFilters(
       contentFilters,
       filterLibraryIds,
     );
-    const filter = this.libraryFilter(this.intersectLibraryIds(accessible, resolvedFilterLibraryIds));
+    const filter = this.libraryFilter(this.intersectLibraryIds(accessibleLibraryIds, resolvedFilterLibraryIds));
     const cfClauses = this.contentFilterClauses(isSuperuser, resolvedContentFilters);
     const hasProviderIdExpr = sql`(
       ${bookMetadata.googleBooksId} is not null or
@@ -768,13 +805,17 @@ export class StatisticsRepository {
     );
   }
 
-  async libraryIntegrityGauge(userId: number, isSuperuser: boolean, contentFilters?: ContentFilterRules | number[], filterLibraryIds?: number[]) {
-    const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
+  async libraryIntegrityGauge(
+    accessibleLibraryIds: number[],
+    isSuperuser: boolean,
+    contentFilters?: ContentFilterRules | number[],
+    filterLibraryIds?: number[],
+  ) {
     const { contentFilters: resolvedContentFilters, filterLibraryIds: resolvedFilterLibraryIds } = this.resolveOptionalFilters(
       contentFilters,
       filterLibraryIds,
     );
-    const filter = this.libraryFilter(this.intersectLibraryIds(accessible, resolvedFilterLibraryIds));
+    const filter = this.libraryFilter(this.intersectLibraryIds(accessibleLibraryIds, resolvedFilterLibraryIds));
     const cfClauses = this.contentFilterClauses(isSuperuser, resolvedContentFilters);
 
     const [row] = await this.db
@@ -798,13 +839,17 @@ export class StatisticsRepository {
     );
   }
 
-  async acquisitionLagScatter(userId: number, isSuperuser: boolean, contentFilters?: ContentFilterRules | number[], filterLibraryIds?: number[]) {
-    const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
+  async acquisitionLagScatter(
+    accessibleLibraryIds: number[],
+    isSuperuser: boolean,
+    contentFilters?: ContentFilterRules | number[],
+    filterLibraryIds?: number[],
+  ) {
     const { contentFilters: resolvedContentFilters, filterLibraryIds: resolvedFilterLibraryIds } = this.resolveOptionalFilters(
       contentFilters,
       filterLibraryIds,
     );
-    const filter = this.libraryFilter(this.intersectLibraryIds(accessible, resolvedFilterLibraryIds));
+    const filter = this.libraryFilter(this.intersectLibraryIds(accessibleLibraryIds, resolvedFilterLibraryIds));
     const cfClauses = this.contentFilterClauses(isSuperuser, resolvedContentFilters);
 
     const addedYearExpr = sql`extract(year from ${books.addedAt})::int`;
@@ -835,12 +880,17 @@ export class StatisticsRepository {
     return { items, unknownCount: unknown?.unknownCount ?? 0 };
   }
 
-  async largestBooks(userId: number, isSuperuser: boolean, contentFilters?: ContentFilterRules | number[], filterLibraryIds?: number[]) {
+  async largestBooks(
+    accessibleLibraryIds: number[],
+    isSuperuser: boolean,
+    contentFilters?: ContentFilterRules | number[],
+    filterLibraryIds?: number[],
+  ) {
     const { contentFilters: resolvedContentFilters, filterLibraryIds: resolvedFilterLibraryIds } = this.resolveOptionalFilters(
       contentFilters,
       filterLibraryIds,
     );
-    const filter = await this.resolveLibraryFilter(userId, isSuperuser, resolvedFilterLibraryIds);
+    const filter = this.resolveLibraryFilter(accessibleLibraryIds, resolvedFilterLibraryIds);
     const cfClauses = this.contentFilterClauses(isSuperuser, resolvedContentFilters);
 
     return this.db
@@ -858,12 +908,12 @@ export class StatisticsRepository {
       .limit(50);
   }
 
-  async topSeries(userId: number, isSuperuser: boolean, contentFilters?: ContentFilterRules | number[], filterLibraryIds?: number[]) {
+  async topSeries(accessibleLibraryIds: number[], isSuperuser: boolean, contentFilters?: ContentFilterRules | number[], filterLibraryIds?: number[]) {
     const { contentFilters: resolvedContentFilters, filterLibraryIds: resolvedFilterLibraryIds } = this.resolveOptionalFilters(
       contentFilters,
       filterLibraryIds,
     );
-    const filter = await this.resolveLibraryFilter(userId, isSuperuser, resolvedFilterLibraryIds);
+    const filter = this.resolveLibraryFilter(accessibleLibraryIds, resolvedFilterLibraryIds);
     const cfClauses = this.contentFilterClauses(isSuperuser, resolvedContentFilters);
 
     return this.db

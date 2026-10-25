@@ -44,9 +44,12 @@ function makeService() {
     largestBooks: vi.fn(),
     topSeries: vi.fn(),
   };
+  const libraryAccess = { findAccessibleLibraryIds: vi.fn().mockResolvedValue([3, 5]) };
+
   return {
     repo,
-    service: new StatisticsService(repo as never),
+    libraryAccess,
+    service: new StatisticsService(repo as never, libraryAccess as never),
   };
 }
 

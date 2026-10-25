@@ -2,6 +2,9 @@ import 'reflect-metadata';
 
 import { MODULE_METADATA } from '@nestjs/common/constants';
 
+import { AppSettingsModule } from '../app-settings/app-settings.module';
+import { LibraryAccessModule } from '../library/library-access.module';
+import { ReadingAttemptEventsModule } from '../user-book-status/reading-attempt-events.module';
 import { UserReadingStatsTimeZoneBackfillService } from './user-reading-stats-timezone-backfill.service';
 import { UserStatisticsAggregationJob } from './user-statistics-aggregation.job';
 import { UserStatisticsController } from './user-statistics.controller';
@@ -11,6 +14,11 @@ import { UserStatisticsService } from './user-statistics.service';
 
 describe('UserStatisticsModule', () => {
   it('registers controller and providers', () => {
+    expect(Reflect.getMetadata(MODULE_METADATA.IMPORTS, UserStatisticsModule)).toEqual([
+      AppSettingsModule,
+      ReadingAttemptEventsModule,
+      LibraryAccessModule,
+    ]);
     expect(Reflect.getMetadata(MODULE_METADATA.CONTROLLERS, UserStatisticsModule)).toEqual([UserStatisticsController]);
     expect(Reflect.getMetadata(MODULE_METADATA.PROVIDERS, UserStatisticsModule)).toEqual([
       UserStatisticsService,

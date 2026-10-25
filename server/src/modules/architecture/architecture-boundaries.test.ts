@@ -88,4 +88,48 @@ describe('Architecture boundaries', () => {
 
     expect(actual).toEqual(allowlist);
   });
+
+  it('freezes direct user_library_access reads outside the library module to an explicit allowlist', async () => {
+    // Library scope comes from LibraryAccessService (via LibraryService). Each entry below still reads
+    // the grant table itself; new code must not be added here, it must ask the library module instead.
+    const allowlist = [
+      // Guard and admin bookkeeping: per-request grant check, account creation, user grant management.
+      'src/common/guards/library-access.guard.ts',
+      'src/modules/auth/auth.service.ts',
+      'src/modules/user/user.repository.ts',
+      // Recipient selection: which users to notify about a library event.
+      'src/modules/notification/notification.repository.ts',
+      'src/modules/podcast/podcast-catalog.repository.ts',
+      'src/modules/scanner/scanner.repository.ts',
+      // Per-library checks that predate LibraryAccessService.
+      'src/modules/book-move/book-move.repository.ts',
+      'src/modules/metadata-fetch/metadata-fetch.repository.ts',
+      // Device protocols authenticate without a web session and scope their catalogs separately.
+      'src/modules/kobo/services/kobo-book-access.service.ts',
+      'src/modules/koreader/koreader.repository.ts',
+      'src/modules/opds/opds-book.service.ts',
+      'src/modules/opds/opds-collection.repository.ts',
+      // Developer seed script, not shipped in the server runtime.
+      'src/scripts/seed-apple-source-stats.ts',
+    ].sort();
+
+    const srcRoot = join(process.cwd(), 'src');
+    const ownedByLibraryModule = (file: string) => file.startsWith('src/modules/library/') || file.startsWith('src/db/');
+    const allFiles = await listFilesRecursive(srcRoot);
+    const sourceFiles = allFiles.filter((file) => file.endsWith('.ts') && !file.endsWith('.test.ts'));
+    const actual = (
+      await Promise.all(
+        sourceFiles.map(async (filePath) => {
+          const file = relative(process.cwd(), filePath);
+          if (ownedByLibraryModule(file)) return null;
+          const contents = await readFile(filePath, 'utf8');
+          return /userLibraryAccess|user_library_access/.test(contents) ? file : null;
+        }),
+      )
+    )
+      .filter((file): file is string => file !== null)
+      .sort();
+
+    expect(actual).toEqual(allowlist);
+  });
 });

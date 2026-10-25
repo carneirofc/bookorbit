@@ -27,7 +27,7 @@ describe('PodcastAccessService', () => {
 
     await expect(service.requirePodcastAccess(3, { ...user, isSuperuser: true }, 'owner')).resolves.toBe(podcast);
 
-    expect(libraries.verifyUserAccessLevel).toHaveBeenCalledWith(5, 7, true, 'owner');
+    expect(libraries.verifyUserAccessLevel).toHaveBeenCalledWith(expect.objectContaining({ id: 5, isSuperuser: true }), 7, 'owner');
   });
 
   it('does not run a library check when the podcast does not exist', async () => {
@@ -46,7 +46,7 @@ describe('PodcastAccessService', () => {
     await expect(service.requireEpisodeAccess(11, user, 'editor')).resolves.toBe(context);
 
     expect(episodes.findEpisodeForUser).toHaveBeenCalledWith(11, 5);
-    expect(libraries.verifyUserAccessLevel).toHaveBeenCalledWith(5, 7, false, 'editor');
+    expect(libraries.verifyUserAccessLevel).toHaveBeenCalledWith(expect.objectContaining({ id: 5, isSuperuser: false }), 7, 'editor');
   });
 
   it('scopes bookmark lookup to the current user and requires viewer library access', async () => {
@@ -56,7 +56,7 @@ describe('PodcastAccessService', () => {
     await service.requireBookmarkAccess(19, user);
 
     expect(playback.findBookmarkAccess).toHaveBeenCalledWith(5, 19);
-    expect(libraries.verifyUserAccessLevel).toHaveBeenCalledWith(5, 7, false, 'viewer');
+    expect(libraries.verifyUserAccessLevel).toHaveBeenCalledWith(expect.objectContaining({ id: 5, isSuperuser: false }), 7, 'viewer');
   });
 
   it('does not reveal a bookmark that is absent from the user-scoped query', async () => {

@@ -10,6 +10,7 @@ import { NotificationModule } from '../notification/notification.module';
 import { PathModule } from '../path/path.module';
 import { ScannerModule } from '../scanner/scanner.module';
 import { BulkRenameService } from './bulk-rename.service';
+import { LibraryAccessModule } from './library-access.module';
 import { LibraryController } from './library.controller';
 import { LibraryRepository } from './library.repository';
 import { LibraryScanSchedulerService } from './library-scan-scheduler.service';
@@ -27,9 +28,10 @@ import { LibraryAddedAtService } from './library-added-at.service';
     forwardRef(() => NotificationModule),
     AppSettingsModule,
     PathModule,
+    LibraryAccessModule,
   ],
   controllers: [LibraryController],
   providers: [LibraryService, LibraryRepository, LibraryScanSchedulerService, BulkRenameService, LibraryAddedAtService],
-  exports: [LibraryService, LibraryRepository],
+  exports: [LibraryService, LibraryRepository, LibraryAccessModule],
 })
 export class LibraryModule {}

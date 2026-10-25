@@ -1444,7 +1444,7 @@ describe('UploadService', () => {
       db.select.mockReturnValueOnce(selectChain([{ id: 10, libraryId: 1 }]));
 
       await expect(service.renameBookFiles(10, user)).resolves.toBeUndefined();
-      expect(libraryService.verifyUserAccessLevel).toHaveBeenCalledWith(user.id, 1, false, 'editor');
+      expect(libraryService.verifyUserAccessLevel).toHaveBeenCalledWith(expect.objectContaining({ id: user.id, isSuperuser: false }), 1, 'editor');
       expect(mockRenameService.performRename).toHaveBeenCalledWith(10, user.id, true, false);
     });
 
@@ -1478,7 +1478,7 @@ describe('UploadService', () => {
       db.select.mockReturnValueOnce(selectChain([{ id: 10, libraryId: 1 }]));
 
       await service.renameBookFiles(10, caller);
-      expect(libraryService.verifyUserAccessLevel).toHaveBeenCalledWith(caller.id, 1, true, 'editor');
+      expect(libraryService.verifyUserAccessLevel).toHaveBeenCalledWith(expect.objectContaining({ id: caller.id, isSuperuser: true }), 1, 'editor');
       expect(renameService.performRename).toHaveBeenCalledWith(10, caller.id, true, false);
     });
 

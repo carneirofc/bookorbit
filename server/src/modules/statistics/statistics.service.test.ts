@@ -45,9 +45,12 @@ function makeService() {
     topSeries: vi.fn(),
   };
 
+  const libraryAccess = { findAccessibleLibraryIds: vi.fn().mockResolvedValue([3, 5]) };
+
   return {
     repo,
-    service: new StatisticsService(repo as never),
+    libraryAccess,
+    service: new StatisticsService(repo as never, libraryAccess as never),
   };
 }
 
@@ -232,5 +235,19 @@ describe('StatisticsService', () => {
     await service.getMetadataScoreDistribution(makeUser(), { libraryIds: [1, 2] });
 
     expect(repo.metadataScoreDistribution).toHaveBeenCalledTimes(1);
+  });
+
+  it('passes the accessible library ids from LibraryAccessService to the repository', async () => {
+    const { service, repo, libraryAccess } = makeService();
+    const user = makeUser(true);
+    repo.topSeries.mockResolvedValue([]);
+    repo.getSummary.mockResolvedValue({});
+
+    await service.getTopSeries(user, { libraryIds: [5] });
+    await service.getSummary(user, {});
+
+    expect(libraryAccess.findAccessibleLibraryIds).toHaveBeenCalledWith(user);
+    expect(repo.topSeries).toHaveBeenCalledWith([3, 5], true, user.contentFilters, [5]);
+    expect(repo.getSummary).toHaveBeenCalledWith([3, 5], true, user.contentFilters, undefined);
   });
 });

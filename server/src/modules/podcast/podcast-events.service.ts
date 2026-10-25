@@ -236,7 +236,7 @@ export class PodcastEventsService {
     const cached = cache.get(libraryId);
     if (cached && now - cached.checkedAt < PODCAST_EVENT_ACCESS_TTL_MS) return cached.allowed;
     const allowed = await this.libraries
-      .verifyUserAccess(user.id, libraryId, user.isSuperuser)
+      .verifyUserAccess(user, libraryId)
       .then(() => true)
       .catch(() => false);
     cache.set(libraryId, { checkedAt: now, allowed });

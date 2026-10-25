@@ -27,6 +27,7 @@ import { readdir, realpath, rm, stat } from 'fs/promises';
 
 import { ACHIEVEMENT_EVENT_LIBRARY_CATALOG_CHANGED } from '../achievement/achievement-events.service';
 import { isPrimaryFormat } from '../scanner/lib/classify';
+import { LibraryAccessService } from './library-access.service';
 import { LibraryService } from './library.service';
 
 const mockReaddir = readdir as MockedFunction<typeof readdir>;
@@ -118,6 +119,7 @@ describe('LibraryService', () => {
       scanScheduler as any,
       regexMetadata as any,
       readingEvents,
+      new LibraryAccessService(libraryRepo as any),
     );
 
     libraryRepo.findPodcastIds.mockResolvedValue([]);
@@ -255,20 +257,20 @@ describe('LibraryService', () => {
   });
 
   it('verifyUserAccess bypasses lookup for superusers', async () => {
-    await service.verifyUserAccess(1, 2, true);
+    await service.verifyUserAccess({ id: 1, isSuperuser: true }, 2);
     expect(libraryRepo.hasUserAccess).not.toHaveBeenCalled();
   });
 
   it('verifyUserAccess throws when user has no library access', async () => {
     libraryRepo.hasUserAccess.mockResolvedValue(false);
-    await expect(service.verifyUserAccess(1, 2, false)).rejects.toThrow('No access to this library');
+    await expect(service.verifyUserAccess({ id: 1, isSuperuser: false }, 2)).rejects.toThrow('No access to this library');
   });
 
   it('verifyUserAccessLevel enforces the required library role', async () => {
     libraryRepo.findUserAccessLevel.mockResolvedValue('viewer');
 
-    await expect(service.verifyUserAccessLevel(1, 2, false, 'editor')).rejects.toThrow('Insufficient library access level');
-    await expect(service.verifyUserAccessLevel(1, 2, true, 'owner')).resolves.toBeUndefined();
+    await expect(service.verifyUserAccessLevel({ id: 1, isSuperuser: false }, 2, 'editor')).rejects.toThrow('Insufficient library access level');
+    await expect(service.verifyUserAccessLevel({ id: 1, isSuperuser: true }, 2, 'owner')).resolves.toBeUndefined();
   });
 
   it.each([undefined, ['regex', 'embedded']])('preserves regex configuration with precedence %j on create', async (metadataPrecedence) => {

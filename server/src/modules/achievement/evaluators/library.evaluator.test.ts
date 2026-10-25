@@ -27,10 +27,35 @@ function makeRepo(overrides: Record<string, unknown> = {}) {
 describe('LibraryEvaluator', () => {
   let evaluator: LibraryEvaluator;
   let repo: ReturnType<typeof makeRepo>;
+  let libraryAccess: { findAccessibleLibraryIds: ReturnType<typeof vi.fn> };
 
   beforeEach(() => {
     repo = makeRepo();
-    evaluator = new LibraryEvaluator(repo as never);
+    libraryAccess = { findAccessibleLibraryIds: vi.fn().mockResolvedValue([4, 9]) };
+    evaluator = new LibraryEvaluator(repo as never, libraryAccess as never);
+  });
+
+  it('counts library builder books and formats using the accessible library ids', async () => {
+    repo.countAccessibleBooks.mockResolvedValue(50);
+    repo.countDistinctFormats.mockResolvedValue(3);
+
+    await evaluator.evaluate(
+      { userId: 1, isSuperuser: true, timeZone: 'UTC', eventName: ACHIEVEMENT_EVENT_LIBRARY_CATALOG_CHANGED, payload: { userId: 1 } },
+      new Set(),
+    );
+
+    expect(libraryAccess.findAccessibleLibraryIds).toHaveBeenCalledWith({ id: 1, isSuperuser: true });
+    expect(repo.countAccessibleBooks).toHaveBeenCalledWith([4, 9]);
+    expect(repo.countDistinctFormats).toHaveBeenCalledWith([4, 9]);
+  });
+
+  it('does not resolve library scope for events that need no library counts', async () => {
+    await evaluator.evaluate(
+      { userId: 1, isSuperuser: false, timeZone: 'UTC', eventName: ACHIEVEMENT_EVENT_ANNOTATION_CREATED, payload: { userId: 1, bookId: 1 } },
+      new Set(),
+    );
+
+    expect(libraryAccess.findAccessibleLibraryIds).not.toHaveBeenCalled();
   });
 
   it('supports annotation, collection, book status, and library catalog events', () => {

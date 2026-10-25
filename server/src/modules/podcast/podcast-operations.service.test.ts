@@ -429,7 +429,7 @@ describe('PodcastOperationsService', () => {
 
     await expect(operationsService.enqueueReparse(3, requestUser())).resolves.toEqual({ jobId: 41 });
 
-    expect(libraries.verifyUserAccessLevel).toHaveBeenCalledWith(5, 7, false, 'editor');
+    expect(libraries.verifyUserAccessLevel).toHaveBeenCalledWith(expect.objectContaining({ id: 5, isSuperuser: false }), 7, 'editor');
     expect(jobs.enqueue).toHaveBeenCalledWith(expect.objectContaining({ type: 'reparse', dedupeKey: 'reparse:3', podcastId: 3 }));
   });
 

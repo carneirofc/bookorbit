@@ -562,7 +562,7 @@ describe('BookService', () => {
 
       const plan = await service.getExportFiles([1, 2], user, 'primary');
 
-      expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(user.id, 77, false);
+      expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(expect.objectContaining({ id: user.id, isSuperuser: false }), 77);
       expect(plan.projectedBytes).toBe(300);
       expect(plan.files).toEqual([
         { absolutePath: '/books/a.epub', zipPath: 'Duplicate.epub', sizeBytes: 100 },
@@ -945,8 +945,8 @@ describe('BookService', () => {
 
       expect(bookRepo.findLibraryIdsByBookIds).toHaveBeenCalledWith([3, 2, 1]);
       expect(libraryService.verifyUserAccess).toHaveBeenCalledTimes(2);
-      expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(user.id, 10, false);
-      expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(user.id, 20, false);
+      expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(expect.objectContaining({ id: user.id, isSuperuser: false }), 10);
+      expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(expect.objectContaining({ id: user.id, isSuperuser: false }), 20);
     });
 
     it('fails when the user lost access to any library in the part', async () => {
@@ -1073,7 +1073,7 @@ describe('BookService', () => {
         metadata: { title: 'New Title', isbn10: '0306406152', isbn13: '9780306406157' },
         diagnostics: makeMetadataFetchDiagnostics({ resolvedFieldCount: 3 }),
       });
-      expect(libraryService.verifyUserAccessLevel).toHaveBeenCalledWith(user.id, 7, false, 'editor');
+      expect(libraryService.verifyUserAccessLevel).toHaveBeenCalledWith(expect.objectContaining({ id: user.id, isSuperuser: false }), 7, 'editor');
       expect(pipeline.runWithSources).toHaveBeenCalledWith(
         {
           title: 'Old Title',
@@ -2479,7 +2479,7 @@ describe('BookService', () => {
       const result = await service.bulkReExtractCover([1, 2], user, onProgress);
 
       expect(result).toEqual({ processed: 2, updated: 1 });
-      expect(libraryService.verifyUserAccessLevel).toHaveBeenCalledWith(user.id, 7, false, 'editor');
+      expect(libraryService.verifyUserAccessLevel).toHaveBeenCalledWith(expect.objectContaining({ id: user.id, isSuperuser: false }), 7, 'editor');
       expect(onProgress).toHaveBeenCalledTimes(2);
       expect(onProgress).toHaveBeenNthCalledWith(1, 1);
       expect(onProgress).toHaveBeenNthCalledWith(2, 2);
@@ -3696,7 +3696,7 @@ describe('BookService', () => {
         pagination: { page: 1, size: 5 },
       } as never);
 
-      expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(42, 7, false);
+      expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(expect.objectContaining({ id: 42, isSuperuser: false }), 7);
       expect(bookRepo.findCards).toHaveBeenCalledWith({
         where: 'WHERE',
         orderBy: ['ORDER'],
@@ -3782,7 +3782,7 @@ describe('BookService', () => {
         maxBuckets: 24,
       } as never);
 
-      expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(42, 7, false);
+      expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(expect.objectContaining({ id: 42, isSuperuser: false }), 7);
       expect(queryBuilder.buildOrderBy).toHaveBeenCalledWith([{ field: 'title', dir: 'asc' }], 42, undefined, {});
       expect(bookRepo.findJumpBuckets).toHaveBeenCalledWith(
         expect.objectContaining({ where: 'WHERE', field: 'title', kind: 'letter', userId: 42, maxBuckets: 24, orderBy: ['ORDER'] }),
@@ -5754,7 +5754,7 @@ describe('BookService', () => {
 
       const result = await service.facetsForLibrary(user, 7, facetQuery(filter, 'dune'));
 
-      expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(42, 7, false);
+      expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(expect.objectContaining({ id: 42, isSuperuser: false }), 7);
       const scope = { accessibleLibraryIds: [7], implicitLibraryId: 7, userId: 42, timeZone: 'Europe/Berlin', contentFilters };
       expect(queryBuilder.buildWhere).toHaveBeenCalledWith(filter, { ...scope, q: 'dune' });
       expect(queryBuilder.buildWhere).toHaveBeenCalledWith(undefined, scope);
@@ -5772,7 +5772,7 @@ describe('BookService', () => {
 
       await service.facetsForLibrary(user, 7, facetQuery({ type: 'group', join: 'AND', rules: [unreadRule] }));
 
-      expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(3, 7, true);
+      expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(expect.objectContaining({ id: 3, isSuperuser: true }), 7);
       expect(queryBuilder.buildWhere.mock.calls.length).toBeGreaterThan(0);
       for (const [, ctx] of queryBuilder.buildWhere.mock.calls) {
         expect((ctx as { contentFilters?: unknown }).contentFilters).toBeUndefined();
@@ -6286,14 +6286,14 @@ describe('BookService', () => {
       queryBuilder.buildWhere.mockReturnValue('where-clause');
       bookRepo.findDistinctLibraryIdsByWhere.mockResolvedValue([5, 9]);
       const error = new ForbiddenException('Insufficient library access level');
-      libraryService.verifyUserAccessLevel.mockImplementation((_userId: number, libraryId: number) =>
+      libraryService.verifyUserAccessLevel.mockImplementation((_user: unknown, libraryId: number) =>
         libraryId === 9 ? Promise.reject(error) : Promise.resolve(),
       );
 
       await expect(service.resolveSelectionToIds({ query: {} }, user, 'editor')).rejects.toBe(error);
       expect(bookRepo.findDistinctLibraryIdsByWhere).toHaveBeenCalledWith('where-clause');
-      expect(libraryService.verifyUserAccessLevel).toHaveBeenCalledWith(user.id, 5, false, 'editor');
-      expect(libraryService.verifyUserAccessLevel).toHaveBeenCalledWith(user.id, 9, false, 'editor');
+      expect(libraryService.verifyUserAccessLevel).toHaveBeenCalledWith(expect.objectContaining({ id: user.id, isSuperuser: false }), 5, 'editor');
+      expect(libraryService.verifyUserAccessLevel).toHaveBeenCalledWith(expect.objectContaining({ id: user.id, isSuperuser: false }), 9, 'editor');
       expect(bookRepo.findIdsByWhere).not.toHaveBeenCalled();
       expect(bookRepo.findLibraryIdsByBookIds).not.toHaveBeenCalled();
     });

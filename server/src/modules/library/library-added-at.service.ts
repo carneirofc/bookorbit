@@ -16,6 +16,7 @@ import type { RequestUser } from '../../common/types/request-user';
 import { usableFileTime } from '../../common/utils/file-time.utils';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { PathPolicyService } from '../path/path-policy.service';
+import { LibraryAccessService } from './library-access.service';
 import { LibraryRepository } from './library.repository';
 
 const BOOK_BATCH_SIZE = 100;
@@ -39,6 +40,7 @@ export class LibraryAddedAtService implements OnModuleDestroy {
   constructor(
     private readonly libraryRepo: LibraryRepository,
     private readonly pathPolicy: PathPolicyService,
+    private readonly libraryAccess: LibraryAccessService,
   ) {}
 
   async start(libraryId: number, user: RequestUser): Promise<AddedAtRecomputeJob> {
@@ -96,9 +98,7 @@ export class LibraryAddedAtService implements OnModuleDestroy {
   }
 
   private async assertAccess(libraryId: number, user: RequestUser): Promise<void> {
-    if (!user.isSuperuser && !(await this.libraryRepo.hasUserAccess(user.id, libraryId))) {
-      throw new ForbiddenException('No access to this library');
-    }
+    await this.libraryAccess.verifyUserAccess(user, libraryId);
   }
 
   private snapshot(job: AddedAtRecomputeJob): AddedAtRecomputeJob {

@@ -226,10 +226,9 @@ describe('BookDockController', () => {
     );
     expect(service.refetchMetadata).toHaveBeenCalledWith(11, MOCK_USER.id, false);
     expect(finalizeService.previewNames).toHaveBeenCalledWith([10], false, [], 2, MOCK_USER.id, false, undefined, undefined, undefined, true);
-    expect(finalizeService.previewFinalize).toHaveBeenCalledWith(1, false, false, [10], false, [], 2, 3, [], undefined, undefined, undefined, true);
-    expect(finalizeService.discardDuplicateCandidates).toHaveBeenCalledWith(
+    expect(finalizeService.previewFinalize).toHaveBeenCalledWith(
       1,
-      false,
+      MOCK_USER,
       false,
       [10],
       false,
@@ -242,7 +241,36 @@ describe('BookDockController', () => {
       undefined,
       true,
     );
-    expect(finalizeService.finalize).toHaveBeenCalledWith(99, true, true, [1], false, [], 2, 3, [], undefined, undefined, undefined, true);
+    expect(finalizeService.discardDuplicateCandidates).toHaveBeenCalledWith(
+      1,
+      MOCK_USER,
+      false,
+      [10],
+      false,
+      [],
+      2,
+      3,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+    expect(finalizeService.finalize).toHaveBeenCalledWith(
+      99,
+      expect.objectContaining({ id: 99, isSuperuser: true }),
+      true,
+      [1],
+      false,
+      [],
+      2,
+      3,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
     expect(watcherService.rescan).toHaveBeenCalled();
     expect(service.pauseProcessing).toHaveBeenCalledTimes(1);
     expect(service.resumeProcessing).toHaveBeenCalledTimes(1);

@@ -40,7 +40,7 @@ describe('verifyBookAccess', () => {
   it('still allows a book in a library the caller can reach', async () => {
     const { service, libraryService } = build(7);
     await expect(service.verifyBookAccess(1487, { id: 23, contentFilters: null } as never)).resolves.toBeUndefined();
-    expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(23, 7, false);
+    expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(expect.objectContaining({ id: 23 }), 7);
   });
 
   it('does not swallow errors that are not a forbidden access', async () => {

@@ -12,6 +12,7 @@ import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { getYearInTimeZone, resolveTimeZone, toDateKeyInTimeZone } from '../../common/utils/timezone.utils';
 import type { RequestUser } from '../../common/types/request-user';
 
+import { LibraryAccessService } from '../library/library-access.service';
 import { NotificationService } from '../notification/notification.service';
 import { UserService } from '../user/user.service';
 import { AchievementRepository } from './achievement.repository';
@@ -44,6 +45,7 @@ export class AchievementService implements OnModuleInit, OnModuleDestroy {
     private readonly registry: EvaluatorRegistry,
     private readonly notificationService: NotificationService,
     private readonly userService: UserService,
+    private readonly libraryAccess: LibraryAccessService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -194,7 +196,8 @@ export class AchievementService implements OnModuleInit, OnModuleDestroy {
 
   private async getAccessibleContextBookIds(user: RequestUser, awards: UserAchievementRow[]): Promise<Set<number>> {
     const ids = awards.map((award) => this.contextBookId(award.contextJson)).filter((id): id is number => id !== null);
-    return this.repo.findAccessibleBookIds(user.id, user.isSuperuser, ids);
+    if (ids.length === 0) return new Set();
+    return this.repo.findAccessibleBookIds(await this.libraryAccess.findAccessibleLibraryIds(user), ids);
   }
 
   private toItem(
@@ -394,7 +397,7 @@ export class AchievementService implements OnModuleInit, OnModuleDestroy {
       case 'author_deep_dive':
         return this.repo.maxBooksPerAuthor(userId);
       case 'multi_format':
-        return this.repo.countDistinctFormats(userId, isSuperuser);
+        return this.repo.countDistinctFormats(await this.libraryAccess.findAccessibleLibraryIds({ id: userId, isSuperuser }));
       case 'century_span':
         return this.repo.countDistinctCenturiesRead(userId);
       case 'decade_sampler':
@@ -452,7 +455,7 @@ export class AchievementService implements OnModuleInit, OnModuleDestroy {
       case 'hours_read':
         return this.repo.sumReadingHours(userId);
       case 'library_builder':
-        return this.repo.countAccessibleBooks(userId, isSuperuser);
+        return this.repo.countAccessibleBooks(await this.libraryAccess.findAccessibleLibraryIds({ id: userId, isSuperuser }));
       case 'annotator':
         return this.repo.countAnnotations(userId);
       case 'genre_explorer':

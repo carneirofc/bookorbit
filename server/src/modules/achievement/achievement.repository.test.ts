@@ -471,50 +471,44 @@ describe('AchievementRepository', () => {
   });
 
   describe('countAccessibleBooks', () => {
-    it('counts all present books for superuser without join', async () => {
-      const chain = makeSelectChain([{ value: 100 }]);
-      const db = { select: vi.fn().mockReturnValue(chain) };
-      const repo = makeRepo(db);
-
-      const result = await repo.countAccessibleBooks(1, true);
-
-      expect(result).toBe(100);
-      expect(chain.innerJoin).not.toHaveBeenCalled();
-    });
-
-    it('counts books via library access join for regular user', async () => {
+    it('counts present books in the given libraries', async () => {
       const chain = makeSelectChain([{ value: 25 }]);
       const db = { select: vi.fn().mockReturnValue(chain) };
       const repo = makeRepo(db);
 
-      const result = await repo.countAccessibleBooks(1, false);
+      const result = await repo.countAccessibleBooks([1, 2]);
 
       expect(result).toBe(25);
-      expect(chain.innerJoin).toHaveBeenCalledOnce();
+      expect(chain.innerJoin).not.toHaveBeenCalled();
+    });
+
+    it('returns 0 without querying when no libraries are accessible', async () => {
+      const db = { select: vi.fn() };
+      const repo = makeRepo(db);
+
+      await expect(repo.countAccessibleBooks([])).resolves.toBe(0);
+      expect(db.select).not.toHaveBeenCalled();
     });
   });
 
   describe('countDistinctFormats', () => {
-    it('counts formats without join for superuser', async () => {
-      const chain = makeSelectChain([{ value: 3 }]);
-      const db = { select: vi.fn().mockReturnValue(chain) };
-      const repo = makeRepo(db);
-
-      const result = await repo.countDistinctFormats(1, true);
-
-      expect(result).toBe(3);
-      expect(chain.innerJoin).not.toHaveBeenCalled();
-    });
-
-    it('counts formats via library join for regular user', async () => {
+    it('counts formats of books in the given libraries', async () => {
       const chain = makeSelectChain([{ value: 2 }]);
       const db = { select: vi.fn().mockReturnValue(chain) };
       const repo = makeRepo(db);
 
-      const result = await repo.countDistinctFormats(1, false);
+      const result = await repo.countDistinctFormats([1, 2]);
 
       expect(result).toBe(2);
-      expect(chain.innerJoin).toHaveBeenCalled();
+      expect(chain.innerJoin).toHaveBeenCalledOnce();
+    });
+
+    it('returns 0 without querying when no libraries are accessible', async () => {
+      const db = { select: vi.fn() };
+      const repo = makeRepo(db);
+
+      await expect(repo.countDistinctFormats([])).resolves.toBe(0);
+      expect(db.select).not.toHaveBeenCalled();
     });
   });
 

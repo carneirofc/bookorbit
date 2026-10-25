@@ -18,21 +18,21 @@ export class PodcastAccessService {
   async requireEpisodeAccess(episodeId: number, user: RequestUser, required: AccessLevel = 'viewer') {
     const context = await this.episodes.findEpisodeForUser(episodeId, user.id);
     if (!context) throw new NotFoundException('Podcast episode not found');
-    await this.libraries.verifyUserAccessLevel(user.id, context.podcast.libraryId, user.isSuperuser, required);
+    await this.libraries.verifyUserAccessLevel(user, context.podcast.libraryId, required);
     return context;
   }
 
   async requirePodcastAccess(podcastId: number, user: RequestUser, required: AccessLevel = 'viewer') {
     const podcast = await this.catalog.findPodcast(podcastId);
     if (!podcast) throw new NotFoundException('Podcast not found');
-    await this.libraries.verifyUserAccessLevel(user.id, podcast.libraryId, user.isSuperuser, required);
+    await this.libraries.verifyUserAccessLevel(user, podcast.libraryId, required);
     return podcast;
   }
 
   async requireBookmarkAccess(bookmarkId: number, user: RequestUser): Promise<void> {
     const bookmark = await this.playback.findBookmarkAccess(user.id, bookmarkId);
     if (!bookmark) throw new NotFoundException('Podcast bookmark not found');
-    await this.libraries.verifyUserAccessLevel(user.id, bookmark.libraryId, user.isSuperuser, 'viewer');
+    await this.libraries.verifyUserAccessLevel(user, bookmark.libraryId, 'viewer');
   }
 
   /**
@@ -53,7 +53,7 @@ export class PodcastAccessService {
    */
   async requirePodcastLibraryAccess(libraryId: number, user: RequestUser, required: AccessLevel = 'viewer') {
     const library = await this.requirePodcastLibrary(libraryId);
-    await this.libraries.verifyUserAccessLevel(user.id, libraryId, user.isSuperuser, required);
+    await this.libraries.verifyUserAccessLevel(user, libraryId, required);
     return library;
   }
 }

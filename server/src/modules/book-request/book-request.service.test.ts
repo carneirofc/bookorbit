@@ -771,7 +771,7 @@ describe('BookRequestService.submit on behalf of another user', () => {
 
     await service.submit({ ...dto, userId: 42, targetLibraryId: 5 }, moderator());
 
-    expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(42, 5, false);
+    expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(expect.objectContaining({ id: 42, isSuperuser: false }), 5);
   });
 
   /**

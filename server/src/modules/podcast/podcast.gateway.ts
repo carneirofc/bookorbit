@@ -80,7 +80,7 @@ export class PodcastGateway implements OnGatewayInit, OnGatewayConnection, OnGat
     const user = await resolveSocketUser(client);
     if (!user || !Number.isInteger(libraryId) || libraryId <= 0) return;
     try {
-      await this.libraries.verifyUserAccess(user.id, libraryId, user.isSuperuser);
+      await this.libraries.verifyUserAccess(user, libraryId);
       await client.join(`library:${libraryId}`);
     } catch {
       client.emit('podcast:subscription:error', { libraryId });

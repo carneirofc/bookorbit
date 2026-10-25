@@ -471,7 +471,7 @@ describe('BookDockFinalizeService', () => {
       } as never);
       vi.spyOn(service as never, 'emitChange').mockReturnValue(undefined as never);
 
-      const result = await service.finalize(7, true, true, [1, 2], false, [], 5, 9);
+      const result = await service.finalize(7, null, true, [1, 2], false, [], 5, 9);
 
       expect(result.total).toBe(2);
       expect(result.succeeded).toBe(1);
@@ -512,7 +512,7 @@ describe('BookDockFinalizeService', () => {
       );
       vi.spyOn(service as never, 'emitChange').mockReturnValue(undefined as never);
 
-      const result = await service.finalize(7, true, true, [], true, [], 5, 9, [], undefined, 'foo', undefined, true);
+      const result = await service.finalize(7, null, true, [], true, [], 5, 9, [], undefined, 'foo', undefined, true);
 
       expect(repo.findSelectionBatch).toHaveBeenCalledTimes(2);
       expect(repo.findSelectionBatch).toHaveBeenCalledWith(expect.objectContaining({ readyToFile: true }));
@@ -525,7 +525,7 @@ describe('BookDockFinalizeService', () => {
     it('fails early when destination library or folder is missing', async () => {
       const { service } = makeService();
 
-      await expect((service as any).finalizeFile(makeRow(), undefined, undefined, new Map(), 1, true)).resolves.toEqual({
+      await expect((service as any).finalizeFile(makeRow(), undefined, undefined, new Map(), 1, null)).resolves.toEqual({
         fileId: 1,
         fileName: 'book.epub',
         success: false,
@@ -546,7 +546,7 @@ describe('BookDockFinalizeService', () => {
         undefined,
         new Map(),
         1,
-        true,
+        null,
       );
 
       expect(result).toMatchObject({
@@ -567,7 +567,7 @@ describe('BookDockFinalizeService', () => {
       mockAccess.mockResolvedValueOnce(undefined as never);
 
       await expect(
-        (service as any).finalizeFile(makeRow({ targetLibraryId: 5, targetFolderId: 9 }), undefined, undefined, new Map(), 1, true),
+        (service as any).finalizeFile(makeRow({ targetLibraryId: 5, targetFolderId: 9 }), undefined, undefined, new Map(), 1, null),
       ).resolves.toEqual(
         expect.objectContaining({
           success: false,
@@ -600,7 +600,7 @@ describe('BookDockFinalizeService', () => {
         undefined,
         new Map(),
         1,
-        true,
+        null,
       );
 
       expect(result).toMatchObject({ success: true, bookId: 77 });
@@ -617,7 +617,7 @@ describe('BookDockFinalizeService', () => {
       processor.createUnitBookRecords.mockRejectedValueOnce(new Error('create failed'));
 
       await expect(
-        (service as any).finalizeFile(makeRow({ targetLibraryId: 5, targetFolderId: 9 }), undefined, undefined, new Map(), 1, true),
+        (service as any).finalizeFile(makeRow({ targetLibraryId: 5, targetFolderId: 9 }), undefined, undefined, new Map(), 1, null),
       ).resolves.toEqual(
         expect.objectContaining({
           success: false,
@@ -649,7 +649,7 @@ describe('BookDockFinalizeService', () => {
         undefined,
         new Map(),
         1,
-        true,
+        null,
       );
 
       expect(result).toEqual(
@@ -675,7 +675,7 @@ describe('BookDockFinalizeService', () => {
       processor.createUnitBookRecords.mockResolvedValueOnce({ bookIds: [555], createdBookIds: [555], attachedFileIds: [] });
 
       await expect(
-        (service as any).finalizeFile(makeRow({ targetLibraryId: 5, targetFolderId: 9 }), undefined, undefined, new Map(), 1, true),
+        (service as any).finalizeFile(makeRow({ targetLibraryId: 5, targetFolderId: 9 }), undefined, undefined, new Map(), 1, null),
       ).resolves.toEqual({
         fileId: 1,
         fileName: 'book.epub',
@@ -722,7 +722,7 @@ describe('BookDockFinalizeService', () => {
         mockStat.mockResolvedValueOnce({ size: 100 } as never);
         processor.createUnitBookRecords.mockResolvedValueOnce({ bookIds: [42], createdBookIds: [], attachedFileIds: [900] });
 
-        await expect((service as any).finalizeFile(audioRow(), undefined, undefined, new Map([[1, { joinBook }]]), 1, true)).resolves.toMatchObject({
+        await expect((service as any).finalizeFile(audioRow(), undefined, undefined, new Map([[1, { joinBook }]]), 1, null)).resolves.toMatchObject({
           success: true,
           bookId: 42,
         });
@@ -745,7 +745,7 @@ describe('BookDockFinalizeService', () => {
         mockStat.mockResolvedValueOnce({ size: 100 } as never);
         processor.createUnitBookRecords.mockResolvedValueOnce({ bookIds: [42], createdBookIds: [], attachedFileIds: [900] });
 
-        await (service as any).finalizeFile(audioRow(), undefined, undefined, new Map([[1, { joinBook }]]), 1, true);
+        await (service as any).finalizeFile(audioRow(), undefined, undefined, new Map([[1, { joinBook }]]), 1, null);
 
         expect(metadataService.measureMissingAudioDurations.mock.calls).toEqual([[42]]);
       });
@@ -757,7 +757,7 @@ describe('BookDockFinalizeService', () => {
         mockAccess.mockRejectedValueOnce(Object.assign(new Error('not found'), { code: 'ENOENT' }));
         mockStat.mockResolvedValueOnce({ size: 100 } as never);
 
-        await (service as any).finalizeFile(audioRow(), undefined, undefined, new Map([[1, { joinBook }]]), 1, true);
+        await (service as any).finalizeFile(audioRow(), undefined, undefined, new Map([[1, { joinBook }]]), 1, null);
 
         expect(storage.moveToPath).toHaveBeenCalledWith('/tmp/dune.m4b', '/library/Frank Herbert/Dune (Unabridged)/Dune (Unabridged).m4b');
       });
@@ -775,7 +775,7 @@ describe('BookDockFinalizeService', () => {
           undefined,
           new Map([[1, { joinBook: { bookId: 42, folderPath: '/elsewhere/Dune' } }]]),
           1,
-          true,
+          null,
         );
 
         expect(storage.moveToPath).toHaveBeenCalledWith('/tmp/dune.m4b', '/library/Frank Herbert/Dune (Unabridged)/Dune (Unabridged).m4b');
@@ -921,7 +921,7 @@ describe('BookDockFinalizeService', () => {
       const row = makeRow({ targetLibraryId: 5, targetFolderId: 9, selectedMetadata: defaultPatternMetadata() });
       const destPath = '/library/Frank Herbert/Dune/01. Dune (1965).epub';
 
-      await expect((service as any).finalizeFile(row, undefined, undefined, new Map(), 1, true)).resolves.toEqual({
+      await expect((service as any).finalizeFile(row, undefined, undefined, new Map(), 1, null)).resolves.toEqual({
         fileId: 1,
         fileName: 'book.epub',
         newName: 'Frank Herbert/Dune/01. Dune (1965).epub',
@@ -959,7 +959,7 @@ describe('BookDockFinalizeService', () => {
       processor.createUnitBookRecords.mockResolvedValueOnce({ bookIds: [556], createdBookIds: [556], attachedFileIds: [] });
 
       await expect(
-        (service as any).finalizeFile(makeRow({ targetLibraryId: 5, targetFolderId: 9 }), undefined, undefined, new Map(), 1, true),
+        (service as any).finalizeFile(makeRow({ targetLibraryId: 5, targetFolderId: 9 }), undefined, undefined, new Map(), 1, null),
       ).resolves.toMatchObject({ success: true, bookId: 556 });
       expect(processor.createUnitBookRecords).toHaveBeenCalledWith(5, 9, [
         {
@@ -996,7 +996,7 @@ describe('BookDockFinalizeService', () => {
           targetFolderId: 9,
           selectedMetadata: { title, authors: ['Test Author'], publishedYear: 2024 },
         });
-        const result = await (service as any).finalizeFile(row, undefined, undefined, new Map(), 1, true);
+        const result = await (service as any).finalizeFile(row, undefined, undefined, new Map(), 1, null);
 
         expect(result).toMatchObject({ success: true, bookId: 101 + index, newName: `${title} - Test Author - 2024.epub` });
         const destPath = `/library/${title} - Test Author - 2024.epub`;
@@ -1030,7 +1030,7 @@ describe('BookDockFinalizeService', () => {
         undefined,
         new Map(),
         1,
-        true,
+        null,
       );
 
       expect(result).toMatchObject({ success: true, newName: 'dune.epub' });
@@ -1064,7 +1064,7 @@ describe('BookDockFinalizeService', () => {
           undefined,
           overrideMap,
           1,
-          true,
+          null,
         );
 
         expect(result).toMatchObject({ success: true, bookId: 42 });
@@ -1150,7 +1150,7 @@ describe('BookDockFinalizeService', () => {
         undefined,
         overrideMap,
         1,
-        true,
+        null,
       );
 
       expect(result).toMatchObject({ success: true, bookId: 500 });
@@ -1220,7 +1220,7 @@ describe('BookDockFinalizeService', () => {
         undefined,
         overrideMap,
         1,
-        true,
+        null,
       );
 
       expect(result).toMatchObject({
@@ -1247,7 +1247,7 @@ describe('BookDockFinalizeService', () => {
       } as never);
       vi.spyOn(service as never, 'emitChange').mockReturnValue(undefined as never);
 
-      await service.finalize(1, true, true, [4], false, [], 5, 9, [{ fileId: 4, targetFileName: '1_alt' }]);
+      await service.finalize(1, null, true, [4], false, [], 5, 9, [{ fileId: 4, targetFileName: '1_alt' }]);
 
       const overrideMapPassed = prepareSpy.mock.calls[0]?.[3] as Map<number, unknown>;
       expect(overrideMapPassed.get(4)).toMatchObject({ fileId: 4, targetFileName: '1_alt' });
@@ -1277,7 +1277,7 @@ describe('BookDockFinalizeService', () => {
         undefined,
         overrideMap,
         1,
-        true,
+        null,
       );
 
       expect(result).toMatchObject({ success: true });
@@ -1348,7 +1348,7 @@ describe('BookDockFinalizeService', () => {
         return Promise.resolve(undefined) as never;
       });
 
-      const preview = await service.previewFinalize(1, true, true, [1, 2, 3], false, [], undefined, undefined);
+      const preview = await service.previewFinalize(1, null, true, [1, 2, 3], false, [], undefined, undefined);
 
       expect(preview).toMatchObject({
         total: 3,
@@ -1399,7 +1399,7 @@ describe('BookDockFinalizeService', () => {
         return Promise.resolve(undefined) as never;
       });
 
-      const result = await service.discardDuplicateCandidates(1, true, true, [1, 2, 3], false, [], undefined, undefined);
+      const result = await service.discardDuplicateCandidates(1, null, true, [1, 2, 3], false, [], undefined, undefined);
 
       expect(result).toEqual({ total: 3, discarded: 1, skipped: 2, discardedFileIds: [1] });
       expect(mockUnlink).toHaveBeenCalledWith('/dock/duplicate.epub');
@@ -2169,7 +2169,7 @@ describe('BookDockFinalizeService', () => {
     }
 
     function finalize(harness: ReturnType<typeof makeService>, row: ReturnType<typeof unitRow>) {
-      return (harness.service as any).finalizeFile(row, undefined, undefined, new Map(), 1, true);
+      return (harness.service as any).finalizeFile(row, undefined, undefined, new Map(), 1, null);
     }
 
     /**
@@ -2609,7 +2609,7 @@ describe('BookDockFinalizeService', () => {
     } as never);
     vi.spyOn(harness.service as never, 'findFolderOrFail').mockResolvedValue({ id: 9, libraryId: 5, path: '/library' } as never);
 
-    const result = await (harness.service as any).finalizeFile(row, undefined, undefined, new Map(), 1, true);
+    const result = await (harness.service as any).finalizeFile(row, undefined, undefined, new Map(), 1, null);
 
     expect(result.success).toBe(false);
     expect(result.message).toBe('Filing this book failed inside BookOrbit. Check the server log for the cause.');
@@ -2705,7 +2705,7 @@ describe('BookDockFinalizeService', () => {
       Promise.resolve(`/library/${row.fileName}`),
     );
 
-    const prepared = await (service as any).prepareFinalizeBatch(rows, 5, 9, new Map(), 1, true);
+    const prepared = await (service as any).prepareFinalizeBatch(rows, 5, 9, new Map(), 1, null);
 
     expect(prepared.analyses.map((analysis: { status: string }) => analysis.status)).toEqual(['ready', 'ready']);
     expect(repo.findExistingBooksByAbsolutePaths).toHaveBeenCalledOnce();

@@ -329,7 +329,7 @@ describe('EpubService', () => {
         ],
       }),
     );
-    expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(10, 3, false);
+    expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(expect.objectContaining({ id: 10, isSuperuser: false }), 3);
   });
 
   it('falls back to NCX TOC when nav parsing fails', async () => {

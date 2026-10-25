@@ -786,7 +786,7 @@ export class BookRequestService {
   private async resolveRequestedLibrary(targetLibraryId: number | null, user: RequestUser): Promise<number | null> {
     if (targetLibraryId === null) return null;
     try {
-      await this.libraryService.verifyUserAccess(user.id, targetLibraryId, user.isSuperuser);
+      await this.libraryService.verifyUserAccess(user, targetLibraryId);
     } catch (error) {
       // The rule belongs to the library service; only the sentence is ours, and the form has to be
       // able to translate this the way it translates every other reason a submission is refused.
@@ -1124,7 +1124,7 @@ export class BookRequestService {
     // The approver may reroute, but only somewhere they can reach themselves.
     let targetLibraryId = joined.request.targetLibraryId;
     if (dto.targetLibraryId !== undefined && dto.targetLibraryId !== null) {
-      await this.libraryService.verifyUserAccess(user.id, dto.targetLibraryId, user.isSuperuser);
+      await this.libraryService.verifyUserAccess(user, dto.targetLibraryId);
       targetLibraryId = dto.targetLibraryId;
     }
 

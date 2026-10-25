@@ -258,7 +258,7 @@ describe('PodcastCatalogService', () => {
 
     await catalogService.updatePodcastConfig(3, { acquisitionPolicy: 'remote_only', refreshIntervalMinutes: 120 }, requestUser());
 
-    expect(libraries.verifyUserAccessLevel).toHaveBeenCalledWith(5, 7, false, 'editor');
+    expect(libraries.verifyUserAccessLevel).toHaveBeenCalledWith(expect.objectContaining({ id: 5, isSuperuser: false }), 7, 'editor');
     expect(repo.updatePodcast).toHaveBeenCalledWith(3, { acquisitionPolicy: 'remote_only', refreshIntervalMinutes: 120 });
   });
 

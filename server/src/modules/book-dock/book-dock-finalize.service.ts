@@ -45,6 +45,7 @@ import { BookReadService } from '../book/book-read.service';
 import { NotificationService } from '../notification/notification.service';
 import { SeriesIdentityService } from '../../common/services/series-identity.service';
 import { SeriesMembershipService } from '../../common/services/series-membership.service';
+import type { RequestUser } from '../../common/types/request-user';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { resolveExistingPathSpelling } from '../../common/utils/path-identity.utils';
 import { resolveSingleFileBookPath } from '../../common/utils/book-path.utils';
@@ -280,7 +281,7 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
 
   async finalize(
     userId: number,
-    isSuperuser: boolean,
+    actor: RequestUser | null,
     canManageAll: boolean,
     fileIds: number[] | undefined,
     selectAll: boolean | undefined,
@@ -316,7 +317,7 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
         });
         if (rows.length === 0) break;
 
-        const prepared = await this.prepareFinalizeBatch(rows, defaultLibraryId, defaultFolderId, overrideMap, userId, isSuperuser);
+        const prepared = await this.prepareFinalizeBatch(rows, defaultLibraryId, defaultFolderId, overrideMap, userId, actor);
         for (const analysis of prepared.analyses) {
           const result = await this.finalizePreparedCandidate(analysis, prepared.existingDestinations);
           results.push(result);
@@ -330,7 +331,7 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
       for (let i = 0; i < ids.length; i += BATCH_SIZE) {
         const batch = ids.slice(i, i + BATCH_SIZE);
         const rows = await this.repo.findByIds(batch, userId, canManageAll);
-        const prepared = await this.prepareFinalizeBatch(rows, defaultLibraryId, defaultFolderId, overrideMap, userId, isSuperuser);
+        const prepared = await this.prepareFinalizeBatch(rows, defaultLibraryId, defaultFolderId, overrideMap, userId, actor);
         const analysisById = new Map(prepared.analyses.map((analysis) => [analysis.fileId, analysis]));
 
         for (const fileId of batch) {
@@ -375,9 +376,13 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
     defaultFolderId: number | undefined,
     overrideMap: Map<number, FinalizeOverrideEntry>,
     userId: number,
-    isSuperuser: boolean,
+    /**
+     * The user driving the finalize. null means system-driven (auto-finalize / managed import), which
+     * skips the per-library access check because those imports keep working into any library.
+     */
+    actor: RequestUser | null,
   ): Promise<BookDockFinalizeFileResult> {
-    const prepared = await this.prepareFinalizeBatch([row], defaultLibraryId, defaultFolderId, overrideMap, userId, isSuperuser);
+    const prepared = await this.prepareFinalizeBatch([row], defaultLibraryId, defaultFolderId, overrideMap, userId, actor);
     const analysis = prepared.analyses[0];
     if (!analysis) {
       return { fileId: row.id, fileName: row.fileName, success: false, message: 'Finalization target could not be resolved' };
@@ -464,7 +469,7 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
 
   async previewFinalize(
     userId: number,
-    isSuperuser: boolean,
+    actor: RequestUser | null,
     canManageAll: boolean,
     fileIds: number[] | undefined,
     selectAll: boolean | undefined,
@@ -491,7 +496,7 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
       needsReview,
       readyToFile,
       async (rows, missingIds) => {
-        const prepared = await this.prepareFinalizeBatch(rows, defaultLibraryId, defaultFolderId, overrideMap, userId, isSuperuser);
+        const prepared = await this.prepareFinalizeBatch(rows, defaultLibraryId, defaultFolderId, overrideMap, userId, actor);
         for (const candidate of prepared.analyses) {
           const analysis = await this.classifyDestination(candidate, prepared.existingDestinations);
           addFinalizePreviewAnalysis(summary, analysis);
@@ -512,7 +517,7 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
 
   async discardDuplicateCandidates(
     userId: number,
-    isSuperuser: boolean,
+    actor: RequestUser | null,
     canManageAll: boolean,
     fileIds: number[] | undefined,
     selectAll: boolean | undefined,
@@ -546,7 +551,7 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
         readyToFile,
         async (rows, missingIds) => {
           total += rows.length + missingIds.length;
-          const prepared = await this.prepareFinalizeBatch(rows, defaultLibraryId, defaultFolderId, overrideMap, userId, isSuperuser);
+          const prepared = await this.prepareFinalizeBatch(rows, defaultLibraryId, defaultFolderId, overrideMap, userId, actor);
           const duplicateRows: BookDockFileRow[] = [];
 
           for (const candidate of prepared.analyses) {
@@ -587,7 +592,7 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
     defaultFolderId: number | undefined,
     overrideMap: Map<number, FinalizeOverrideEntry>,
     userId: number,
-    isSuperuser: boolean,
+    actor: RequestUser | null,
   ): Promise<FinalizeCandidateAnalysis> {
     try {
       const override = overrideMap.get(row.id);
@@ -605,7 +610,7 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
       }
 
       const library = await this.findLibraryOrFail(libraryId);
-      await this.libraryService.verifyUserAccess(userId, libraryId, isSuperuser);
+      if (actor) await this.libraryService.verifyUserAccess(actor, libraryId);
 
       const folder = await this.findFolderOrFail(folderId, libraryId);
       const format = row.format ?? extname(row.fileName).toLowerCase().slice(1);
@@ -677,11 +682,11 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
     defaultFolderId: number | undefined,
     overrideMap: Map<number, FinalizeOverrideEntry>,
     userId: number,
-    isSuperuser: boolean,
+    actor: RequestUser | null,
   ): Promise<{ analyses: FinalizeCandidateAnalysis[]; existingDestinations: Map<string, number> }> {
     const analyses: FinalizeCandidateAnalysis[] = [];
     for (const row of rows) {
-      analyses.push(await this.resolveFinalizeCandidate(row, defaultLibraryId, defaultFolderId, overrideMap, userId, isSuperuser));
+      analyses.push(await this.resolveFinalizeCandidate(row, defaultLibraryId, defaultFolderId, overrideMap, userId, actor));
     }
 
     const destinationPaths = analyses.filter((analysis) => analysis.status === 'ready' && analysis.destPath).map((analysis) => analysis.destPath!);
@@ -1017,7 +1022,7 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
       : row;
 
     const overrideMap = new Map<number, FinalizeOverrideEntry>(lookedUpCoverUrl ? [[row.id, { lookedUpCoverUrl }]] : []);
-    const result = await this.finalizeFile(rowForFinalize, settings.libraryId, settings.folderId, overrideMap, 0, true);
+    const result = await this.finalizeFile(rowForFinalize, settings.libraryId, settings.folderId, overrideMap, 0, null);
     if (result.success) {
       this.logger.log(`Auto-finalized Book Dock file ${fileId} -> book ${result.bookId} (confidence ${row.confidence}%)`);
       this.emitChange();
@@ -1065,7 +1070,7 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
       [fileId, { libraryId: override.libraryId, folderId: override.folderId, joinBook: override.joinBook, lookedUpCoverUrl }],
     ]);
 
-    const result = await this.finalizeFile(rowForFinalize, undefined, undefined, overrideMap, 0, true);
+    const result = await this.finalizeFile(rowForFinalize, undefined, undefined, overrideMap, 0, null);
     if (result.success) this.emitChange();
     return result;
   }

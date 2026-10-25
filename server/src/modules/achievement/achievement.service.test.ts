@@ -65,6 +65,7 @@ function makeUserService() {
 describe('AchievementService', () => {
   let service: AchievementService;
   let repo: ReturnType<typeof makeRepo>;
+  let libraryAccess: { findAccessibleLibraryIds: ReturnType<typeof vi.fn> };
   let events: AchievementEventsService;
   let registry: ReturnType<typeof makeRegistry>;
   let notificationService: ReturnType<typeof makeNotificationService>;
@@ -77,7 +78,15 @@ describe('AchievementService', () => {
     registry = makeRegistry();
     notificationService = makeNotificationService();
     userService = makeUserService();
-    service = new AchievementService(repo as never, events, registry as never, notificationService as never, userService as never);
+    libraryAccess = { findAccessibleLibraryIds: vi.fn().mockResolvedValue([4, 9]) };
+    service = new AchievementService(
+      repo as never,
+      events,
+      registry as never,
+      notificationService as never,
+      userService as never,
+      libraryAccess as never,
+    );
   });
 
   describe('onModuleInit', () => {

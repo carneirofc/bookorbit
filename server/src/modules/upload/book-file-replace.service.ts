@@ -63,7 +63,7 @@ export class BookFileReplaceService {
     );
 
     const target = await this.findTarget(bookId, fileId);
-    await this.libraryService.verifyUserAccess(user.id, target.libraryId, user.isSuperuser);
+    await this.libraryService.verifyUserAccess(user, target.libraryId);
 
     if (target.role !== 'content') {
       throw new BadRequestException('Only content files can be replaced');

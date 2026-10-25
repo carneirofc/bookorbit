@@ -51,8 +51,8 @@ describe('PodcastGateway', () => {
     await gateway.handleSubscribeLibrary(client as never, 7);
     await gateway.handleSubscribeLibrary(client as never, 8);
 
-    expect(libraries.verifyUserAccess).toHaveBeenNthCalledWith(1, 42, 7, false);
-    expect(libraries.verifyUserAccess).toHaveBeenNthCalledWith(2, 42, 8, false);
+    expect(libraries.verifyUserAccess).toHaveBeenNthCalledWith(1, expect.objectContaining({ id: 42, isSuperuser: false }), 7);
+    expect(libraries.verifyUserAccess).toHaveBeenNthCalledWith(2, expect.objectContaining({ id: 42, isSuperuser: false }), 8);
     expect(client.join).toHaveBeenCalledOnce();
     expect(client.join).toHaveBeenCalledWith('library:7');
     expect(client.emit).toHaveBeenCalledWith('podcast:subscription:error', { libraryId: 8 });
@@ -81,7 +81,7 @@ describe('PodcastGateway', () => {
     finishSessionCheck({ id: 42, username: 'listener', isSuperuser: false });
     await Promise.all([connected, subscribed]);
 
-    expect(libraries.verifyUserAccess).toHaveBeenCalledWith(42, 7, false);
+    expect(libraries.verifyUserAccess).toHaveBeenCalledWith(expect.objectContaining({ id: 42, isSuperuser: false }), 7);
     expect(client.join).toHaveBeenCalledWith('library:7');
   });
 

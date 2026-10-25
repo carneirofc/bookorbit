@@ -84,7 +84,7 @@ describe('RecommendationService', () => {
 
     await service.getRecommendations(1, user);
 
-    expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(user.id, 21, true);
+    expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(expect.objectContaining({ id: user.id, isSuperuser: true }), 21);
   });
 
   it('uses fallback embedding when the target book has no metadata row', async () => {
@@ -360,7 +360,7 @@ describe('RecommendationService', () => {
 
       await service.getSeriesBooks(1, makeUser(true));
 
-      expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(12, 21, true);
+      expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(expect.objectContaining({ id: 12, isSuperuser: true }), 21);
     });
 
     it('returns empty array when the book has no series', async () => {
@@ -479,7 +479,7 @@ describe('RecommendationService', () => {
 
       await service.getAuthorBooks(1, makeUser(true));
 
-      expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(12, 21, true);
+      expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(expect.objectContaining({ id: 12, isSuperuser: true }), 21);
     });
 
     it('returns books by the same author excluding the current book', async () => {

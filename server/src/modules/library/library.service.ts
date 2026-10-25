@@ -2,15 +2,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { RegexMetadataService } from '../metadata/regex/regex-metadata.service';
 import { RegexMetadataPreviewDto, RegexMetadataValidationDto } from './dto/regex-metadata.dto';
 import { ReadingAttemptEventsService } from '../user-book-status/reading-attempt-events.service';
-import {
-  BadRequestException,
-  ConflictException,
-  ForbiddenException,
-  Injectable,
-  InternalServerErrorException,
-  Logger,
-  NotFoundException,
-} from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, InternalServerErrorException, Logger, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { readdir, realpath, rm, stat } from 'fs/promises';
 import { dirname, isAbsolute, join, relative } from 'path';
@@ -45,10 +37,10 @@ import {
   DEFAULT_LIBRARY_ADDED_AT_SOURCE,
   DEFAULT_LIBRARY_COVER_ASPECT_RATIO,
   DEFAULT_LIBRARY_ORGANIZATION_MODE,
-  EDITOR_ACCESS_LEVELS,
   LIBRARY_METADATA_PRECEDENCE_DEFAULT,
 } from './library.constants';
 import { resolveLibraryFolderRoles, type LibraryFolderInput } from './library-folder-roles.utils';
+import { LibraryAccessService, type LibraryAccessSubject } from './library-access.service';
 import { LibraryRepository } from './library.repository';
 import { LibraryScanSchedulerService } from './library-scan-scheduler.service';
 
@@ -115,22 +107,19 @@ export class LibraryService {
     private readonly scanScheduler: LibraryScanSchedulerService,
     private readonly regexMetadata: RegexMetadataService,
     private readonly readingAttemptEvents: ReadingAttemptEventsService,
+    private readonly libraryAccess: LibraryAccessService,
   ) {
     this.appDataPath = this.config.get<string>('storage.appDataPath')!;
   }
 
-  async verifyUserAccess(userId: number, libraryId: number, isSuperuser: boolean): Promise<void> {
-    if (isSuperuser) return;
-    const hasAccess = await this.libraryRepo.hasUserAccess(userId, libraryId);
-    if (!hasAccess) throw new ForbiddenException('No access to this library');
+  /** Throws `ForbiddenException` unless the user may read the library. See `LibraryAccessService`. */
+  verifyUserAccess(user: LibraryAccessSubject, libraryId: number): Promise<void> {
+    return this.libraryAccess.verifyUserAccess(user, libraryId);
   }
 
-  async verifyUserAccessLevel(userId: number, libraryId: number, isSuperuser: boolean, required: AccessLevel): Promise<void> {
-    if (isSuperuser) return;
-    const accessLevel = await this.libraryRepo.findUserAccessLevel(userId, libraryId);
-    const rank: Record<AccessLevel, number> = { viewer: 1, editor: 2, owner: 3 };
-    if (!accessLevel) throw new ForbiddenException('No access to this library');
-    if (rank[accessLevel] < rank[required]) throw new ForbiddenException('Insufficient library access level');
+  /** Throws `ForbiddenException` unless the user holds at least `required` on the library. */
+  verifyUserAccessLevel(user: LibraryAccessSubject, libraryId: number, required: AccessLevel): Promise<void> {
+    return this.libraryAccess.verifyUserAccessLevel(user, libraryId, required);
   }
 
   async findAll(user: RequestUser) {
@@ -155,27 +144,26 @@ export class LibraryService {
     }));
   }
 
+  /** Which of these users can open this library. See `LibraryAccessService.findUserIdsWithAccess`. */
+  findUserIdsWithAccess(libraryId: number, userIds: number[]): Promise<Set<number>> {
+    return this.libraryAccess.findUserIdsWithAccess(libraryId, userIds);
+  }
+
   /**
-   * Which of these users can open this library. Callers that hold user ids rather than whole
-   * users - a notifier resolving one link per recipient, for instance - cannot ask
-   * `verifyUserAccess`, which needs the superuser flag handed to it.
+   * Ids of every library the user may read. This is the one scope source for book listings,
+   * aggregates and statistics; never derive ids from `findAll(user)` or `user_library_access`.
    */
-  async findUserIdsWithAccess(libraryId: number, userIds: number[]): Promise<Set<number>> {
-    if (userIds.length === 0) return new Set();
-    const rows = await this.libraryRepo.findUserIdsWithAccess(libraryId, userIds);
-    return new Set(rows.map(({ id }) => id));
+  findAccessibleLibraryIds(user: LibraryAccessSubject): Promise<number[]> {
+    return this.libraryAccess.findAccessibleLibraryIds(user);
   }
 
-  async findAccessibleLibraryIds(user: RequestUser): Promise<number[]> {
-    const ids = user.isSuperuser ? await this.libraryRepo.findAllIds() : await this.libraryRepo.findAccessibleIdsForUser(user.id);
-    return ids.map(({ id }) => id);
+  /** Every accessible library, or only `libraryId` when given; empty when `libraryId` is not accessible. */
+  resolveBookScope(user: LibraryAccessSubject, libraryId?: number): Promise<number[]> {
+    return this.libraryAccess.resolveBookScope(user, libraryId);
   }
 
-  async findEditableLibraryIds(user: RequestUser): Promise<number[]> {
-    const ids = user.isSuperuser
-      ? await this.libraryRepo.findAllIds()
-      : await this.libraryRepo.findAccessibleIdsForUser(user.id, EDITOR_ACCESS_LEVELS);
-    return ids.map(({ id }) => id);
+  findEditableLibraryIds(user: LibraryAccessSubject): Promise<number[]> {
+    return this.libraryAccess.findEditableLibraryIds(user);
   }
 
   async findOne(id: number) {

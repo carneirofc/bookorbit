@@ -6,6 +6,7 @@ import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { resolveTimeZone, toDateKeyInTimeZone } from '../../common/utils/timezone.utils';
 import type { RequestUser } from '../../common/types/request-user';
 import type { AchievementRow } from '../../db/schema';
+import { LibraryAccessService } from '../library/library-access.service';
 import { AchievementRepository } from './achievement.repository';
 import { AchievementHintsRepository, type HintBookGroup, type HintResumeRow, type HintScope } from './achievement-hints.repository';
 import { OLD_SOUL_BEFORE_YEAR, SHORT_STORY_MAX_PAGES } from './evaluators/exploration.evaluator';
@@ -30,12 +31,19 @@ export class AchievementHintsService {
   constructor(
     private readonly achievements: AchievementRepository,
     private readonly hints: AchievementHintsRepository,
+    private readonly libraryAccess: LibraryAccessService,
   ) {}
 
   async getHints(user: RequestUser): Promise<AchievementHintsResponse> {
     const [catalogue, earnedKeys] = await Promise.all([this.achievements.findAllAchievements(), this.achievements.findUserEarnedKeys(user.id)]);
     const targets = nextTargets(catalogue, earnedKeys);
-    const scope: HintScope = { userId: user.id, isSuperuser: user.isSuperuser, contentFilters: user.isSuperuser ? undefined : user.contentFilters };
+    const accessibleLibraryIds = await this.libraryAccess.findAccessibleLibraryIds(user);
+    const scope: HintScope = {
+      userId: user.id,
+      isSuperuser: user.isSuperuser,
+      accessibleLibraryIds,
+      contentFilters: user.isSuperuser ? undefined : user.contentFilters,
+    };
     const timeZone = resolveTimeZone((user.settings as { timezone?: unknown } | undefined)?.timezone, 'UTC');
 
     let unrated: Promise<HintBookGroup> | null = null;

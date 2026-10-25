@@ -1,6 +1,6 @@
 import { deleteLibraryFoldersWithHashInvalidation } from '../../db/book-file-hash-history';
 import { Inject, Injectable } from '@nestjs/common';
-import { and, asc, eq, getTableColumns, gt, inArray, isNotNull, lte, or, sql } from 'drizzle-orm';
+import { and, asc, eq, getTableColumns, gt, inArray, isNotNull, lte, sql } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { APP_FEATURES, type AccessLevel, type ContentFilterRules, type LibraryStats } from '@bookorbit/types';
 
@@ -85,30 +85,12 @@ export class LibraryRepository {
       .orderBy(libraries.displayOrder, libraries.name);
   }
 
-  findAllIds() {
-    return this.db.select({ id: libraries.id }).from(libraries).where(visibleLibraryCondition).orderBy(libraries.displayOrder, libraries.name);
-  }
-
   findAutoScanSchedules() {
     return this.db
       .select({ id: libraries.id, autoScanCronExpression: libraries.autoScanCronExpression })
       .from(libraries)
       .where(isNotNull(libraries.autoScanCronExpression))
       .orderBy(libraries.id);
-  }
-
-  findAccessibleIdsForUser(userId: number, accessLevels?: readonly AccessLevel[]) {
-    const accessJoin = and(
-      eq(schema.userLibraryAccess.libraryId, libraries.id),
-      eq(schema.userLibraryAccess.userId, userId),
-      accessLevels ? inArray(schema.userLibraryAccess.accessLevel, [...accessLevels]) : undefined,
-    );
-    return this.db
-      .select({ id: libraries.id })
-      .from(libraries)
-      .innerJoin(schema.userLibraryAccess, accessJoin)
-      .where(visibleLibraryCondition)
-      .orderBy(libraries.displayOrder, libraries.name);
   }
 
   findById(id: number) {
@@ -391,17 +373,6 @@ export class LibraryRepository {
    * read alongside the grants: filtering on grants alone would report an administrator as having
    * access to nothing.
    */
-  findUserIdsWithAccess(libraryId: number, userIds: number[]) {
-    return this.db
-      .select({ id: schema.users.id })
-      .from(schema.users)
-      .leftJoin(
-        schema.userLibraryAccess,
-        and(eq(schema.userLibraryAccess.userId, schema.users.id), eq(schema.userLibraryAccess.libraryId, libraryId)),
-      )
-      .where(and(inArray(schema.users.id, userIds), or(eq(schema.users.isSuperuser, true), isNotNull(schema.userLibraryAccess.userId))));
-  }
-
   async getAddedAtRecomputeBounds(libraryId: number) {
     const [row] = await this.db
       .select({
@@ -468,21 +439,6 @@ export class LibraryRepository {
       .where(and(eq(books.libraryId, libraryId), sql`${books.id} = dates.id`, sql`${books.addedAt} = dates.previous_added_at`))
       .returning({ id: books.id });
     return result.map(({ id }) => id);
-  }
-
-  async hasUserAccess(userId: number, libraryId: number): Promise<boolean> {
-    const row = await this.db.query.userLibraryAccess.findFirst({
-      where: and(eq(schema.userLibraryAccess.userId, userId), eq(schema.userLibraryAccess.libraryId, libraryId)),
-    });
-    return row !== undefined;
-  }
-
-  async findUserAccessLevel(userId: number, libraryId: number): Promise<AccessLevel | null> {
-    const row = await this.db.query.userLibraryAccess.findFirst({
-      columns: { accessLevel: true },
-      where: and(eq(schema.userLibraryAccess.userId, userId), eq(schema.userLibraryAccess.libraryId, libraryId)),
-    });
-    return row?.accessLevel ?? null;
   }
 
   getAccess(libraryId: number) {
