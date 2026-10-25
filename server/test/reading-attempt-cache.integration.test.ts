@@ -16,6 +16,7 @@ import { UserBookStatusRepository } from '../src/modules/user-book-status/user-b
 import { KoboStatusProjectionRepository } from '../src/modules/user-book-status/kobo-status-projection.repository';
 import { AchievementEventsService } from '../src/modules/achievement/achievement-events.service';
 
+import { LibraryAccessService } from '../src/modules/library/library-access.service';
 import { UserStatisticsService } from '../src/modules/user-statistics/user-statistics.service';
 import { UserStatisticsRepository } from '../src/modules/user-statistics/user-statistics.repository';
 
@@ -90,6 +91,7 @@ describe('Reading attempt cache integration', () => {
         { provide: ReadingAttemptRepository, useValue: fake.repo },
         { provide: DashboardWidgetRepository, useValue: { countCompletedBooks, getCurrentlyReadingBooks: vi.fn().mockResolvedValue({ books: [] }) } },
         { provide: LibraryService, useValue: { findAccessibleLibraryIds: vi.fn().mockResolvedValue([1, 2]) } },
+        { provide: LibraryAccessService, useValue: { findAccessibleLibraryIds: vi.fn().mockResolvedValue([1, 2]) } },
       ],
     }).compile();
     await module.init();
