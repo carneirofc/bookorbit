@@ -12,7 +12,7 @@ function reqUser(overrides: Record<string, unknown> = {}) {
 
 function makeService() {
   const where = sql`1 = 1`;
-  const libraryService = { findAll: vi.fn().mockResolvedValue([{ id: 3 }, { id: 5 }]) };
+  const libraryService = { findAccessibleLibraryIds: vi.fn().mockResolvedValue([3, 5]) };
   const queryBuilder = { buildWhere: vi.fn().mockReturnValue(where) };
   const bookRepo = {
     findTagFacets: vi.fn().mockResolvedValue({ tags: [{ id: 1, name: 'fantasy', count: 4 }], truncated: false }),

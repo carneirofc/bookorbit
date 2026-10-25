@@ -57,8 +57,8 @@ describe('SeriesService', () => {
   };
 
   const libraryService = {
-    findAll: vi.fn(),
     findAccessibleLibraryIds: vi.fn(),
+    resolveBookScope: vi.fn(),
   };
 
   let service: SeriesService;
@@ -71,8 +71,12 @@ describe('SeriesService', () => {
       libraryService as any,
       { enrichCardFaces: vi.fn().mockResolvedValue(undefined) } as any,
     );
-    libraryService.findAll.mockResolvedValue([{ id: 1 }, { id: 2 }]);
     libraryService.findAccessibleLibraryIds.mockResolvedValue([1, 2]);
+    libraryService.resolveBookScope.mockImplementation(async (_user: unknown, libraryId?: number) => {
+      const ids: number[] = await libraryService.findAccessibleLibraryIds();
+      if (libraryId === undefined) return ids;
+      return ids.includes(libraryId) ? [libraryId] : [];
+    });
   });
 
   describe('countAll', () => {
@@ -93,7 +97,7 @@ describe('SeriesService', () => {
 
   describe('findAll', () => {
     it('returns empty page when user has no library access', async () => {
-      libraryService.findAll.mockResolvedValue([]);
+      libraryService.findAccessibleLibraryIds.mockResolvedValue([]);
       const result = await service.findAll(reqUser(), { page: 0, size: 50 });
       expect(result).toEqual({ items: [], total: 0, page: 0, size: 50, facets: EMPTY_FACETS });
       expect(seriesRepo.findPage).not.toHaveBeenCalled();
@@ -258,7 +262,7 @@ describe('SeriesService', () => {
 
   describe('findBooks', () => {
     it('throws NotFoundException when no libraries accessible', async () => {
-      libraryService.findAll.mockResolvedValue([]);
+      libraryService.findAccessibleLibraryIds.mockResolvedValue([]);
       await expect(service.findBooks(reqUser(), 42, {})).rejects.toBeInstanceOf(NotFoundException);
     });
 
@@ -648,7 +652,7 @@ describe('SeriesService', () => {
     });
 
     it('returns no next book without querying when the user has no library access', async () => {
-      libraryService.findAll.mockResolvedValue([]);
+      libraryService.findAccessibleLibraryIds.mockResolvedValue([]);
 
       await expect(service.findNextBook(reqUser(), 42, 90, {})).resolves.toEqual({ next: null });
       expect(seriesRepo.findNextReadableBook).not.toHaveBeenCalled();

@@ -615,8 +615,7 @@ export class BookService {
       return dto.bookIds;
     }
     if (dto.query) {
-      const libs = await this.libraryService.findAll(user);
-      let accessibleLibraryIds = libs.map((l) => l.id);
+      let accessibleLibraryIds = await this.libraryService.findAccessibleLibraryIds(user);
       const timeZone = this.resolveUserTimeZone(user);
       if (dto.query.libraryId !== undefined) {
         if (!accessibleLibraryIds.includes(dto.query.libraryId)) {
@@ -727,8 +726,7 @@ export class BookService {
     queryMeta?: MetadataExportContextMeta['query'];
   }> {
     if (dto.query) {
-      const libraries = await this.libraryService.findAll(user);
-      let accessibleLibraryIds = libraries.map((library) => library.id);
+      let accessibleLibraryIds = await this.libraryService.findAccessibleLibraryIds(user);
       const timeZone = this.resolveUserTimeZone(user);
       if (dto.query.libraryId !== undefined) {
         if (!accessibleLibraryIds.includes(dto.query.libraryId)) {
@@ -801,8 +799,7 @@ export class BookService {
     scope: MetadataExportSelectionScope;
   }> {
     if (dto.query) {
-      const libraries = await this.libraryService.findAll(user);
-      let accessibleLibraryIds = libraries.map((library) => library.id);
+      let accessibleLibraryIds = await this.libraryService.findAccessibleLibraryIds(user);
       const timeZone = this.resolveUserTimeZone(user);
       if (dto.query.libraryId !== undefined) {
         if (!accessibleLibraryIds.includes(dto.query.libraryId)) {
@@ -1179,8 +1176,7 @@ export class BookService {
 
   async globalQuery(user: RequestUser, query: BookQuery): Promise<BooksPage> {
     this.assertPaginationWindow(query.pagination.page, query.pagination.size);
-    const libs = await this.libraryService.findAll(user);
-    const accessibleLibraryIds = libs.map((l) => l.id);
+    const accessibleLibraryIds = await this.libraryService.findAccessibleLibraryIds(user);
     const timeZone = this.resolveUserTimeZone(user);
     const where = this.queryBuilder.buildWhere(query.filter, {
       accessibleLibraryIds,
@@ -1761,8 +1757,7 @@ export class BookService {
   }
 
   async searchAcrossLibraries(q: string, limit: number, user: RequestUser) {
-    const libs = await this.libraryService.findAll(user);
-    const libraryIds = libs.map((l) => l.id);
+    const libraryIds = await this.libraryService.findAccessibleLibraryIds(user);
     const contentFilters = this.isSuperuser(user) ? undefined : user.contentFilters;
     return this.bookRepo.searchAcrossLibraries(libraryIds, q, limit, contentFilters);
   }

@@ -27,9 +27,9 @@ export class BookTagFacetsService {
 
   async getTagFacets(user: RequestUser, query: ParsedTagFacetsQuery): Promise<TagFacetsResponse> {
     const start = Date.now();
-    const libraries = await this.libraryService.findAll(user);
+    const accessibleLibraryIds = await this.libraryService.findAccessibleLibraryIds(user);
     const where = this.queryBuilder.buildWhere(query.filter, {
-      accessibleLibraryIds: libraries.map((library) => library.id),
+      accessibleLibraryIds,
       userId: user.id,
       q: query.q,
       timeZone: resolveTimeZone((user.settings as { timezone?: unknown } | undefined)?.timezone, 'UTC'),

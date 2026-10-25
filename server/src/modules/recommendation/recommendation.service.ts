@@ -68,8 +68,7 @@ export class RecommendationService {
         return [];
       }
 
-      const accessibleLibraries = await this.libraryService.findAll(user);
-      const accessibleLibraryIds = accessibleLibraries.map((library) => library.id);
+      const accessibleLibraryIds = await this.libraryService.findAccessibleLibraryIds(user);
 
       const candidates = await this.recRepo.findAnnCandidates(
         embedding,

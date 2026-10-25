@@ -188,6 +188,7 @@ function makeService(
     verifyUserAccess: vi.fn().mockResolvedValue(undefined),
     verifyUserAccessLevel: vi.fn().mockResolvedValue(undefined),
     findAll: vi.fn().mockResolvedValue([]),
+    findAccessibleLibraryIds: vi.fn().mockResolvedValue([]),
     findOne: vi.fn().mockResolvedValue({ readingThreshold: 1, markAsFinishedPercentComplete: 99 }),
   };
   const queryBuilder = {
@@ -745,7 +746,7 @@ describe('BookService', () => {
     it('builds metadata export preflight for query selection', async () => {
       const { service, libraryService, queryBuilder, bookRepo } = makeService();
       const user = makeUser({ id: 12 });
-      libraryService.findAll.mockResolvedValue([{ id: 5, name: 'Main' }]);
+      libraryService.findAccessibleLibraryIds.mockResolvedValue([5]);
       queryBuilder.buildWhere.mockReturnValue('WHERE_CLAUSE' as never);
       bookRepo.countWhere.mockResolvedValue(42);
 
@@ -775,7 +776,7 @@ describe('BookService', () => {
     it('rejects metadata export preflight for inaccessible library query selections', async () => {
       const { service, libraryService } = makeService();
       const user = makeUser({ id: 99 });
-      libraryService.findAll.mockResolvedValue([{ id: 7, name: 'Allowed' }]);
+      libraryService.findAccessibleLibraryIds.mockResolvedValue([7]);
 
       await expect(
         service.getMetadataExportPreflight(
@@ -793,6 +794,7 @@ describe('BookService', () => {
       const { service, libraryService, queryBuilder, bookRepo } = makeService();
       const user = makeUser({ id: 7 });
       libraryService.findAll.mockResolvedValue([{ id: 5, name: 'Main Library' }]);
+      libraryService.findAccessibleLibraryIds.mockResolvedValue([5]);
       queryBuilder.buildWhere.mockReturnValue('WHERE_CLAUSE' as never);
       bookRepo.countWhere.mockResolvedValue(1);
       bookRepo.findLibraryIdsByBookIds.mockResolvedValue([{ id: 1, libraryId: 5 }]);
@@ -899,7 +901,7 @@ describe('BookService', () => {
     it('rejects metadata export preflight when projected payload estimate exceeds guardrail', async () => {
       const { service, libraryService, queryBuilder, bookRepo } = makeService();
       const user = makeUser();
-      libraryService.findAll.mockResolvedValue([{ id: 1, name: 'Main' }]);
+      libraryService.findAccessibleLibraryIds.mockResolvedValue([1]);
       queryBuilder.buildWhere.mockReturnValue('WHERE_CLAUSE' as never);
       bookRepo.countWhere.mockResolvedValue(100000);
 
@@ -4022,7 +4024,7 @@ describe('BookService', () => {
     it('globalQuery routes to findCardsCollapsed when collapseSeries is true', async () => {
       const { service, libraryService, queryBuilder, bookRepo } = makeService();
       const user = makeUser({ id: 3 });
-      libraryService.findAll.mockResolvedValue([{ id: 1 }]);
+      libraryService.findAccessibleLibraryIds.mockResolvedValue([1]);
       queryBuilder.buildWhere.mockReturnValue('GLOBAL_WHERE' as never);
       bookRepo.findCardsCollapsed.mockResolvedValue({
         rows: [],
@@ -4047,7 +4049,7 @@ describe('BookService', () => {
 
     it('globalQuery auto-disables collapse when a series filter is active', async () => {
       const { service, libraryService, queryBuilder, bookRepo } = makeService();
-      libraryService.findAll.mockResolvedValue([{ id: 1 }]);
+      libraryService.findAccessibleLibraryIds.mockResolvedValue([1]);
       queryBuilder.buildWhere.mockReturnValue('WHERE' as never);
       queryBuilder.buildOrderBy.mockReturnValue(['ORDER'] as never);
       bookRepo.findCards.mockResolvedValue({
@@ -4092,7 +4094,7 @@ describe('BookService', () => {
     it('globalQuery uses accessible libraries and assembled cards', async () => {
       const { service, libraryService, queryBuilder, bookRepo } = makeService();
       const user = makeUser({ id: 7 });
-      libraryService.findAll.mockResolvedValue([{ id: 3 }, { id: 4 }]);
+      libraryService.findAccessibleLibraryIds.mockResolvedValue([3, 4]);
       queryBuilder.buildWhere.mockReturnValue('GLOBAL_WHERE' as never);
       queryBuilder.buildOrderBy.mockReturnValue(['GLOBAL_ORDER'] as never);
       bookRepo.findCards.mockResolvedValue({
@@ -6282,7 +6284,7 @@ describe('BookService', () => {
     it('checks the matched libraries, not every matched book id, before resolving a query selection for editing', async () => {
       const { service, bookRepo, libraryService, queryBuilder } = makeService();
       const user = makeUser();
-      libraryService.findAll.mockResolvedValue([{ id: 5 }, { id: 9 }]);
+      libraryService.findAccessibleLibraryIds.mockResolvedValue([5, 9]);
       queryBuilder.buildWhere.mockReturnValue('where-clause');
       bookRepo.findDistinctLibraryIdsByWhere.mockResolvedValue([5, 9]);
       const error = new ForbiddenException('Insufficient library access level');
@@ -6301,7 +6303,7 @@ describe('BookService', () => {
     it('skips the matched-library lookup for superusers resolving a query selection for editing', async () => {
       const { service, bookRepo, libraryService, queryBuilder } = makeService();
       const user = makeUser({ isSuperuser: true });
-      libraryService.findAll.mockResolvedValue([{ id: 5 }]);
+      libraryService.findAccessibleLibraryIds.mockResolvedValue([5]);
       queryBuilder.buildWhere.mockReturnValue('where-clause');
       bookRepo.findIdsByWhere.mockResolvedValue([10, 11]);
 
@@ -6321,12 +6323,12 @@ describe('BookService', () => {
       const { service, bookRepo, libraryService, queryBuilder } = makeService();
       const user = makeUser({ id: 42 });
       const filter = { type: 'group', join: 'AND', rules: [] } as const;
-      libraryService.findAll.mockResolvedValue([{ id: 5 }, { id: 9 }]);
+      libraryService.findAccessibleLibraryIds.mockResolvedValue([5, 9]);
       queryBuilder.buildWhere.mockReturnValue('where-clause');
       bookRepo.findIdsByWhere.mockResolvedValue([10, 11]);
 
       await expect(service.resolveSelectionToIds({ query: { filter, q: 'dune' } }, user)).resolves.toEqual([10, 11]);
-      expect(libraryService.findAll).toHaveBeenCalledWith(user);
+      expect(libraryService.findAccessibleLibraryIds).toHaveBeenCalledWith(user);
       expect(queryBuilder.buildWhere).toHaveBeenCalledWith(filter, {
         accessibleLibraryIds: [5, 9],
         implicitLibraryId: undefined,
@@ -6341,7 +6343,7 @@ describe('BookService', () => {
     it('restricts query selections to the requested accessible library', async () => {
       const { service, bookRepo, libraryService, queryBuilder } = makeService();
       const user = makeUser({ id: 7 });
-      libraryService.findAll.mockResolvedValue([{ id: 5 }, { id: 9 }]);
+      libraryService.findAccessibleLibraryIds.mockResolvedValue([5, 9]);
       queryBuilder.buildWhere.mockReturnValue('library-where');
       bookRepo.findIdsByWhere.mockResolvedValue([22]);
 
@@ -6359,7 +6361,7 @@ describe('BookService', () => {
 
     it('rejects query selections for inaccessible libraries', async () => {
       const { service, libraryService, queryBuilder, bookRepo } = makeService();
-      libraryService.findAll.mockResolvedValue([{ id: 5 }]);
+      libraryService.findAccessibleLibraryIds.mockResolvedValue([5]);
 
       await expect(service.resolveSelectionToIds({ query: { libraryId: 9 } }, makeUser())).rejects.toThrow(ForbiddenException);
       expect(queryBuilder.buildWhere).not.toHaveBeenCalled();

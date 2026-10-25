@@ -227,10 +227,6 @@ export class SeriesService {
   }
 
   private async resolveLibraryIds(user: RequestUser, scopedLibraryId?: number): Promise<number[]> {
-    const libraries = await this.libraryService.findAll(user);
-    const accessibleIds = libraries.map((library) => library.id);
-
-    if (!scopedLibraryId) return accessibleIds;
-    return accessibleIds.includes(scopedLibraryId) ? [scopedLibraryId] : [];
+    return this.libraryService.resolveBookScope(user, scopedLibraryId || undefined);
   }
 }

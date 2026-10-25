@@ -93,7 +93,7 @@ describe('RecommendationService', () => {
     bookRepo.findLibraryIdByBookId.mockResolvedValue(21);
     recRepo.getTargetBookData.mockResolvedValue(null);
     embedder.embedBook.mockResolvedValue([0.4, 0.6]);
-    libraryService.findAll.mockResolvedValue([{ id: 7 }, { id: 9 }]);
+    libraryService.findAccessibleLibraryIds.mockResolvedValue([7, 9]);
     recRepo.findAnnCandidates.mockResolvedValue([{ bookId: 91, cosineSim: 0.78, seriesId: null, seriesName: null, rating: null }]);
     recRepo.getCandidateMetadata.mockResolvedValue([{ bookId: 91, authorNames: [], genreTagNames: [] }]);
     bookRepo.findRecommendationTitlesByBookIds.mockResolvedValue([
@@ -296,7 +296,7 @@ describe('RecommendationService', () => {
       authorNames: [],
       genreTagNames: [],
     });
-    libraryService.findAll.mockResolvedValue([]);
+    libraryService.findAccessibleLibraryIds.mockResolvedValue([]);
     recRepo.findAnnCandidates.mockResolvedValue([]);
 
     await expect(service.getRecommendations(15, makeUser())).resolves.toEqual([]);
@@ -601,7 +601,7 @@ describe('RecommendationService', () => {
         authorNames: [],
         genreTagNames: [],
       });
-      libraryService.findAll.mockResolvedValue([{ id: 7 }]);
+      libraryService.findAccessibleLibraryIds.mockResolvedValue([7]);
       recRepo.findAnnCandidates.mockResolvedValue([]);
 
       await service.getRecommendations(1, user);
@@ -623,7 +623,7 @@ describe('RecommendationService', () => {
         authorNames: [],
         genreTagNames: [],
       });
-      libraryService.findAll.mockResolvedValue([{ id: 7 }]);
+      libraryService.findAccessibleLibraryIds.mockResolvedValue([7]);
       recRepo.findAnnCandidates.mockResolvedValue([]);
 
       await service.getRecommendations(1, user);
