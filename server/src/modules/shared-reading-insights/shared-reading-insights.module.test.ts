@@ -1,6 +1,8 @@
 import 'reflect-metadata';
 
 import { MODULE_METADATA } from '@nestjs/common/constants';
+import { AuditModule } from '../audit/audit.module';
+import { LibraryAccessModule } from '../library/library-access.module';
 import { ReadingInsightsSharingController } from './reading-insights-sharing.controller';
 import { SharedReadingInsightsController } from './shared-reading-insights.controller';
 import { SharedReadingInsightsModule } from './shared-reading-insights.module';
@@ -13,6 +15,7 @@ describe('SharedReadingInsightsModule', () => {
       ReadingInsightsSharingController,
       SharedReadingInsightsController,
     ]);
+    expect(Reflect.getMetadata(MODULE_METADATA.IMPORTS, SharedReadingInsightsModule)).toEqual([AuditModule, LibraryAccessModule]);
     expect(Reflect.getMetadata(MODULE_METADATA.PROVIDERS, SharedReadingInsightsModule)).toEqual([
       SharedReadingInsightsService,
       SharedReadingInsightsRepository,

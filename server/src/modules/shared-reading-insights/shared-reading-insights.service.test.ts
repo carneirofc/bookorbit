@@ -16,17 +16,71 @@ function summaryData() {
   };
 }
 
+const libraryAccess = { findAccessibleLibraryIds: vi.fn() };
+
+function emptyDetail() {
+  return { topBooks: [], recentBooks: [], topAuthors: [], topGenres: [], topSeries: [], topNarrators: [] };
+}
+
 describe('SharedReadingInsightsService', () => {
+  beforeEach(() => {
+    libraryAccess.findAccessibleLibraryIds.mockReset().mockResolvedValue([1]);
+  });
+
+  it("limits a viewer's detailed insights to the libraries the viewer may read, not the subject's", async () => {
+    const repository = {
+      getViewSession: vi.fn().mockResolvedValue({ id: 'session', sharingLevel: 'detailed' }),
+      getSharingSettings: vi.fn().mockResolvedValue({ readingInsightsSharingLevel: 'detailed' }),
+      getDetail: vi.fn().mockResolvedValue(emptyDetail()),
+    };
+    libraryAccess.findAccessibleLibraryIds.mockResolvedValue([3, 7]);
+    const viewer = makeUser();
+    const service = new SharedReadingInsightsService(repository as never, {} as never, libraryAccess as never);
+
+    await service.getSharedDetail(viewer, 9, 'session', 90);
+
+    expect(libraryAccess.findAccessibleLibraryIds).toHaveBeenCalledWith(viewer);
+    expect(repository.getDetail).toHaveBeenCalledWith(9, 90, [3, 7]);
+  });
+
+  it('passes an empty scope through when the viewer can read no library', async () => {
+    const repository = {
+      getViewSession: vi.fn().mockResolvedValue({ id: 'session', sharingLevel: 'detailed' }),
+      getSharingSettings: vi.fn().mockResolvedValue({ readingInsightsSharingLevel: 'detailed' }),
+      getDetail: vi.fn().mockResolvedValue(emptyDetail()),
+    };
+    libraryAccess.findAccessibleLibraryIds.mockResolvedValue([]);
+    const service = new SharedReadingInsightsService(repository as never, {} as never, libraryAccess as never);
+
+    await service.getSharedDetail(makeUser(), 9, 'session', 90);
+
+    expect(repository.getDetail).toHaveBeenCalledWith(9, 90, []);
+  });
+
+  it("scopes the self preview's detail to the user's own accessible libraries", async () => {
+    const repository = {
+      getSharingSettings: vi.fn().mockResolvedValue({ readingInsightsSharingLevel: 'detailed', readingInsightsConsentedAt: new Date() }),
+      getSummary: vi.fn().mockResolvedValue(summaryData()),
+      getDetail: vi.fn().mockResolvedValue(emptyDetail()),
+    };
+    libraryAccess.findAccessibleLibraryIds.mockResolvedValue([2]);
+    const service = new SharedReadingInsightsService(repository as never, {} as never, libraryAccess as never);
+
+    await service.getMyPreview(makeUser(), 30);
+
+    expect(repository.getDetail).toHaveBeenCalledWith(5, 30, [2]);
+  });
+
   it('defaults missing consent data to private', async () => {
     const repository = { getSharingSettings: vi.fn().mockResolvedValue({ id: 1 }) };
-    const service = new SharedReadingInsightsService(repository as never, {} as never);
+    const service = new SharedReadingInsightsService(repository as never, {} as never, libraryAccess as never);
 
     await expect(service.getMySettings(1)).resolves.toEqual({ sharingLevel: 'private', consentedAt: null });
   });
 
   it('throws when current-user settings cannot find the account', async () => {
     const repository = { getSharingSettings: vi.fn().mockResolvedValue(undefined) };
-    const service = new SharedReadingInsightsService(repository as never, {} as never);
+    const service = new SharedReadingInsightsService(repository as never, {} as never, libraryAccess as never);
 
     await expect(service.getMySettings(404)).rejects.toBeInstanceOf(NotFoundException);
   });
@@ -36,7 +90,7 @@ describe('SharedReadingInsightsService', () => {
       updateSharingSettings: vi.fn().mockResolvedValue({ sharingLevel: 'summary', consentedAt: new Date('2026-07-01T00:00:00Z') }),
     };
     const audit = { record: vi.fn().mockResolvedValue(undefined) };
-    const service = new SharedReadingInsightsService(repository as never, audit as never);
+    const service = new SharedReadingInsightsService(repository as never, audit as never, libraryAccess as never);
 
     const result = await service.updateMySettings(makeUser(), 'summary');
 
@@ -48,7 +102,7 @@ describe('SharedReadingInsightsService', () => {
   it('withdraws consent with a null timestamp and rejects missing update targets', async () => {
     const repository = { updateSharingSettings: vi.fn().mockResolvedValueOnce({ sharingLevel: 'private', consentedAt: null }) };
     const audit = { record: vi.fn().mockResolvedValue(undefined) };
-    const service = new SharedReadingInsightsService(repository as never, audit as never);
+    const service = new SharedReadingInsightsService(repository as never, audit as never, libraryAccess as never);
 
     await expect(service.updateMySettings(makeUser(), 'private')).resolves.toEqual({ sharingLevel: 'private', consentedAt: null });
     expect(repository.updateSharingSettings).toHaveBeenCalledWith(5, 'private', null);
@@ -57,14 +111,14 @@ describe('SharedReadingInsightsService', () => {
 
   it('does not create a view session for a private profile, including for privileged viewers', async () => {
     const repository = { getSharingSettings: vi.fn().mockResolvedValue({ readingInsightsSharingLevel: 'private' }) };
-    const service = new SharedReadingInsightsService(repository as never, {} as never);
+    const service = new SharedReadingInsightsService(repository as never, {} as never, libraryAccess as never);
 
     await expect(service.createViewSession(makeUser(), 9)).rejects.toMatchObject({ response: { errorCode: 'READING_INSIGHTS_PRIVATE' } });
   });
 
   it('does not create a view session for an account that no longer exists', async () => {
     const repository = { getSharingSettings: vi.fn().mockResolvedValue(undefined) };
-    const service = new SharedReadingInsightsService(repository as never, {} as never);
+    const service = new SharedReadingInsightsService(repository as never, {} as never, libraryAccess as never);
 
     await expect(service.createViewSession(makeUser(), 404)).rejects.toBeInstanceOf(NotFoundException);
   });
@@ -75,7 +129,7 @@ describe('SharedReadingInsightsService', () => {
       createViewSession: vi.fn().mockResolvedValue(undefined),
     };
     const audit = { record: vi.fn().mockResolvedValue(undefined) };
-    const service = new SharedReadingInsightsService(repository as never, audit as never);
+    const service = new SharedReadingInsightsService(repository as never, audit as never, libraryAccess as never);
 
     const result = await service.createViewSession(makeUser(), 9);
 
@@ -91,7 +145,7 @@ describe('SharedReadingInsightsService', () => {
       getSharingSettings: vi.fn().mockResolvedValue({ readingInsightsSharingLevel: 'summary' }),
       getSummary: vi.fn().mockResolvedValue(summaryData()),
     };
-    const service = new SharedReadingInsightsService(repository as never, {} as never);
+    const service = new SharedReadingInsightsService(repository as never, {} as never, libraryAccess as never);
 
     const result = await service.getSharedSummary(makeUser(), 9, 'session', 90);
 
@@ -105,7 +159,7 @@ describe('SharedReadingInsightsService', () => {
       getViewSession: vi.fn().mockResolvedValue({ id: 'session', sharingLevel: 'detailed' }),
       getSharingSettings: vi.fn().mockResolvedValue({ readingInsightsSharingLevel: 'summary' }),
     };
-    const service = new SharedReadingInsightsService(repository as never, {} as never);
+    const service = new SharedReadingInsightsService(repository as never, {} as never, libraryAccess as never);
 
     await expect(service.getSharedDetail(makeUser(), 9, 'session', 90)).rejects.toMatchObject({
       response: { errorCode: 'READING_INSIGHTS_SUMMARY_ONLY' },
@@ -117,7 +171,7 @@ describe('SharedReadingInsightsService', () => {
       getViewSession: vi.fn().mockResolvedValue({ id: 'session', sharingLevel: 'summary' }),
       getSharingSettings: vi.fn().mockResolvedValue({ readingInsightsSharingLevel: 'detailed' }),
     };
-    const service = new SharedReadingInsightsService(repository as never, {} as never);
+    const service = new SharedReadingInsightsService(repository as never, {} as never, libraryAccess as never);
 
     await expect(service.getSharedDetail(makeUser(), 9, 'session', 90)).rejects.toMatchObject({
       response: { errorCode: 'READING_INSIGHTS_SUMMARY_ONLY' },
@@ -129,7 +183,7 @@ describe('SharedReadingInsightsService', () => {
       getViewSession: vi.fn().mockResolvedValue({ id: 'session', sharingLevel: 'detailed' }),
       getSharingSettings: vi.fn().mockResolvedValue({ readingInsightsSharingLevel: 'private' }),
     };
-    const service = new SharedReadingInsightsService(repository as never, {} as never);
+    const service = new SharedReadingInsightsService(repository as never, {} as never, libraryAccess as never);
 
     await expect(service.getSharedSummary(makeUser(), 9, 'session', 90)).rejects.toBeInstanceOf(ForbiddenException);
   });
@@ -148,7 +202,7 @@ describe('SharedReadingInsightsService', () => {
         topNarrators: [],
       }),
     };
-    const service = new SharedReadingInsightsService(repository as never, {} as never);
+    const service = new SharedReadingInsightsService(repository as never, {} as never, libraryAccess as never);
 
     const result = await service.getSharedDetail(makeUser(), 9, 'session', 90);
 
@@ -169,7 +223,7 @@ describe('SharedReadingInsightsService', () => {
         topNarrators: [],
       }),
     };
-    const service = new SharedReadingInsightsService(repository as never, {} as never);
+    const service = new SharedReadingInsightsService(repository as never, {} as never, libraryAccess as never);
 
     const result = await service.getSharedDetail(makeUser(), 9, 'session', 90);
 
@@ -183,7 +237,7 @@ describe('SharedReadingInsightsService', () => {
         total: 1,
       }),
     };
-    const service = new SharedReadingInsightsService({} as never, audit as never);
+    const service = new SharedReadingInsightsService({} as never, audit as never, libraryAccess as never);
 
     const result = await service.getMyAccessHistory(9, 1, 20);
 
@@ -208,11 +262,11 @@ describe('SharedReadingInsightsService', () => {
         topNarrators: [],
       }),
     };
-    const service = new SharedReadingInsightsService(repository as never, {} as never);
+    const service = new SharedReadingInsightsService(repository as never, {} as never, libraryAccess as never);
 
-    await expect(service.getMyPreview(5, 90)).resolves.toEqual({ sharingLevel: 'private', consentedAt: null });
-    await expect(service.getMyPreview(5, 90)).resolves.toMatchObject({ sharingLevel: 'summary', periodDays: 90 });
-    await expect(service.getMyPreview(5, 90)).resolves.toMatchObject({
+    await expect(service.getMyPreview(makeUser(), 90)).resolves.toEqual({ sharingLevel: 'private', consentedAt: null });
+    await expect(service.getMyPreview(makeUser(), 90)).resolves.toMatchObject({ sharingLevel: 'summary', periodDays: 90 });
+    await expect(service.getMyPreview(makeUser(), 90)).resolves.toMatchObject({
       summary: { sharingLevel: 'detailed' },
       detail: { sharingLevel: 'detailed' },
     });
@@ -223,7 +277,7 @@ describe('SharedReadingInsightsService', () => {
       getViewSession: vi.fn().mockResolvedValue(undefined),
       getSharingSettings: vi.fn().mockResolvedValue({ readingInsightsSharingLevel: 'summary' }),
     };
-    const service = new SharedReadingInsightsService(repository as never, {} as never);
+    const service = new SharedReadingInsightsService(repository as never, {} as never, libraryAccess as never);
 
     await expect(service.getSharedSummary(makeUser(), 9, undefined, 90)).rejects.toMatchObject({
       response: { errorCode: 'READING_INSIGHTS_VIEW_SESSION_REQUIRED' },
@@ -238,7 +292,7 @@ describe('SharedReadingInsightsService', () => {
       getViewSession: vi.fn().mockResolvedValue({ id: 'session', sharingLevel: 'summary' }),
       getSharingSettings: vi.fn().mockResolvedValue(undefined),
     };
-    const service = new SharedReadingInsightsService(repository as never, {} as never);
+    const service = new SharedReadingInsightsService(repository as never, {} as never, libraryAccess as never);
 
     await expect(service.getSharedSummary(makeUser(), 9, 'session', 90)).rejects.toMatchObject({
       response: { errorCode: 'READING_INSIGHTS_PRIVATE' },
@@ -252,7 +306,7 @@ describe('SharedReadingInsightsService', () => {
         total: 1,
       }),
     };
-    const service = new SharedReadingInsightsService({} as never, audit as never);
+    const service = new SharedReadingInsightsService({} as never, audit as never, libraryAccess as never);
 
     const result = await service.getMyAccessHistory(9, 1, 20);
 

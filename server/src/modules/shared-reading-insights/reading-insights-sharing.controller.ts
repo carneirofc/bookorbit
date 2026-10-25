@@ -25,7 +25,7 @@ export class ReadingInsightsSharingController {
 
   @Get('me/preview')
   getMyPreview(@CurrentUser() user: RequestUser, @Query() query: SharedReadingInsightsQueryDto) {
-    return this.service.getMyPreview(user.id, query.days);
+    return this.service.getMyPreview(user, query.days);
   }
 
   @Get('me/access-history')

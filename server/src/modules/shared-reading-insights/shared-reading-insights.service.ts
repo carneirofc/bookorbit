@@ -14,6 +14,7 @@ import { AuditAction, AuditResource } from '@bookorbit/types';
 
 import type { RequestUser } from '../../common/types/request-user';
 import { AuditService } from '../audit/audit.service';
+import { LibraryAccessService } from '../library/library-access.service';
 import { SharedReadingInsightsRepository } from './shared-reading-insights.repository';
 
 const VIEW_SESSION_TTL_MS = 15 * 60 * 1000;
@@ -23,6 +24,7 @@ export class SharedReadingInsightsService {
   constructor(
     private readonly repository: SharedReadingInsightsRepository,
     private readonly auditService: AuditService,
+    private readonly libraryAccess: LibraryAccessService,
   ) {}
 
   async getMySettings(userId: number): Promise<ReadingInsightsSharingSettings> {
@@ -91,15 +93,15 @@ export class SharedReadingInsightsService {
     days: number,
   ): Promise<SharedReadingInsightsDetail> {
     await this.authorizeView(viewer.id, subjectUserId, viewSessionId, 'detailed');
-    return this.buildDetail(subjectUserId, days);
+    return this.buildDetail(subjectUserId, days, viewer);
   }
 
-  async getMyPreview(userId: number, days: number): Promise<ReadingInsightsPreview> {
-    const settings = await this.getMySettings(userId);
+  async getMyPreview(user: RequestUser, days: number): Promise<ReadingInsightsPreview> {
+    const settings = await this.getMySettings(user.id);
     if (settings.sharingLevel === 'private') return settings;
-    const summary = await this.buildSummary(userId, days, settings.sharingLevel);
+    const summary = await this.buildSummary(user.id, days, settings.sharingLevel);
     if (settings.sharingLevel === 'summary') return summary;
-    return { summary, detail: await this.buildDetail(userId, days) };
+    return { summary, detail: await this.buildDetail(user.id, days, user) };
   }
 
   async getMyAccessHistory(userId: number, page: number, pageSize: number): Promise<ReadingInsightsAccessHistoryPage> {
@@ -162,8 +164,10 @@ export class SharedReadingInsightsService {
     };
   }
 
-  private async buildDetail(userId: number, days: number): Promise<SharedReadingInsightsDetail> {
-    const data = await this.repository.getDetail(userId, days);
+  /** Detail names books, so it is limited to the libraries the viewer may read, not the subject's. */
+  private async buildDetail(userId: number, days: number, viewer: RequestUser): Promise<SharedReadingInsightsDetail> {
+    const libraryIds = await this.libraryAccess.findAccessibleLibraryIds(viewer);
+    const data = await this.repository.getDetail(userId, days, libraryIds);
     const mapBooks = (items: typeof data.topBooks) =>
       items.map((item) => ({
         ...item,

@@ -1,6 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import type { BroadReadingGenre, ReadingInsightsSharingLevel, ReadingSessionSource } from '@bookorbit/types';
-import { and, desc, eq, gte, gt, inArray, lte, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, gt, inArray, lte, sql, type SQL } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 
 import { DB } from '../../db';
@@ -138,44 +138,53 @@ export class SharedReadingInsightsRepository {
     return { daily, status: statusRows[0] ?? { booksStarted: 0, booksCompleted: 0 }, formats, genres, sources };
   }
 
-  async getDetail(userId: number, days: number) {
+  /**
+   * Every list here names books or the people and series behind them, so it only covers sessions on
+   * books in `libraryIds`: the libraries the person looking at the insights may read.
+   */
+  async getDetail(userId: number, days: number, libraryIds: number[]) {
     const since = this.since(days);
+    const visibleSessions = this.visibleSessionsWhere(userId, since, libraryIds);
     const [topBooks, recentBooks, topAuthors, topGenres, topSeries, topNarrators] = await Promise.all([
-      this.bookRanking(userId, since, 'reading'),
-      this.bookRanking(userId, since, 'recent'),
+      this.bookRanking(userId, visibleSessions, 'reading'),
+      this.bookRanking(userId, visibleSessions, 'recent'),
       this.db
         .select({ name: schema.authors.name, readingSeconds: sql<number>`sum(${schema.readingSessions.durationSeconds})::int` })
         .from(schema.readingSessions)
+        .innerJoin(schema.books, eq(schema.books.id, schema.readingSessions.bookId))
         .innerJoin(schema.bookAuthors, eq(schema.bookAuthors.bookId, schema.readingSessions.bookId))
         .innerJoin(schema.authors, eq(schema.authors.id, schema.bookAuthors.authorId))
-        .where(and(eq(schema.readingSessions.userId, userId), gte(schema.readingSessions.startedAt, since)))
+        .where(visibleSessions)
         .groupBy(schema.authors.id, schema.authors.name)
         .orderBy(desc(sql`sum(${schema.readingSessions.durationSeconds})`))
         .limit(10),
       this.db
         .select({ name: schema.genres.name, readingSeconds: sql<number>`sum(${schema.readingSessions.durationSeconds})::int` })
         .from(schema.readingSessions)
+        .innerJoin(schema.books, eq(schema.books.id, schema.readingSessions.bookId))
         .innerJoin(schema.bookGenres, eq(schema.bookGenres.bookId, schema.readingSessions.bookId))
         .innerJoin(schema.genres, eq(schema.genres.id, schema.bookGenres.genreId))
-        .where(and(eq(schema.readingSessions.userId, userId), gte(schema.readingSessions.startedAt, since)))
+        .where(visibleSessions)
         .groupBy(schema.genres.id, schema.genres.name)
         .orderBy(desc(sql`sum(${schema.readingSessions.durationSeconds})`))
         .limit(10),
       this.db
         .select({ name: schema.bookSeries.name, readingSeconds: sql<number>`sum(${schema.readingSessions.durationSeconds})::int` })
         .from(schema.readingSessions)
+        .innerJoin(schema.books, eq(schema.books.id, schema.readingSessions.bookId))
         .innerJoin(schema.bookSeriesMemberships, eq(schema.bookSeriesMemberships.bookId, schema.readingSessions.bookId))
         .innerJoin(schema.bookSeries, eq(schema.bookSeries.id, schema.bookSeriesMemberships.seriesId))
-        .where(and(eq(schema.readingSessions.userId, userId), gte(schema.readingSessions.startedAt, since)))
+        .where(visibleSessions)
         .groupBy(schema.bookSeries.id, schema.bookSeries.name)
         .orderBy(desc(sql`sum(${schema.readingSessions.durationSeconds})`))
         .limit(10),
       this.db
         .select({ name: schema.narrators.name, readingSeconds: sql<number>`sum(${schema.readingSessions.durationSeconds})::int` })
         .from(schema.readingSessions)
+        .innerJoin(schema.books, eq(schema.books.id, schema.readingSessions.bookId))
         .innerJoin(schema.bookNarrators, eq(schema.bookNarrators.bookId, schema.readingSessions.bookId))
         .innerJoin(schema.narrators, eq(schema.narrators.id, schema.bookNarrators.narratorId))
-        .where(and(eq(schema.readingSessions.userId, userId), gte(schema.readingSessions.startedAt, since)))
+        .where(visibleSessions)
         .groupBy(schema.narrators.id, schema.narrators.name)
         .orderBy(desc(sql`sum(${schema.readingSessions.durationSeconds})`))
         .limit(10),
@@ -183,7 +192,7 @@ export class SharedReadingInsightsRepository {
     return { topBooks, recentBooks, topAuthors, topGenres, topSeries, topNarrators };
   }
 
-  private bookRanking(userId: number, since: Date, order: 'reading' | 'recent') {
+  private bookRanking(userId: number, visibleSessions: SQL, order: 'reading' | 'recent') {
     const readingSeconds = sql<number>`sum(${schema.readingSessions.durationSeconds})::int`;
     const lastReadAt = sql<Date>`max(${schema.readingSessions.endedAt})`;
     return this.db
@@ -195,12 +204,21 @@ export class SharedReadingInsightsRepository {
         status: schema.userBookStatus.status,
       })
       .from(schema.readingSessions)
+      .innerJoin(schema.books, eq(schema.books.id, schema.readingSessions.bookId))
       .leftJoin(schema.bookMetadata, eq(schema.bookMetadata.bookId, schema.readingSessions.bookId))
       .leftJoin(schema.userBookStatus, and(eq(schema.userBookStatus.bookId, schema.readingSessions.bookId), eq(schema.userBookStatus.userId, userId)))
-      .where(and(eq(schema.readingSessions.userId, userId), gte(schema.readingSessions.startedAt, since)))
+      .where(visibleSessions)
       .groupBy(schema.readingSessions.bookId, schema.bookMetadata.title, schema.userBookStatus.status)
       .orderBy(desc(order === 'reading' ? readingSeconds : lastReadAt))
       .limit(10);
+  }
+
+  private visibleSessionsWhere(userId: number, since: Date, libraryIds: number[]): SQL {
+    return and(
+      eq(schema.readingSessions.userId, userId),
+      gte(schema.readingSessions.startedAt, since),
+      libraryIds.length > 0 ? inArray(schema.books.libraryId, libraryIds) : sql`false`,
+    )!;
   }
 
   private since(days: number): Date {
