@@ -537,6 +537,11 @@ function temporalBucketsQuery(opts: {
   `;
 }
 
+/** Books still being imported never show in listings or counts. */
+export function visibleBooksWhere(where: SQL | undefined): SQL {
+  return where ? and(where, ne(books.status, 'processing'))! : ne(books.status, 'processing');
+}
+
 @Injectable()
 export class BookRepository {
   constructor(
@@ -546,7 +551,7 @@ export class BookRepository {
   ) {}
 
   private visibleWhere(where: SQL | undefined): SQL {
-    return where ? and(where, ne(books.status, 'processing'))! : ne(books.status, 'processing');
+    return visibleBooksWhere(where);
   }
 
   async withTransaction<T>(callback: (tx: DbTransaction) => Promise<T>): Promise<T> {

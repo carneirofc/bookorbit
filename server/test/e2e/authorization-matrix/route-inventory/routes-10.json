@@ -1102,5 +1102,17 @@
     "isPublic": false,
     "allowDefault": false,
     "useGuards": []
+  },
+  {
+    "file": "server/src/modules/book/book-discover.controller.ts",
+    "className": "BookDiscoverController",
+    "methodName": "getDiscoverFacets",
+    "httpMethod": "POST",
+    "path": "/libraries/:id/discover/facets",
+    "permissions": [],
+    "libraryAccess": ["'viewer'"],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": []
   }
 ]

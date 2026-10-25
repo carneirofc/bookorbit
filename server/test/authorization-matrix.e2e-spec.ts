@@ -932,6 +932,7 @@ describe('Authorization matrix (e2e)', () => {
           'GET /scanner/libraries/:id/scan-history',
           'POST /libraries/:id/books/jump-buckets',
           'POST /libraries/:id/books/facets',
+          'POST /libraries/:id/discover/facets',
           'GET /libraries/:id/bulk-rename/preview',
           'GET /libraries/:id/bulk-rename/status',
           'POST /libraries/:id/bulk-rename/execute',

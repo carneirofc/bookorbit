@@ -18,6 +18,9 @@ import { BookSortBuilder } from './book-sort-builder.service';
 import { BookController } from './book.controller';
 import { BookTagFacetsController } from './book-tag-facets.controller';
 import { BookTagFacetsService } from './book-tag-facets.service';
+import { BookDiscoverController } from './book-discover.controller';
+import { BookDiscoverFacetsRepository } from './book-discover-facets.repository';
+import { BookDiscoverFacetsService } from './book-discover-facets.service';
 import { BookModule } from './book.module';
 import { BookRepository } from './book.repository';
 import { BookService } from './book.service';
@@ -38,7 +41,12 @@ describe('BookModule', () => {
   });
 
   it('registers expected controller/providers/exports', () => {
-    expect(Reflect.getMetadata('controllers', BookModule)).toEqual([BookController, BookTagFacetsController, ReadingAttemptController]);
+    expect(Reflect.getMetadata('controllers', BookModule)).toEqual([
+      BookController,
+      BookTagFacetsController,
+      BookDiscoverController,
+      ReadingAttemptController,
+    ]);
     expect(Reflect.getMetadata('providers', BookModule)).toEqual([
       BookService,
       BookExportService,
@@ -51,6 +59,8 @@ describe('BookModule', () => {
       AudiobookEbookProgressSyncService,
       AudiolessEpubService,
       BookTagFacetsService,
+      BookDiscoverFacetsService,
+      BookDiscoverFacetsRepository,
       DeliveryArtifactService,
       DeliveryArtifactRepository,
       DeliverySelectionService,

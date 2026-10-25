@@ -27,6 +27,9 @@ import { BookQueryBuilder } from './book-query-builder.service';
 import { BookSortBuilder } from './book-sort-builder.service';
 import { BookController } from './book.controller';
 import { BookTagFacetsController } from './book-tag-facets.controller';
+import { BookDiscoverController } from './book-discover.controller';
+import { BookDiscoverFacetsRepository } from './book-discover-facets.repository';
+import { BookDiscoverFacetsService } from './book-discover-facets.service';
 import { BookTagFacetsService } from './book-tag-facets.service';
 import { BookRepository } from './book.repository';
 import { BookService } from './book.service';
@@ -54,7 +57,7 @@ import { ReadingAttemptController } from './reading-attempt.controller';
     AchievementModule,
     PositionConverterModule,
   ],
-  controllers: [BookController, BookTagFacetsController, ReadingAttemptController],
+  controllers: [BookController, BookTagFacetsController, BookDiscoverController, ReadingAttemptController],
   providers: [
     BookService,
     BookExportService,
@@ -67,6 +70,8 @@ import { ReadingAttemptController } from './reading-attempt.controller';
     AudiobookEbookProgressSyncService,
     AudiolessEpubService,
     BookTagFacetsService,
+    BookDiscoverFacetsService,
+    BookDiscoverFacetsRepository,
     DeliveryArtifactService,
     DeliveryArtifactRepository,
     DeliverySelectionService,
