@@ -1042,5 +1042,65 @@
     "isPublic": true,
     "allowDefault": false,
     "useGuards": ["KoreaderAuthGuard"]
+  },
+  {
+    "file": "server/src/modules/book/book.controller.ts",
+    "className": "BookController",
+    "methodName": "createExportSession",
+    "httpMethod": "POST",
+    "path": "/books/export/sessions",
+    "permissions": ["Permission.LibraryDownload"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": []
+  },
+  {
+    "file": "server/src/modules/book/book.controller.ts",
+    "className": "BookController",
+    "methodName": "getExportSessionStatus",
+    "httpMethod": "GET",
+    "path": "/books/export/sessions/:token",
+    "permissions": ["Permission.LibraryDownload"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": []
+  },
+  {
+    "file": "server/src/modules/book/book.controller.ts",
+    "className": "BookController",
+    "methodName": "downloadExportPart",
+    "httpMethod": "GET",
+    "path": "/books/export/sessions/:token/parts/:index",
+    "permissions": ["Permission.LibraryDownload"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": []
+  },
+  {
+    "file": "server/src/modules/book/book-tag-facets.controller.ts",
+    "className": "BookTagFacetsController",
+    "methodName": "getTagFacets",
+    "httpMethod": "POST",
+    "path": "/books/tag-facets",
+    "permissions": [],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": []
+  },
+  {
+    "file": "server/src/modules/upload/book-file-upload.controller.ts",
+    "className": "BookFileUploadController",
+    "methodName": "replaceBookFile",
+    "httpMethod": "PUT",
+    "path": "/books/:id/files/:fileId",
+    "permissions": ["Permission.LibraryUpload"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": []
   }
 ]
