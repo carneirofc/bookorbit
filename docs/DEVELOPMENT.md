@@ -371,6 +371,36 @@ These are the rules that most commonly cause PR rejections. Following them from 
 
 ---
 
+## Library Access Scoping
+
+"Which libraries may this user read" is decided in one place: `LibraryAccessService`
+(`server/src/modules/library/library-access.service.ts`). `LibraryService` exposes the same
+methods by delegating to it, so most code keeps injecting `LibraryService`; modules that
+`LibraryModule` itself depends on (achievements, statistics) import the leaf `LibraryAccessModule`.
+
+| Method                                         | Use it for                                                              |
+| ---------------------------------------------- | ----------------------------------------------------------------------- |
+| `findAccessibleLibraryIds(user)`               | The library ids a listing, aggregate, statistic or search may read      |
+| `resolveBookScope(user, libraryId?)`           | Same, narrowed to one library; `[]` when that library is not accessible |
+| `findEditableLibraryIds(user)`                 | Libraries the user may edit (editor or owner)                           |
+| `verifyUserAccess(user, libraryId)`            | Per-library read check; throws `ForbiddenException`                     |
+| `verifyUserAccessLevel(user, libraryId, role)` | Per-library check for `viewer`, `editor` or `owner`                     |
+
+Rules:
+
+- Pass the ids into repositories and `BookQueryBuilder.buildWhere`; repositories never work out
+  scope themselves.
+- Never derive ids from `libraryService.findAll(user)` (that is the library list, with book counts)
+  and never query `user_library_access` outside the library module.
+- Per-book and per-file checks go through `BookService.verifyBookAccess` / `verifyFileAccess`,
+  which build on `verifyUserAccess`.
+
+The test "freezes direct user_library_access reads outside the library module to an explicit
+allowlist" in `server/src/modules/architecture/architecture-boundaries.test.ts` fails when new
+code reads the grant table directly. Do not extend its allowlist; route the new code through the
+library module instead. A rule added to `LibraryAccessService` (for example, locked libraries)
+then reaches every surface at once.
+
 ## CI/CD Pipeline
 
 ### What Runs on Pull Requests
