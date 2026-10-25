@@ -49,6 +49,17 @@ describe('DiscoverFacetsRequestPipe', () => {
     expect(pipe.transform(body)).toEqual(body);
   });
 
+  it('names the first offending field in the message', () => {
+    try {
+      pipe.transform({ selection: { terms: { language: { include: ['en'], mode: 'all' } } } });
+      expect.unreachable();
+    } catch (error) {
+      expect((error as BadRequestException).getResponse()).toMatchObject({
+        message: "Invalid discover facets request: selection.terms.language.mode: Match mode 'all' is not available for language",
+      });
+    }
+  });
+
   it.each([
     ['an unknown top-level field', { filter: {} }],
     ['an unknown term facet', { selection: { terms: { colour: { include: ['red'] } } } }],

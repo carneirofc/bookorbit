@@ -145,7 +145,11 @@ const discoverFacetsRequestSchema = z
 export class DiscoverFacetsRequestPipe implements PipeTransform {
   transform(value: unknown): DiscoverFacetsRequest {
     const result = discoverFacetsRequestSchema.safeParse(value ?? {});
-    if (!result.success) throw new BadRequestException(result.error.flatten());
+    if (!result.success) {
+      const issue = result.error.issues[0]!;
+      const path = issue.path.length > 0 ? issue.path.join('.') : 'body';
+      throw new BadRequestException({ message: `Invalid discover facets request: ${path}: ${issue.message}`, errors: result.error.flatten() });
+    }
     return result.data as DiscoverFacetsRequest;
   }
 }
