@@ -322,6 +322,19 @@ describe('MissingResourcesService', () => {
         { id: 8, title: 'Legacy', authors: [], libraryId: 1, libraryName: 'Main', coverSource: 'extracted', slots: [] },
       ]);
     });
+
+    it('drops books from libraries the user lost access to after the sweep ran', async () => {
+      const findBrokenCoverEntries = vi.fn().mockResolvedValue([]);
+      const { service, libraryService } = setup({ findBrokenCoverEntries });
+      await runSweep(service);
+      store.get(user.id)!.brokenCoverBookIds = [5, 8];
+      libraryService.findAccessibleLibraryIds.mockResolvedValue([2]);
+
+      const page = await service.listBrokenCovers(user, 1, 50);
+
+      expect(findBrokenCoverEntries).toHaveBeenLastCalledWith([5, 8], [2]);
+      expect(page.items).toEqual([]);
+    });
   });
 
   describe('cleanBrokenCovers', () => {

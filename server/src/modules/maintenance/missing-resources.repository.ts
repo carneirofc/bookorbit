@@ -110,8 +110,8 @@ export class MissingResourcesRepository {
     return rows.map((row) => row.id);
   }
 
-  async findBrokenCoverEntries(bookIds: number[]) {
-    if (bookIds.length === 0) return [];
+  async findBrokenCoverEntries(bookIds: number[], libraryIds: number[]) {
+    if (bookIds.length === 0 || libraryIds.length === 0) return [];
     return this.db
       .select({
         id: books.id,
@@ -124,7 +124,7 @@ export class MissingResourcesRepository {
       .from(books)
       .innerJoin(libraries, eq(libraries.id, books.libraryId))
       .innerJoin(bookMetadata, eq(bookMetadata.bookId, books.id))
-      .where(and(isNotNull(bookMetadata.coverSource), inArray(books.id, bookIds)))
+      .where(and(isNotNull(bookMetadata.coverSource), inArray(books.id, bookIds), inArray(books.libraryId, libraryIds)))
       .orderBy(asc(books.id));
   }
 

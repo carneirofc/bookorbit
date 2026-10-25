@@ -97,7 +97,9 @@ export class MissingResourcesService {
   async listBrokenCovers(user: RequestUser, page: number, pageSize: number): Promise<MissingResourcePage<BrokenCoverEntry>> {
     const record = this.requireCompletedSweep(user);
     const pageIds = record.brokenCoverBookIds.slice((page - 1) * pageSize, page * pageSize);
-    const rows = await this.repo.findBrokenCoverEntries(pageIds);
+    // The sweep snapshot outlives the access it was taken under, so re-check access on every read.
+    const libraryIds = await this.libraryService.findAccessibleLibraryIds(user);
+    const rows = await this.repo.findBrokenCoverEntries(pageIds, libraryIds);
     const byId = new Map(rows.map((row) => [row.id, row]));
     const brokenSlots = await this.brokenSlotsFor(pageIds);
     return {
