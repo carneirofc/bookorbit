@@ -6,7 +6,7 @@ import {
   CUSTOM_FIELD_OPERATORS,
   CUSTOM_FIELD_TYPE_OPERATORS,
   FIELD_OPERATORS,
-  RULE_FIELDS,
+  PICKABLE_RULE_FIELDS,
   customRuleField,
   isCustomRuleField,
   parseCustomRuleFieldId,
@@ -474,7 +474,7 @@ function showValueToInput(operator: RuleOperator): boolean {
           @change="onFieldChange(index)"
           class="h-9 rounded-md border border-input bg-background text-foreground text-sm px-2 focus:outline-none focus:ring-2 focus:ring-primary shrink-0"
         >
-          <option v-for="field in RULE_FIELDS" :key="field" :value="field">{{ fieldLabel(field) }}</option>
+          <option v-for="field in PICKABLE_RULE_FIELDS" :key="field" :value="field">{{ fieldLabel(field) }}</option>
           <optgroup v-if="customFieldOptions.length > 0" :label="t('book.filter.customFieldsGroup')">
             <option v-for="field in customFieldOptions" :key="field" :value="field">{{ fieldLabel(field) }}</option>
           </optgroup>

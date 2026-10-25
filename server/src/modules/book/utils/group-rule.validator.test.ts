@@ -62,7 +62,7 @@ function validRuleValue(operator: RuleOperator, field: RuleField): { value?: unk
     case 'includesAny':
     case 'includesAll':
     case 'excludesAll':
-      return { value: ['test'] };
+      return { value: field === 'authorId' ? [7] : ['test'] };
     default: {
       const _exhaustive: never = operator;
       return _exhaustive;
@@ -271,6 +271,16 @@ describe('validateGroupRule', () => {
       rules: [{ type: 'rule', field: 'genre', operator: 'includesAny', value: ['Fiction', 'Sci-Fi'] }],
     };
     expect(validateGroupRule(rule)).toBeDefined();
+  });
+
+  it('accepts author id lists for authorId rules', () => {
+    const rule = { type: 'group', join: 'AND', rules: [{ type: 'rule', field: 'authorId', operator: 'includesAll', value: [4, 9] }] };
+    expect(validateGroupRule(rule)).toEqual(rule);
+  });
+
+  it.each([[['Tolkien']], [[0]], [[1.5]], ['4']])('rejects authorId value %j', (value) => {
+    const rule = { type: 'group', join: 'AND', rules: [{ type: 'rule', field: 'authorId', operator: 'includesAny', value }] };
+    expect(() => validateGroupRule(rule)).toThrow(BadRequestException);
   });
 
   it('throws BadRequestException for non-object input', () => {

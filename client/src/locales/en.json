@@ -6137,6 +6137,7 @@
         "publishedYear": "Published Year",
         "pageCount": "Page Count",
         "author": "Author",
+        "authorId": "Author (exact)",
         "genre": "Genre",
         "tag": "Tag",
         "collection": "Collection",

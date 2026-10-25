@@ -52,6 +52,10 @@ function isNonNegativeRelativeDayCount(value: unknown): boolean {
   return typeof number === 'number' && Number.isFinite(number) && number >= 0;
 }
 
+function isAuthorIdList(value: unknown): boolean {
+  return Array.isArray(value) && value.every((id) => typeof id === 'number' && Number.isSafeInteger(id) && id > 0);
+}
+
 type UnvalidatedRule = { field: string; operator: string; value?: unknown; valueTo?: unknown };
 
 /**
@@ -113,6 +117,9 @@ const ruleSchema: z.ZodType<Rule> = z
     if (custom) {
       checkCustomFieldValue(rule, ctx);
       return;
+    }
+    if (rule.field === 'authorId' && rule.value !== undefined && !isAuthorIdList(rule.value)) {
+      ctx.addIssue({ code: 'custom', message: 'authorId rules take a list of author ids', path: ['value'] });
     }
     if (DATE_VALUE_FIELDS.has(rule.field as StaticRuleField) && DATE_VALUE_OPERATORS.has(rule.operator as RuleOperator)) {
       if (!isValidRuleDateValue(rule.value)) {

@@ -12,7 +12,8 @@ import type { CommunityRatingProviderKey } from "./metadata-fetch";
  * - `readStatus` - stored in `user_book_status.status` (per-user)
  * - `startedAt` - from `user_book_status.started_at` (per-user)
  * - `finishedAt` - from `user_book_status.finished_at` (per-user)
- * - `author` - resolved via `book_authors` join to `authors.name`
+ * - `author` - resolved via `book_authors` join to `authors.name` (substring match)
+ * - `authorId` - exact match on `book_authors.author_id`; values are author ids
  * - `genre` - resolved via `book_genres` join to `genres.name`
  * - `tag` - resolved via `book_tags` join to `tags.name`
  * - `collection` - resolved via `collection_books` join to `collections.name`
@@ -38,6 +39,7 @@ export type StaticRuleField =
   | "publishedYear"
   | "pageCount"
   | "author"
+  | "authorId"
   | "genre"
   | "tag"
   | "collection"
@@ -112,6 +114,7 @@ export const FIELD_OPERATORS: Record<StaticRuleField, RuleOperator[]> = {
   language: ["eq", "notEq", "includesAny", "excludesAll", "isEmpty", "isNotEmpty"],
   series: ["contains", "notContains", "eq", "notEq", "includesAny", "excludesAll", "isEmpty", "isNotEmpty"],
   author: ["includesAny", "includesAll", "excludesAll", "isEmpty", "isNotEmpty"],
+  authorId: ["includesAny", "includesAll", "excludesAll", "isEmpty", "isNotEmpty"],
   genre: ["includesAny", "includesAll", "excludesAll", "isEmpty", "isNotEmpty"],
   tag: ["includesAny", "includesAll", "excludesAll", "isEmpty", "isNotEmpty"],
   collection: ["includesAny", "excludesAll", "isEmpty", "isNotEmpty"],
@@ -141,6 +144,15 @@ export const FIELD_OPERATORS: Record<StaticRuleField, RuleOperator[]> = {
 };
 
 export const RULE_FIELDS = Object.keys(FIELD_OPERATORS) as StaticRuleField[];
+
+/**
+ * Fields written by code rather than typed into the filter builder: their values are ids that
+ * only a picker backed by the server can produce (Discover writes `authorId`).
+ */
+export const GENERATED_RULE_FIELDS: StaticRuleField[] = ["authorId"];
+
+/** Fields the filter builder offers in its field picker. */
+export const PICKABLE_RULE_FIELDS: StaticRuleField[] = RULE_FIELDS.filter((field) => !GENERATED_RULE_FIELDS.includes(field));
 
 /**
  * Operators offered for a custom metadata field, keyed by the field's type.

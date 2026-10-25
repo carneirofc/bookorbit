@@ -193,7 +193,7 @@ function buildValueFor(operator: RuleOperator, field: RuleField): { value?: unkn
     case 'includesAny':
     case 'includesAll':
     case 'excludesAll':
-      return { value: ['test'] };
+      return { value: field === 'authorId' ? [7] : ['test'] };
     default: {
       const _exhaustive: never = operator;
       return _exhaustive;
@@ -1061,6 +1061,62 @@ describe('authorRuleToSql', () => {
     const { builder } = makeBuilder();
     const where = builder.buildWhere(wrapRule({ type: 'rule', field: 'author', operator: 'isNotEmpty' }) as never, USER_CTX) as any;
     expect(getRuleSql(where)).toMatchObject({ type: 'sql' });
+  });
+});
+
+describe('authorIdRuleToSql', () => {
+  it('includesAny matches author ids exactly, without a name pattern', () => {
+    const { builder } = makeBuilder();
+    vi.mocked(accentInsensitiveIlike).mockClear();
+    const where = builder.buildWhere(
+      wrapRule({ type: 'rule', field: 'authorId', operator: 'includesAny', value: [3, 12] }) as never,
+      USER_CTX,
+    ) as any;
+
+    const clause = getRuleSql(where) as any;
+    expect(clause).toMatchObject({ type: 'sql' });
+    expect(clause.values[0].whereClause.clauses[1]).toMatchObject({ type: 'inArray', right: [3, 12] });
+    expect(collectColumnNames(clause.values[0].whereClause.clauses[1])).toEqual(['author_id']);
+    expect(accentInsensitiveIlike).not.toHaveBeenCalled();
+  });
+
+  it('includesAll builds one subquery per author id', () => {
+    const { builder, db } = makeBuilder();
+    const where = builder.buildWhere(
+      wrapRule({ type: 'rule', field: 'authorId', operator: 'includesAll', value: [3, 12] }) as never,
+      USER_CTX,
+    ) as any;
+
+    expect(db.select).toHaveBeenCalledTimes(2);
+    expect(getRuleSql(where)).toMatchObject({ type: 'and' });
+  });
+
+  it('excludesAll negates the id match', () => {
+    const { builder } = makeBuilder();
+    const where = builder.buildWhere(wrapRule({ type: 'rule', field: 'authorId', operator: 'excludesAll', value: [3] }) as never, USER_CTX) as any;
+    expect(getRuleSql(where)).toMatchObject({ type: 'not', value: { type: 'sql' } });
+  });
+
+  it('isEmpty and isNotEmpty test for any author link', () => {
+    const { builder } = makeBuilder();
+    const empty = builder.buildWhere(wrapRule({ type: 'rule', field: 'authorId', operator: 'isEmpty' }) as never, USER_CTX) as any;
+    const present = builder.buildWhere(wrapRule({ type: 'rule', field: 'authorId', operator: 'isNotEmpty' }) as never, USER_CTX) as any;
+    expect(getRuleSql(empty)).toMatchObject({ type: 'not', value: { type: 'sql' } });
+    expect(getRuleSql(present)).toMatchObject({ type: 'sql' });
+  });
+
+  it('rejects values that are not author ids', () => {
+    const { builder } = makeBuilder();
+    expect(() =>
+      builder.buildWhere(wrapRule({ type: 'rule', field: 'authorId', operator: 'includesAny', value: ['Tolkien'] }) as never, USER_CTX),
+    ).toThrow(BadRequestException);
+  });
+
+  it('leaves the author name rule a substring match', () => {
+    const { builder } = makeBuilder();
+    vi.mocked(accentInsensitiveIlike).mockClear();
+    builder.buildWhere(wrapRule({ type: 'rule', field: 'author', operator: 'includesAny', value: ['Ann'] }) as never, USER_CTX);
+    expect(accentInsensitiveIlike).toHaveBeenCalledWith(expect.anything(), '%Ann%');
   });
 });
 

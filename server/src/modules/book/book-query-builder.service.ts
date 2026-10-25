@@ -194,6 +194,8 @@ export class BookQueryBuilder {
         );
       case 'author':
         return this.authorRuleToSql(operator, value as string[]);
+      case 'authorId':
+        return this.authorIdRuleToSql(operator, value as number[] | undefined);
       case 'genre':
         return this.genreRuleToSql(operator, value as string[]);
       case 'tag':
@@ -616,6 +618,42 @@ export class BookQueryBuilder {
         return existsAuthor();
       default:
         throw new BadRequestException(`Invalid operator '${operator}' for author field`);
+    }
+  }
+
+  /** Exact author match by id, unlike `author`, which matches a name substring. */
+  private authorIdRuleToSql(operator: string, values?: number[]): SQL {
+    const existsAuthor = (whereClause?: SQL) => {
+      const predicates: SQL[] = [eq(bookAuthors.bookId, books.id)];
+      if (whereClause) predicates.push(whereClause);
+      const sq = this.db
+        .select({ one: sql`1` })
+        .from(bookAuthors)
+        .where(and(...predicates)!);
+      return sql`exists (${sq})`;
+    };
+    const ids = (values ?? []).map((value) => {
+      const id = Number(value);
+      if (!Number.isSafeInteger(id) || id <= 0) throw new BadRequestException(`Operator '${operator}' requires author ids`);
+      return id;
+    });
+
+    switch (operator) {
+      case 'includesAny':
+        if (!ids.length) return sql`1 = 0`;
+        return existsAuthor(inArray(bookAuthors.authorId, ids));
+      case 'includesAll':
+        if (!ids.length) return sql`1 = 0`;
+        return and(...ids.map((id) => existsAuthor(eq(bookAuthors.authorId, id))))!;
+      case 'excludesAll':
+        if (!ids.length) return sql`1 = 1`;
+        return not(existsAuthor(inArray(bookAuthors.authorId, ids)));
+      case 'isEmpty':
+        return not(existsAuthor());
+      case 'isNotEmpty':
+        return existsAuthor();
+      default:
+        throw new BadRequestException(`Invalid operator '${operator}' for authorId field`);
     }
   }
 
