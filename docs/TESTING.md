@@ -135,6 +135,7 @@ check that your env vars match the values in `server/.env.example`.
 | `migration-calibre-web-automated` | full  | dedicated-db | 120 min | Calibre-Web Automated stopped-snapshot migration                                                                      |
 | `authorization-matrix`            | full  | dedicated-db | 60 min  | Permission enforcement across all protected routes                                                                    |
 | `book-api-contract`               | full  | dedicated-db | 60 min  | Book API response shape and field contract                                                                            |
+| `discover-facets`                 | full  | dedicated-db | 45 min  | Discover facet counts, none buckets and range buckets equal the listing totals, per user and scope                    |
 | `app-settings-oidc-contract`      | full  | dedicated-db | 60 min  | App settings and OIDC configuration contract                                                                          |
 | `library-admin-workflows`         | full  | dedicated-db | 60 min  | Library create/update/delete admin workflows                                                                          |
 | `reader-format-delivery`          | full  | dedicated-db | 60 min  | Book file serving and format delivery                                                                                 |
