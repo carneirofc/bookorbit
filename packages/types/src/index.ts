@@ -33,6 +33,7 @@ export * from "./pattern-resolver";
 export * from "./query";
 export * from "./jump-buckets";
 export * from "./tag-browser";
+export * from "./discover";
 export * from "./reader-settings";
 export * from "./scanner";
 export * from "./search";
