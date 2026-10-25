@@ -261,6 +261,27 @@ describe('AchievementService', () => {
       expect(repo.claimNextCelebration).toHaveBeenCalledOnce();
     });
 
+    it('hides the related book title and id once the book is no longer accessible', async () => {
+      repo.claimNextCelebration.mockResolvedValue({
+        achievement,
+        award: {
+          id: 4,
+          userId: 1,
+          achievementKey: achievement.key,
+          awardedAt: new Date('2026-07-22T12:00:00Z'),
+          contextJson: { bookId: 42, bookTitle: 'The Long Orbit', publishedYear: 1951 },
+        },
+      });
+      repo.findAccessibleBookIds.mockResolvedValue(new Set());
+
+      const claim = await service.claimCelebration({ id: 1, isSuperuser: false } as never);
+
+      expect(claim?.achievement.contextBookId).toBeNull();
+      expect(claim?.achievement.contextBookTitle).toBeNull();
+      expect(claim?.achievement.context).toEqual({ publishedYear: 1951 });
+      expect(JSON.stringify(claim)).not.toContain('The Long Orbit');
+    });
+
     it('treats missing acknowledgement as idempotent and rejects foreign claims', async () => {
       repo.acknowledgeCelebration.mockResolvedValueOnce('missing').mockResolvedValueOnce('foreign');
 

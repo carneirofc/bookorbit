@@ -207,9 +207,10 @@ export class AchievementService implements OnModuleInit, OnModuleDestroy {
     accessibleBookIds: Set<number>,
   ): AchievementItem {
     const lockedSecret = achievement.hidden && !earned;
-    const context = earned?.contextJson && typeof earned.contextJson === 'object' ? (earned.contextJson as Record<string, unknown>) : null;
-    const rawBookId = this.contextBookId(context);
+    const storedContext = earned?.contextJson && typeof earned.contextJson === 'object' ? (earned.contextJson as Record<string, unknown>) : null;
+    const rawBookId = this.contextBookId(storedContext);
     const contextBookId = rawBookId !== null && accessibleBookIds.has(rawBookId) ? rawBookId : null;
+    const context = rawBookId !== null && contextBookId === null ? this.withoutBookReference(storedContext!) : storedContext;
     const contextBookTitle = typeof context?.bookTitle === 'string' && context.bookTitle.trim().length > 0 ? context.bookTitle : null;
 
     return {
@@ -231,6 +232,11 @@ export class AchievementService implements OnModuleInit, OnModuleDestroy {
       contextBookTitle: lockedSecret ? null : contextBookTitle,
       currentProgress: lockedSecret ? null : currentProgress,
     };
+  }
+
+  /** The award outlives the viewer's access to its book, so the stored title must not outlive it either. */
+  private withoutBookReference(context: Record<string, unknown>): Record<string, unknown> {
+    return Object.fromEntries(Object.entries(context).filter(([key]) => key !== 'bookId' && key !== 'bookTitle'));
   }
 
   private contextBookId(context: unknown): number | null {
