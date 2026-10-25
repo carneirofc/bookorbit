@@ -39,8 +39,10 @@ describe('BookDiscoverFacetsRepository', () => {
         truncated: true,
       });
       const { sql: text, params } = lastQuery();
-      expect(text).toContain('FROM "book_tags" INNER JOIN "tags" ON "tags"."id" = "book_tags"."tag_id"');
-      expect(text).toContain('"book_tags"."book_id" IN (');
+      expect(text).toContain(
+        'SELECT "book_tags"."tag_id" AS entity_id, count(*)::int AS book_count FROM "book_tags" WHERE "book_tags"."book_id" IN (',
+      );
+      expect(text).toContain('GROUP BY "book_tags"."tag_id") link_counts INNER JOIN "tags" ON "tags"."id" = link_counts.entity_id');
       expect(text).toContain(`"books"."status" <> $`);
       expect(text).toContain('"tags"."name" NOT IN (');
       expect(text).toContain('public.bookorbit_unaccent("tags"."name") ILIKE');
@@ -57,9 +59,10 @@ describe('BookDiscoverFacetsRepository', () => {
       const series = lastQuery().sql;
 
       expect(author).toContain('"authors"."id"::text AS value');
-      expect(author).toContain('GROUP BY "authors"."id", "authors"."name"');
+      expect(author).toContain('GROUP BY "book_authors"."author_id") link_counts');
       expect(author).toContain('ORDER BY label ASC, value ASC');
-      expect(series).toContain('count(DISTINCT "book_series_memberships"."book_id")::int');
+      expect(series).toContain('count(DISTINCT pairs.book_id)::int');
+      expect(series).toContain('OFFSET 0) pairs');
       expect(series).toContain('GROUP BY "book_series"."name"');
     });
   });

@@ -135,17 +135,33 @@ export class BookDiscoverFacetsRepository {
     excludeValues: string[];
   }): Promise<{ values: DiscoverValueCount[]; truncated: boolean }> {
     const r = RELATIONS[opts.relation];
-    const predicates: SQL[] = [sql`${r.linkBookId} IN (${this.matchedBookIds(opts.where)})`];
+    const predicates: SQL[] = [];
     const search = opts.search?.trim();
     if (search) predicates.push(accentInsensitiveIlike(r.name, buildSearchPattern(search)));
     if (opts.excludeValues.length > 0) predicates.push(sql`${r.value} NOT IN (${joinValues(opts.excludeValues)})`);
+    const where = predicates.length > 0 ? sql`WHERE ${sql.join(predicates, sql` AND `)}` : sql``;
+    const matchedLinks = sql`${r.linkBookId} IN (${this.matchedBookIds(opts.where)})`;
+
+    // The matched books' links are counted first, in a subquery Postgres cannot flatten (GROUP BY,
+    // or OFFSET 0 for series). Flattened, it underestimates the matched set and drives the join
+    // from every row of the entity table, probing each matched book once per tag. Series are
+    // counted by name, and one book can sit in two same-named series, so they count distinct books.
+    const source =
+      opts.relation === 'series'
+        ? sql`
+          SELECT ${r.value} AS value, ${r.name} AS label, count(DISTINCT pairs.book_id)::int AS book_count
+          FROM (SELECT ${r.linkEntityId} AS entity_id, ${r.linkBookId} AS book_id FROM ${r.link} WHERE ${matchedLinks} OFFSET 0) pairs
+          INNER JOIN ${r.entity} ON ${r.entityId} = pairs.entity_id
+          ${where}
+          GROUP BY ${r.groupBy}`
+        : sql`
+          SELECT ${r.value} AS value, ${r.name} AS label, link_counts.book_count AS book_count
+          FROM (SELECT ${r.linkEntityId} AS entity_id, count(*)::int AS book_count FROM ${r.link} WHERE ${matchedLinks} GROUP BY ${r.linkEntityId}) link_counts
+          INNER JOIN ${r.entity} ON ${r.entityId} = link_counts.entity_id
+          ${where}`;
 
     const result = await this.db.execute<{ value: string; label: string; book_count: number }>(sql`
-      SELECT ${r.value} AS value, ${r.name} AS label, ${r.count} AS book_count
-      FROM ${r.link}
-      INNER JOIN ${r.entity} ON ${r.entityId} = ${r.linkEntityId}
-      WHERE ${sql.join(predicates, sql` AND `)}
-      GROUP BY ${r.groupBy}
+      ${source}
       ORDER BY ${orderBySql(opts.sort)}
       LIMIT ${opts.limit + 1}
     `);
