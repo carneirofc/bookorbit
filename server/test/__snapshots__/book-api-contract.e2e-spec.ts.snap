@@ -1,0 +1,843 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`Book API golden snapshots (e2e) > mutations > DELETE /api/v1/books 1`] = `
+{
+  "body": null,
+  "contentType": null,
+  "statusCode": 204,
+}
+`;
+
+exports[`Book API golden snapshots (e2e) > mutations > DELETE /api/v1/books 2`] = `
+{
+  "body": {
+    "items": [
+      {
+        "addedAt": "<timestamp>",
+        "authors": [],
+        "coverAspectRatio": "2/3",
+        "coverVersion": "<volatile>",
+        "customMetadata": [],
+        "files": [
+          {
+            "format": "epub",
+            "id": "<id:4>",
+            "mediaOverlay": {
+              "available": false,
+              "durationSeconds": null,
+            },
+            "role": "primary",
+            "sizeBytes": 1116,
+          },
+        ],
+        "genres": [
+          "Golden Genre",
+        ],
+        "hardcoverEditionId": null,
+        "hardcoverId": null,
+        "hasCover": false,
+        "hasMetadataLocks": false,
+        "id": "<id:3>",
+        "isbn13": null,
+        "language": "en",
+        "libraryId": "<id:1>",
+        "lockedFields": [],
+        "metadataScore": 30,
+        "narrators": [],
+        "pageCount": null,
+        "publishedDate": null,
+        "publishedYear": null,
+        "publisher": "Golden Press",
+        "rating": 4,
+        "readStatus": {
+          "finishedAt": "<timestamp>",
+          "source": "manual",
+          "startedAt": null,
+          "status": "read",
+          "updatedAt": "<timestamp>",
+        },
+        "readingProgress": null,
+        "seriesId": null,
+        "seriesIndex": null,
+        "seriesMemberships": [],
+        "seriesName": null,
+        "status": "present",
+        "subtitle": null,
+        "tags": [],
+        "title": "Golden One Replaced",
+        "updatedAt": "<timestamp>",
+      },
+    ],
+    "page": 0,
+    "size": 10,
+    "total": 1,
+  },
+  "contentType": "application/json; charset=utf-8",
+  "statusCode": 201,
+}
+`;
+
+exports[`Book API golden snapshots (e2e) > mutations > PATCH /api/v1/books/:id/metadata 1`] = `
+{
+  "body": {
+    "addedAt": "<timestamp>",
+    "audioMetadata": null,
+    "authors": [
+      {
+        "id": "<id:8>",
+        "name": "Golden Author",
+        "sortName": null,
+      },
+    ],
+    "collections": [],
+    "comicMetadata": null,
+    "communityRatings": [],
+    "coverAspectRatio": "2/3",
+    "coverMedia": [
+      "ebook",
+    ],
+    "coverSource": null,
+    "coverVersion": "<volatile>",
+    "covers": {
+      "audio": null,
+      "ebook": null,
+    },
+    "customMetadata": [],
+    "description": null,
+    "fileWriteStatus": {
+      "enabled": false,
+      "reason": "library_disabled",
+      "writableFields": [],
+      "writableFormats": [],
+    },
+    "files": [
+      {
+        "absolutePath": "<fixtureRoot>/books/library-<uuid:1>/golden/three.epub",
+        "contentVersion": "<timestamp>",
+        "createdAt": "<timestamp>",
+        "durationSeconds": null,
+        "fileHash": "<volatile>",
+        "filename": "three.epub",
+        "format": "epub",
+        "id": "<id:5>",
+        "mediaOverlay": {
+          "available": false,
+          "durationSeconds": null,
+        },
+        "role": "primary",
+        "sizeBytes": 1102,
+      },
+    ],
+    "folderPath": "<fixtureRoot>/books/library-<uuid:1>/golden/three.epub",
+    "formatPriority": [
+      "epub",
+      "kepub",
+      "pdf",
+      "cbz",
+      "cbr",
+      "cb7",
+      "mobi",
+      "azw3",
+      "azw",
+      "fb2",
+      "djvu",
+      "m4b",
+      "mp3",
+      "m4a",
+      "opus",
+      "ogg",
+      "flac",
+    ],
+    "genres": [],
+    "hardcoverEditionId": null,
+    "id": "<id:4>",
+    "isbn10": null,
+    "isbn13": null,
+    "language": "en",
+    "lastWrittenAt": null,
+    "libraryId": "<id:1>",
+    "libraryName": "golden-alpha",
+    "lockedFields": [],
+    "metadataScore": 35,
+    "pageCount": null,
+    "personalNote": null,
+    "personalNoteUpdatedAt": null,
+    "providerIds": {
+      "aladin": null,
+      "amazon": null,
+      "audible": null,
+      "comicvine": null,
+      "goodreads": null,
+      "google": null,
+      "hardcover": null,
+      "itunes": null,
+      "kobo": null,
+      "librofm": null,
+      "lubimyczytac": null,
+      "openLibrary": null,
+      "ranobedb": null,
+    },
+    "publishedDate": null,
+    "publishedYear": 2020,
+    "publisher": null,
+    "rating": null,
+    "readAloudSync": {
+      "audioDurationSeconds": null,
+      "durationDifferenceRatio": null,
+      "durationDifferenceSeconds": null,
+      "koreaderDownloadAvailable": false,
+      "mode": "auto",
+      "overlayDurationSeconds": null,
+      "overlayFileId": null,
+      "state": "unavailable",
+      "unavailableReason": "no_media_overlay_epub",
+    },
+    "readStatus": null,
+    "seriesId": "<id:7>",
+    "seriesIndex": null,
+    "seriesMemberships": [
+      {
+        "displayOrder": 0,
+        "expectedBookCount": null,
+        "seriesId": "<id:7>",
+        "seriesIndex": null,
+        "seriesName": "Golden Series",
+      },
+    ],
+    "seriesName": "Golden Series",
+    "status": "present",
+    "subtitle": "An edited subtitle",
+    "tags": [],
+    "title": "Golden Three Edited",
+    "updatedAt": "<timestamp>",
+  },
+  "contentType": "application/json; charset=utf-8",
+  "statusCode": 200,
+}
+`;
+
+exports[`Book API golden snapshots (e2e) > mutations > POST /api/v1/books/:id/files 1`] = `
+{
+  "body": {
+    "message": "Cannot add files to a book in a single-file library. Upload a new book instead.",
+    "path": "/api/v1/books/5/files",
+    "requestId": "<volatile>",
+    "statusCode": 400,
+    "timestamp": "<timestamp>",
+  },
+  "contentType": "application/json; charset=utf-8",
+  "statusCode": 400,
+}
+`;
+
+exports[`Book API golden snapshots (e2e) > mutations > POST /api/v1/books/bulk-edit-metadata 1`] = `
+{
+  "body": {
+    "fields": {
+      "genres": {
+        "skippedLocked": 0,
+        "updated": 2,
+      },
+      "language": {
+        "skippedLocked": 0,
+        "updated": 2,
+      },
+    },
+    "updatedBooks": 2,
+  },
+  "contentType": "application/json; charset=utf-8",
+  "statusCode": 201,
+}
+`;
+
+exports[`Book API golden snapshots (e2e) > mutations > POST /api/v1/books/bulk-set-metadata 1`] = `
+{
+  "body": null,
+  "contentType": null,
+  "statusCode": 204,
+}
+`;
+
+exports[`Book API golden snapshots (e2e) > mutations > POST /api/v1/books/bulk-set-rating 1`] = `
+{
+  "body": null,
+  "contentType": null,
+  "statusCode": 204,
+}
+`;
+
+exports[`Book API golden snapshots (e2e) > mutations > POST /api/v1/books/bulk-set-status 1`] = `
+{
+  "body": null,
+  "contentType": null,
+  "statusCode": 204,
+}
+`;
+
+exports[`Book API golden snapshots (e2e) > mutations > POST /api/v1/books/bulk-set-status 2`] = `
+{
+  "body": {
+    "message": [
+      "status must be one of the following values: unread, want_to_read, reading, on_hold, rereading, read, skimmed, abandoned",
+    ],
+    "path": "/api/v1/books/bulk-set-status",
+    "requestId": "<volatile>",
+    "statusCode": 400,
+    "timestamp": "<timestamp>",
+  },
+  "contentType": "application/json; charset=utf-8",
+  "statusCode": 400,
+}
+`;
+
+exports[`Book API golden snapshots (e2e) > mutations > POST /api/v1/books/bulk-update-tags 1`] = `
+{
+  "body": null,
+  "contentType": null,
+  "statusCode": 204,
+}
+`;
+
+exports[`Book API golden snapshots (e2e) > mutations > POST /api/v1/books/move 1`] = `
+{
+  "body": [
+    {
+      "bookId": "<id:5>",
+      "status": "success",
+    },
+    {
+      "cancelled": false,
+      "done": true,
+      "failed": 0,
+      "merged": 0,
+      "processed": 1,
+      "skipped": 0,
+      "succeeded": 1,
+    },
+  ],
+  "contentType": "text/event-stream",
+  "statusCode": 200,
+}
+`;
+
+exports[`Book API golden snapshots (e2e) > mutations > POST /api/v1/libraries/:id/books reflects the mutations 1`] = `
+{
+  "body": {
+    "items": [
+      {
+        "addedAt": "<timestamp>",
+        "authors": [],
+        "coverAspectRatio": "2/3",
+        "coverVersion": "<volatile>",
+        "customMetadata": [],
+        "files": [
+          {
+            "format": "epub",
+            "id": "<id:4>",
+            "mediaOverlay": {
+              "available": false,
+              "durationSeconds": null,
+            },
+            "role": "primary",
+            "sizeBytes": 1116,
+          },
+        ],
+        "genres": [
+          "Golden Genre",
+        ],
+        "hardcoverEditionId": null,
+        "hardcoverId": null,
+        "hasCover": false,
+        "hasMetadataLocks": false,
+        "id": "<id:3>",
+        "isbn13": null,
+        "language": "en",
+        "libraryId": "<id:1>",
+        "lockedFields": [],
+        "metadataScore": 30,
+        "narrators": [],
+        "pageCount": null,
+        "publishedDate": null,
+        "publishedYear": null,
+        "publisher": "Golden Press",
+        "rating": 4,
+        "readStatus": {
+          "finishedAt": "<timestamp>",
+          "source": "manual",
+          "startedAt": null,
+          "status": "read",
+          "updatedAt": "<timestamp>",
+        },
+        "readingProgress": null,
+        "seriesId": null,
+        "seriesIndex": null,
+        "seriesMemberships": [],
+        "seriesName": null,
+        "status": "present",
+        "subtitle": null,
+        "tags": [],
+        "title": "Golden One Replaced",
+        "updatedAt": "<timestamp>",
+      },
+      {
+        "addedAt": "<timestamp>",
+        "authors": [
+          "Golden Author",
+        ],
+        "coverAspectRatio": "2/3",
+        "coverVersion": "<volatile>",
+        "customMetadata": [],
+        "files": [
+          {
+            "format": "epub",
+            "id": "<id:5>",
+            "mediaOverlay": {
+              "available": false,
+              "durationSeconds": null,
+            },
+            "role": "primary",
+            "sizeBytes": 1102,
+          },
+        ],
+        "genres": [],
+        "hardcoverEditionId": null,
+        "hardcoverId": null,
+        "hasCover": false,
+        "hasMetadataLocks": false,
+        "id": "<id:4>",
+        "isbn13": null,
+        "language": "en",
+        "libraryId": "<id:1>",
+        "lockedFields": [],
+        "metadataScore": 35,
+        "narrators": [],
+        "pageCount": null,
+        "publishedDate": null,
+        "publishedYear": 2020,
+        "publisher": null,
+        "rating": null,
+        "readStatus": null,
+        "readingProgress": null,
+        "seriesId": "<id:7>",
+        "seriesIndex": null,
+        "seriesMemberships": [
+          {
+            "displayOrder": 0,
+            "expectedBookCount": null,
+            "seriesId": "<id:7>",
+            "seriesIndex": null,
+            "seriesName": "Golden Series",
+          },
+        ],
+        "seriesName": "Golden Series",
+        "status": "present",
+        "subtitle": "An edited subtitle",
+        "tags": [],
+        "title": "Golden Three Edited",
+        "updatedAt": "<timestamp>",
+      },
+      {
+        "addedAt": "<timestamp>",
+        "authors": [],
+        "coverAspectRatio": "2/3",
+        "coverVersion": "<volatile>",
+        "customMetadata": [],
+        "files": [
+          {
+            "format": "epub",
+            "id": "<id:6>",
+            "mediaOverlay": {
+              "available": false,
+              "durationSeconds": null,
+            },
+            "role": "primary",
+            "sizeBytes": 1097,
+          },
+        ],
+        "genres": [
+          "Golden Genre",
+        ],
+        "hardcoverEditionId": null,
+        "hardcoverId": null,
+        "hasCover": false,
+        "hasMetadataLocks": false,
+        "id": "<id:5>",
+        "isbn13": null,
+        "language": "en",
+        "libraryId": "<id:1>",
+        "lockedFields": [],
+        "metadataScore": 33,
+        "narrators": [],
+        "pageCount": null,
+        "publishedDate": null,
+        "publishedYear": null,
+        "publisher": "Golden Press",
+        "rating": 4,
+        "readStatus": {
+          "finishedAt": "<timestamp>",
+          "source": "manual",
+          "startedAt": null,
+          "status": "read",
+          "updatedAt": "<timestamp>",
+        },
+        "readingProgress": null,
+        "seriesId": null,
+        "seriesIndex": null,
+        "seriesMemberships": [],
+        "seriesName": null,
+        "status": "present",
+        "subtitle": null,
+        "tags": [
+          "golden-tag",
+          "second-tag",
+        ],
+        "title": "Golden Two",
+        "updatedAt": "<timestamp>",
+      },
+      {
+        "addedAt": "<timestamp>",
+        "authors": [],
+        "coverAspectRatio": "2/3",
+        "coverVersion": "<volatile>",
+        "customMetadata": [],
+        "files": [
+          {
+            "format": "epub",
+            "id": "<id:9>",
+            "mediaOverlay": {
+              "available": false,
+              "durationSeconds": null,
+            },
+            "role": "primary",
+            "sizeBytes": 1103,
+          },
+        ],
+        "genres": [],
+        "hardcoverEditionId": null,
+        "hardcoverId": null,
+        "hasCover": false,
+        "hasMetadataLocks": false,
+        "id": "<id:6>",
+        "isbn13": null,
+        "language": "en",
+        "libraryId": "<id:1>",
+        "lockedFields": [],
+        "metadataScore": 17,
+        "narrators": [],
+        "pageCount": null,
+        "publishedDate": null,
+        "publishedYear": null,
+        "publisher": null,
+        "rating": null,
+        "readStatus": null,
+        "readingProgress": null,
+        "seriesId": null,
+        "seriesIndex": null,
+        "seriesMemberships": [],
+        "seriesName": null,
+        "status": "present",
+        "subtitle": null,
+        "tags": [],
+        "title": "Golden Upload",
+        "updatedAt": "<timestamp>",
+      },
+    ],
+    "page": 0,
+    "size": 10,
+    "total": 4,
+  },
+  "contentType": "application/json; charset=utf-8",
+  "statusCode": 201,
+}
+`;
+
+exports[`Book API golden snapshots (e2e) > mutations > POST /api/v1/libraries/:id/upload 1`] = `
+{
+  "body": {
+    "bookId": "<id:6>",
+    "filename": "Golden Upload.epub",
+    "format": "epub",
+    "sizeBytes": 1103,
+  },
+  "contentType": "application/json; charset=utf-8",
+  "statusCode": 201,
+}
+`;
+
+exports[`Book API golden snapshots (e2e) > mutations > PUT /api/v1/books/:bookId/files/:fileId 1`] = `
+{
+  "body": {
+    "bookId": "<id:3>",
+    "filename": "one.epub",
+    "format": "epub",
+    "id": "<id:4>",
+    "isPrimary": true,
+    "sizeBytes": 1116,
+  },
+  "contentType": "application/json; charset=utf-8",
+  "statusCode": 200,
+}
+`;
+
+exports[`Book API golden snapshots (e2e) > reads > GET /api/v1/books/search 1`] = `
+{
+  "body": [
+    {
+      "authors": [],
+      "formats": [
+        "epub",
+      ],
+      "id": "<id:3>",
+      "libraryId": "<id:1>",
+      "libraryName": "golden-alpha",
+      "seriesName": null,
+      "title": "Golden One",
+      "updatedAt": "<timestamp>",
+    },
+    {
+      "authors": [],
+      "formats": [
+        "epub",
+      ],
+      "id": "<id:4>",
+      "libraryId": "<id:1>",
+      "libraryName": "golden-alpha",
+      "seriesName": null,
+      "title": "Golden Three",
+      "updatedAt": "<timestamp>",
+    },
+    {
+      "authors": [],
+      "formats": [
+        "epub",
+      ],
+      "id": "<id:5>",
+      "libraryId": "<id:1>",
+      "libraryName": "golden-alpha",
+      "seriesName": null,
+      "title": "Golden Two",
+      "updatedAt": "<timestamp>",
+    },
+  ],
+  "contentType": "application/json; charset=utf-8",
+  "statusCode": 200,
+}
+`;
+
+exports[`Book API golden snapshots (e2e) > reads > GET /api/v1/libraries 1`] = `
+{
+  "body": [
+    {
+      "accessLevel": "owner",
+      "autoScanCronExpression": null,
+      "bookCount": 3,
+      "coverAspectRatio": "2/3",
+      "createdAt": "<timestamp>",
+      "displayOrder": 0,
+      "fileRenameEnabled": false,
+      "fileWriteEnabled": false,
+      "folders": [
+        {
+          "createdAt": "<timestamp>",
+          "id": "<id:1>",
+          "path": "<fixtureRoot>/books/library-<uuid:1>",
+          "role": "downloads",
+        },
+      ],
+      "icon": "📚",
+      "id": "<id:1>",
+      "name": "golden-alpha",
+      "organizationMode": "book_per_file",
+      "podcastCount": null,
+      "scanMode": "auto",
+      "type": "books",
+      "updatedAt": "<timestamp>",
+      "watch": false,
+    },
+    {
+      "accessLevel": "owner",
+      "autoScanCronExpression": null,
+      "bookCount": 0,
+      "coverAspectRatio": "2/3",
+      "createdAt": "<timestamp>",
+      "displayOrder": 0,
+      "fileRenameEnabled": false,
+      "fileWriteEnabled": false,
+      "folders": [
+        {
+          "createdAt": "<timestamp>",
+          "id": "<id:2>",
+          "path": "<fixtureRoot>/books/library-<uuid:2>",
+          "role": "downloads",
+        },
+      ],
+      "icon": "📚",
+      "id": "<id:2>",
+      "name": "golden-beta",
+      "organizationMode": "book_per_file",
+      "podcastCount": null,
+      "scanMode": "auto",
+      "type": "books",
+      "updatedAt": "<timestamp>",
+      "watch": false,
+    },
+  ],
+  "contentType": "application/json; charset=utf-8",
+  "statusCode": 200,
+}
+`;
+
+exports[`Book API golden snapshots (e2e) > reads > POST /api/v1/libraries/:id/books 1`] = `
+{
+  "body": {
+    "items": [
+      {
+        "addedAt": "<timestamp>",
+        "authors": [],
+        "coverAspectRatio": "2/3",
+        "coverVersion": "<volatile>",
+        "customMetadata": [],
+        "files": [
+          {
+            "format": "epub",
+            "id": "<id:4>",
+            "mediaOverlay": {
+              "available": false,
+              "durationSeconds": null,
+            },
+            "role": "primary",
+            "sizeBytes": 1100,
+          },
+        ],
+        "genres": [],
+        "hardcoverEditionId": null,
+        "hardcoverId": null,
+        "hasCover": false,
+        "hasMetadataLocks": false,
+        "id": "<id:3>",
+        "isbn13": null,
+        "language": "en",
+        "libraryId": "<id:1>",
+        "lockedFields": [],
+        "metadataScore": 17,
+        "narrators": [],
+        "pageCount": null,
+        "publishedDate": null,
+        "publishedYear": null,
+        "publisher": null,
+        "rating": null,
+        "readStatus": null,
+        "readingProgress": null,
+        "seriesId": null,
+        "seriesIndex": null,
+        "seriesMemberships": [],
+        "seriesName": null,
+        "status": "present",
+        "subtitle": null,
+        "tags": [],
+        "title": "Golden One",
+        "updatedAt": "<timestamp>",
+      },
+      {
+        "addedAt": "<timestamp>",
+        "authors": [],
+        "coverAspectRatio": "2/3",
+        "coverVersion": "<volatile>",
+        "customMetadata": [],
+        "files": [
+          {
+            "format": "epub",
+            "id": "<id:5>",
+            "mediaOverlay": {
+              "available": false,
+              "durationSeconds": null,
+            },
+            "role": "primary",
+            "sizeBytes": 1102,
+          },
+        ],
+        "genres": [],
+        "hardcoverEditionId": null,
+        "hardcoverId": null,
+        "hasCover": false,
+        "hasMetadataLocks": false,
+        "id": "<id:4>",
+        "isbn13": null,
+        "language": "en",
+        "libraryId": "<id:1>",
+        "lockedFields": [],
+        "metadataScore": 17,
+        "narrators": [],
+        "pageCount": null,
+        "publishedDate": null,
+        "publishedYear": null,
+        "publisher": null,
+        "rating": null,
+        "readStatus": null,
+        "readingProgress": null,
+        "seriesId": null,
+        "seriesIndex": null,
+        "seriesMemberships": [],
+        "seriesName": null,
+        "status": "present",
+        "subtitle": null,
+        "tags": [],
+        "title": "Golden Three",
+        "updatedAt": "<timestamp>",
+      },
+      {
+        "addedAt": "<timestamp>",
+        "authors": [],
+        "coverAspectRatio": "2/3",
+        "coverVersion": "<volatile>",
+        "customMetadata": [],
+        "files": [
+          {
+            "format": "epub",
+            "id": "<id:6>",
+            "mediaOverlay": {
+              "available": false,
+              "durationSeconds": null,
+            },
+            "role": "primary",
+            "sizeBytes": 1097,
+          },
+        ],
+        "genres": [],
+        "hardcoverEditionId": null,
+        "hardcoverId": null,
+        "hasCover": false,
+        "hasMetadataLocks": false,
+        "id": "<id:5>",
+        "isbn13": null,
+        "language": "en",
+        "libraryId": "<id:1>",
+        "lockedFields": [],
+        "metadataScore": 17,
+        "narrators": [],
+        "pageCount": null,
+        "publishedDate": null,
+        "publishedYear": null,
+        "publisher": null,
+        "rating": null,
+        "readStatus": null,
+        "readingProgress": null,
+        "seriesId": null,
+        "seriesIndex": null,
+        "seriesMemberships": [],
+        "seriesName": null,
+        "status": "present",
+        "subtitle": null,
+        "tags": [],
+        "title": "Golden Two",
+        "updatedAt": "<timestamp>",
+      },
+    ],
+    "page": 0,
+    "size": 10,
+    "total": 3,
+  },
+  "contentType": "application/json; charset=utf-8",
+  "statusCode": 201,
+}
+`;

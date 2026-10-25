@@ -1,7 +1,7 @@
 import { randomUUID } from 'crypto';
 
 import { and, eq } from 'drizzle-orm';
-import { readdir, rm, stat } from 'fs/promises';
+import { readdir, readFile, rm, stat } from 'fs/promises';
 import { join } from 'path';
 
 import * as unzipper from 'unzipper';
@@ -22,12 +22,21 @@ import {
   grantLibraryAccess,
   locateBookFileByRelPath,
   triggerAndWaitForLibraryScan,
+  waitForCondition,
+  type CreatedLibrary,
   type LocatedBookFile,
   type MetadataWriteE2EContext,
   type TestUserSession,
 } from './e2e/metadata-write/metadata-write-harness';
 import { createCbzFixture, createEpubFixture, createPdfFixture, writeFixtureFile } from './e2e/metadata-write/metadata-write-fixture-builder';
 import { createSlotCoverArtifacts } from './e2e/slot-cover-artifacts';
+import {
+  expectSameLibraryContract,
+  GoldenNormalizer,
+  recordResponse,
+  stripAdditiveLibraryKeys,
+  type RecordedResponse,
+} from './e2e/book-api-contract/golden-contract';
 
 type InjectResponse = Awaited<ReturnType<MetadataWriteE2EContext['app']['inject']>>;
 
@@ -945,5 +954,224 @@ describe('Book API contract (e2e)', { timeout: SCENARIO_TIMEOUT_MS }, () => {
         }
       },
     );
+  });
+});
+
+function buildFileMultipart(fileName: string, content: Buffer): { body: Buffer; boundary: string } {
+  const boundary = `----bookorbit-golden-${randomUUID()}`;
+  const preamble = Buffer.from(
+    `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fileName}"\r\nContent-Type: application/octet-stream\r\n\r\n`,
+    'utf8',
+  );
+  const closing = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8');
+  return { body: Buffer.concat([preamble, content, closing]), boundary };
+}
+
+/**
+ * Golden snapshots of the book and library HTTP surface for libraries that are not protected.
+ * Later changes must keep every snapshot unchanged; only the additive library keys handled by
+ * `expectSameLibraryContract` may appear.
+ */
+describe('Book API golden snapshots (e2e)', { timeout: SCENARIO_TIMEOUT_MS }, () => {
+  let ctx!: MetadataWriteE2EContext;
+  let normalizer!: GoldenNormalizer;
+  let alpha!: CreatedLibrary;
+  let beta!: CreatedLibrary;
+  let user!: TestUserSession;
+  let sourceRoot!: string;
+  let bookOne!: LocatedBookFile;
+  let bookTwo!: LocatedBookFile;
+  let bookThree!: LocatedBookFile;
+
+  const authToken = () => authHeader(user.accessToken);
+
+  async function snapshotJson(
+    method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
+    url: string,
+    payload?: Record<string, unknown>,
+    options: { sse?: boolean } = {},
+  ): Promise<RecordedResponse> {
+    const response = await ctx.app.inject({ method, url, headers: authToken(), ...(payload ? { payload } : {}) });
+    return recordResponse(response, options);
+  }
+
+  function expectGolden(recorded: RecordedResponse): void {
+    expect(normalizer.normalize(recorded)).toMatchSnapshot();
+  }
+
+  async function sendMultipart(method: 'POST' | 'PUT', url: string, fileName: string, content: Buffer): Promise<RecordedResponse> {
+    const { body, boundary } = buildFileMultipart(fileName, content);
+    const response = await ctx.app.inject({
+      method,
+      url,
+      headers: { ...authToken(), 'content-type': `multipart/form-data; boundary=${boundary}`, 'content-length': String(body.length) },
+      payload: body,
+    });
+    return recordResponse(response);
+  }
+
+  async function bytesOf(absolutePath: string): Promise<Buffer> {
+    return readFile(absolutePath);
+  }
+
+  beforeAll(async () => {
+    ctx = await createMetadataWriteE2EContext({ multipart: true });
+    sourceRoot = join(ctx.fixture.rootPath, 'golden-source');
+
+    alpha = await createLibraryWithFolder(ctx, { name: 'golden-alpha' });
+    beta = await createLibraryWithFolder(ctx, { name: 'golden-beta' });
+
+    await createEpubFixture(alpha.folderPath, 'golden/one.epub', { title: 'Golden One', uid: 'golden-one' });
+    await createEpubFixture(alpha.folderPath, 'golden/two.epub', { title: 'Golden Two', uid: 'golden-two' });
+    await createEpubFixture(alpha.folderPath, 'golden/three.epub', { title: 'Golden Three', uid: 'golden-three' });
+    await triggerAndWaitForLibraryScan(ctx, alpha.libraryId);
+
+    bookOne = await locateBookFileByRelPath(ctx, alpha.libraryId, 'golden/one.epub');
+    bookTwo = await locateBookFileByRelPath(ctx, alpha.libraryId, 'golden/two.epub');
+    bookThree = await locateBookFileByRelPath(ctx, alpha.libraryId, 'golden/three.epub');
+
+    user = await createUserAndLogin(ctx, {
+      permissions: [Permission.LibraryUpload, Permission.LibraryEditMetadata, Permission.LibraryDeleteBooks],
+    });
+    await grantLibraryAccess(ctx, user.userId, alpha.libraryId, 'owner');
+    await grantLibraryAccess(ctx, user.userId, beta.libraryId, 'owner');
+
+    normalizer = new GoldenNormalizer({ roots: { fixtureRoot: ctx.fixture.rootPath } });
+  }, 90_000);
+
+  afterAll(async () => {
+    await closeMetadataWriteE2EContext(ctx);
+  });
+
+  describe('reads', () => {
+    it('GET /api/v1/libraries', async () => {
+      const recorded = await snapshotJson('GET', '/api/v1/libraries');
+      const raw = recorded.body as Record<string, unknown>[];
+      const stripped = raw.map((library) => stripAdditiveLibraryKeys(library));
+      raw.forEach((library, index) => expectSameLibraryContract(stripped[index]!, library));
+      expectGolden({ ...recorded, body: stripped });
+    });
+
+    it('POST /api/v1/libraries/:id/books', async () => {
+      expectGolden(
+        await snapshotJson('POST', `/api/v1/libraries/${alpha.libraryId}/books`, {
+          sort: [{ field: 'title', dir: 'asc' }],
+          pagination: { page: 0, size: 10 },
+        }),
+      );
+    });
+
+    it('GET /api/v1/books/search', async () => {
+      expectGolden(await snapshotJson('GET', '/api/v1/books/search?q=Golden&limit=20'));
+    });
+  });
+
+  describe('mutations', () => {
+    let uploadedBookId!: number;
+
+    it('POST /api/v1/libraries/:id/upload', async () => {
+      const folderId = alpha.libraryFolderId;
+      const content = await bytesOf(await createEpubFixture(sourceRoot, 'upload.epub', { title: 'Golden Upload', uid: 'golden-upload' }));
+      const recorded = await sendMultipart('POST', `/api/v1/libraries/${alpha.libraryId}/upload?folderId=${folderId}`, 'upload.epub', content);
+      uploadedBookId = (recorded.body as { bookId: number }).bookId;
+      await waitForCondition(async () => {
+        const [metadata] = await ctx.db.select({ title: bookMetadata.title }).from(bookMetadata).where(eq(bookMetadata.bookId, uploadedBookId));
+        expect(metadata?.title).toBe('Golden Upload');
+      });
+      expectGolden(recorded);
+    });
+
+    it('POST /api/v1/books/:id/files', async () => {
+      const content = await bytesOf(await createPdfFixture(sourceRoot, 'added.pdf', 'Golden Added Format'));
+      expectGolden(await sendMultipart('POST', `/api/v1/books/${bookOne.bookId}/files`, 'added.pdf', content));
+    });
+
+    it('PUT /api/v1/books/:bookId/files/:fileId', async () => {
+      const content = await bytesOf(
+        await createEpubFixture(sourceRoot, 'replacement.epub', { title: 'Golden One Replaced', uid: 'golden-one-replaced' }),
+      );
+      expectGolden(await sendMultipart('PUT', `/api/v1/books/${bookOne.bookId}/files/${bookOne.bookFileId}`, 'replacement.epub', content));
+    });
+
+    it('POST /api/v1/books/bulk-update-tags', async () => {
+      expectGolden(
+        await snapshotJson('POST', '/api/v1/books/bulk-update-tags', {
+          bookIds: [bookOne.bookId, bookTwo.bookId],
+          mode: 'add',
+          tags: ['golden-tag', 'second-tag'],
+        }),
+      );
+    });
+
+    it('POST /api/v1/books/bulk-set-status', async () => {
+      expectGolden(await snapshotJson('POST', '/api/v1/books/bulk-set-status', { bookIds: [bookOne.bookId, bookTwo.bookId], status: 'read' }));
+      expectGolden(await snapshotJson('POST', '/api/v1/books/bulk-set-status', { bookIds: [bookOne.bookId], status: 'not-a-status' }));
+    });
+
+    it('POST /api/v1/books/bulk-set-rating', async () => {
+      expectGolden(await snapshotJson('POST', '/api/v1/books/bulk-set-rating', { bookIds: [bookOne.bookId, bookTwo.bookId], rating: 4 }));
+    });
+
+    it('POST /api/v1/books/bulk-set-metadata', async () => {
+      expectGolden(
+        await snapshotJson('POST', '/api/v1/books/bulk-set-metadata', {
+          bookIds: [bookOne.bookId, bookTwo.bookId],
+          field: 'publisher',
+          value: 'Golden Press',
+        }),
+      );
+    });
+
+    it('POST /api/v1/books/bulk-edit-metadata', async () => {
+      expectGolden(
+        await snapshotJson('POST', '/api/v1/books/bulk-edit-metadata', {
+          bookIds: [bookOne.bookId, bookTwo.bookId],
+          fields: { language: { value: 'en' }, genres: { mode: 'add', values: ['Golden Genre'] } },
+        }),
+      );
+    });
+
+    it('PATCH /api/v1/books/:id/metadata', async () => {
+      expectGolden(
+        await snapshotJson('PATCH', `/api/v1/books/${bookThree.bookId}/metadata`, {
+          title: 'Golden Three Edited',
+          subtitle: 'An edited subtitle',
+          authors: ['Golden Author'],
+          seriesName: 'Golden Series',
+          publishedYear: 2020,
+        }),
+      );
+    });
+
+    it('POST /api/v1/libraries/:id/books reflects the mutations', async () => {
+      expectGolden(
+        await snapshotJson('POST', `/api/v1/libraries/${alpha.libraryId}/books`, {
+          sort: [{ field: 'title', dir: 'asc' }],
+          pagination: { page: 0, size: 10 },
+        }),
+      );
+    });
+
+    it('POST /api/v1/books/move', async () => {
+      expectGolden(
+        await snapshotJson(
+          'POST',
+          '/api/v1/books/move',
+          {
+            selection: { bookIds: [bookTwo.bookId] },
+            targetLibraryId: beta.libraryId,
+            targetFolderId: beta.libraryFolderId,
+            collisionPolicy: 'suggested',
+          },
+          { sse: true },
+        ),
+      );
+    });
+
+    it('DELETE /api/v1/books', async () => {
+      expect(uploadedBookId).toBeGreaterThan(0);
+      expectGolden(await snapshotJson('DELETE', '/api/v1/books', { bookIds: [bookThree.bookId, uploadedBookId] }));
+      expectGolden(await snapshotJson('POST', `/api/v1/libraries/${alpha.libraryId}/books`, { pagination: { page: 0, size: 10 } }));
+    });
   });
 });

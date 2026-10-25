@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import { hash } from 'bcryptjs';
 import fastifyCookie from '@fastify/cookie';
+import fastifyMultipart from '@fastify/multipart';
 import { Test } from '@nestjs/testing';
 import { ValidationPipe } from '@nestjs/common';
 import { FastifyAdapter, type NestFastifyApplication } from '@nestjs/platform-fastify';
@@ -79,7 +80,7 @@ export function authHeader(token: string): Record<string, string> {
   return { authorization: `Bearer ${token}` };
 }
 
-export async function createMetadataWriteE2EContext(): Promise<MetadataWriteE2EContext> {
+export async function createMetadataWriteE2EContext(options: { multipart?: boolean } = {}): Promise<MetadataWriteE2EContext> {
   const fixture = await createMetadataWriteFixtureRoot();
   const envSnapshot: EnvSnapshot = {
     appDataPath: process.env.APP_DATA_PATH,
@@ -106,6 +107,7 @@ export async function createMetadataWriteE2EContext(): Promise<MetadataWriteE2EC
   );
   app.useGlobalFilters(new GlobalExceptionFilter());
   await app.register(fastifyCookie as never);
+  if (options.multipart) await app.register(fastifyMultipart as never);
   await app.init();
   await app.getHttpAdapter().getInstance().ready();
 
