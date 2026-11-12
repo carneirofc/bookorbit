@@ -29,6 +29,11 @@ interface EpubFixtureInput {
   uid?: string;
   /** Adds a stored entry of this many bytes, for a file genuinely over a size limit on disk. */
   paddingBytes?: number;
+  /**
+   * Stores every entry uncompressed. Deflate output differs between zlib builds (Node's bundled
+   * zlib vs a system zlib-ng), so tests that assert the file size need stored entries.
+   */
+  storeEntries?: boolean;
 }
 
 interface Fb2FixtureInput {
@@ -165,11 +170,12 @@ export async function createEpubFixture(rootPath: string, relativePath: string, 
 
   const chapterXml = `<html xmlns="http://www.w3.org/1999/xhtml"><head><title>${escapeXml(title)}</title></head><body><p>fixture</p></body></html>`;
 
+  const store = input.storeEntries ?? false;
   await writeZipArchive(absolutePath, [
     { path: 'mimetype', content: 'application/epub+zip', store: true },
-    { path: 'META-INF/container.xml', content: containerXml },
-    { path: 'OPS/content.opf', content: opfXml },
-    { path: 'OPS/chapter.xhtml', content: chapterXml },
+    { path: 'META-INF/container.xml', content: containerXml, store },
+    { path: 'OPS/content.opf', content: opfXml, store },
+    { path: 'OPS/chapter.xhtml', content: chapterXml, store },
     ...(input.paddingBytes ? [{ path: 'OPS/padding.bin', content: Buffer.alloc(input.paddingBytes), store: true }] : []),
   ]);
 

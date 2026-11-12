@@ -1021,9 +1021,9 @@ describe('Book API golden snapshots (e2e)', { timeout: SCENARIO_TIMEOUT_MS }, ()
     alpha = await createLibraryWithFolder(ctx, { name: 'golden-alpha' });
     beta = await createLibraryWithFolder(ctx, { name: 'golden-beta' });
 
-    await createEpubFixture(alpha.folderPath, 'golden/one.epub', { title: 'Golden One', uid: 'golden-one' });
-    await createEpubFixture(alpha.folderPath, 'golden/two.epub', { title: 'Golden Two', uid: 'golden-two' });
-    await createEpubFixture(alpha.folderPath, 'golden/three.epub', { title: 'Golden Three', uid: 'golden-three' });
+    await createEpubFixture(alpha.folderPath, 'golden/one.epub', { title: 'Golden One', uid: 'golden-one', storeEntries: true });
+    await createEpubFixture(alpha.folderPath, 'golden/two.epub', { title: 'Golden Two', uid: 'golden-two', storeEntries: true });
+    await createEpubFixture(alpha.folderPath, 'golden/three.epub', { title: 'Golden Three', uid: 'golden-three', storeEntries: true });
     await triggerAndWaitForLibraryScan(ctx, alpha.libraryId);
 
     bookOne = await locateBookFileByRelPath(ctx, alpha.libraryId, 'golden/one.epub');
@@ -1071,7 +1071,9 @@ describe('Book API golden snapshots (e2e)', { timeout: SCENARIO_TIMEOUT_MS }, ()
 
     it('POST /api/v1/libraries/:id/upload', async () => {
       const folderId = alpha.libraryFolderId;
-      const content = await bytesOf(await createEpubFixture(sourceRoot, 'upload.epub', { title: 'Golden Upload', uid: 'golden-upload' }));
+      const content = await bytesOf(
+        await createEpubFixture(sourceRoot, 'upload.epub', { title: 'Golden Upload', uid: 'golden-upload', storeEntries: true }),
+      );
       const recorded = await sendMultipart('POST', `/api/v1/libraries/${alpha.libraryId}/upload?folderId=${folderId}`, 'upload.epub', content);
       uploadedBookId = (recorded.body as { bookId: number }).bookId;
       await waitForCondition(async () => {
@@ -1088,7 +1090,7 @@ describe('Book API golden snapshots (e2e)', { timeout: SCENARIO_TIMEOUT_MS }, ()
 
     it('PUT /api/v1/books/:bookId/files/:fileId', async () => {
       const content = await bytesOf(
-        await createEpubFixture(sourceRoot, 'replacement.epub', { title: 'Golden One Replaced', uid: 'golden-one-replaced' }),
+        await createEpubFixture(sourceRoot, 'replacement.epub', { title: 'Golden One Replaced', uid: 'golden-one-replaced', storeEntries: true }),
       );
       expectGolden(await sendMultipart('PUT', `/api/v1/books/${bookOne.bookId}/files/${bookOne.bookFileId}`, 'replacement.epub', content));
     });
