@@ -197,6 +197,9 @@ describe('BookDiscoverFacetsService', () => {
       expect(facetsRepo.findRelationValues).toHaveBeenCalledWith(
         expect.objectContaining({ relation: 'author', search: 'an', sort: 'alpha', limit: 5, excludeValues: ['12', '99', '40'] }),
       );
+      expect(facetsRepo.countRelationValues).toHaveBeenCalledWith(
+        expect.objectContaining({ relation: 'author', values: ['12', '99', '40'], scopeWhere: { filter: undefined, q: undefined } }),
+      );
       expect(result.facets.authorId).toEqual({
         kind: 'term',
         key: 'authorId',

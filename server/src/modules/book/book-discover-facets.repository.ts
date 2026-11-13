@@ -170,16 +170,29 @@ export class BookDiscoverFacetsRepository {
     return { values: truncated ? values.slice(0, opts.limit) : values, truncated };
   }
 
-  /** Counts for named values; values that no longer exist are simply absent. */
-  async countRelationValues(opts: { relation: DiscoverRelation; where: SQL | undefined; values: string[] }): Promise<DiscoverValueCount[]> {
+  /**
+   * Counts for named values; values that no longer exist are simply absent. So are values with no
+   * book in `scopeWhere` (the library the viewer reads), or a selected author id would return the
+   * name of an author who only writes in a library the viewer cannot open.
+   */
+  async countRelationValues(opts: {
+    relation: DiscoverRelation;
+    where: SQL | undefined;
+    scopeWhere: SQL | undefined;
+    values: string[];
+  }): Promise<DiscoverValueCount[]> {
     if (opts.values.length === 0) return [];
     const r = RELATIONS[opts.relation];
     const values = opts.relation === 'author' ? opts.values.map(Number) : opts.values;
+    const inScope = this.db
+      .select({ one: sql`1` })
+      .from(r.link)
+      .where(sql`${r.linkEntityId} = ${r.entityId} AND ${r.linkBookId} IN (${this.matchedBookIds(opts.scopeWhere)})`);
     const result = await this.db.execute<{ value: string; label: string; book_count: number }>(sql`
       SELECT ${r.value} AS value, min(${r.name}) AS label, ${r.count} AS book_count
       FROM ${r.entity}
       LEFT JOIN ${r.link} ON ${r.linkEntityId} = ${r.entityId} AND ${r.linkBookId} IN (${this.matchedBookIds(opts.where)})
-      WHERE ${opts.relation === 'author' ? r.entityId : r.name} IN (${joinValues(values)})
+      WHERE ${opts.relation === 'author' ? r.entityId : r.name} IN (${joinValues(values)}) AND exists (${inScope})
       GROUP BY ${r.groupBy}
     `);
     return toValueCounts(result.rows);

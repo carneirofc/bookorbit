@@ -145,7 +145,7 @@ Each item in `facets` is `{ key, limit?, search?, sort? }`:
 A term facet result has:
 
 - `values`: the top values by the requested sort, leaving out every value that is already included or excluded. Only values with at least one book appear.
-- `selected`: every included value, then every excluded value, in request order, with its count. A value that no longer exists (a renamed tag, a deleted author) is still echoed with `count: 0` and its raw value as the label, so the client can show and remove it. For `authorId`, `label` is the author's name.
+- `selected`: every included value, then every excluded value, in request order, with its count. A value that no longer exists (a renamed tag, a deleted author) is still echoed with `count: 0` and its raw value as the label, so the client can show and remove it. The same applies to a value with no book in this library, so a selected author id never reveals the name of an author who only appears in libraries the viewer cannot read. For `authorId`, `label` is otherwise the author's name.
 - `noneCount`: books with no value for the facet; always `0` for `format` and `readStatus`.
 - `truncated`: `true` when more values matched than `limit` let through.
 

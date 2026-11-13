@@ -19,6 +19,7 @@ function makeRepo(rows: Array<Record<string, unknown>> = []) {
 }
 
 const where = sql`"books"."library_id" = 3`;
+const scopeWhere = sql`"books"."library_id" IN (3, 4)`;
 
 describe('BookDiscoverFacetsRepository', () => {
   describe('findRelationValues', () => {
@@ -70,14 +71,14 @@ describe('BookDiscoverFacetsRepository', () => {
   describe('countRelationValues', () => {
     it('skips the query for no values', async () => {
       const { repo, execute } = makeRepo();
-      await expect(repo.countRelationValues({ relation: 'tag', where, values: [] })).resolves.toEqual([]);
+      await expect(repo.countRelationValues({ relation: 'tag', where, scopeWhere, values: [] })).resolves.toEqual([]);
       expect(execute).not.toHaveBeenCalled();
     });
 
     it('left-joins the matched books so a selected value with no books still counts zero', async () => {
       const { repo, lastQuery } = makeRepo([{ value: '12', label: 'Ann Leckie', book_count: 0 }]);
 
-      const result = await repo.countRelationValues({ relation: 'author', where, values: ['12'] });
+      const result = await repo.countRelationValues({ relation: 'author', where, scopeWhere, values: ['12'] });
 
       expect(result).toEqual([{ value: '12', label: 'Ann Leckie', count: 0 }]);
       const { sql: text, params } = lastQuery();
@@ -86,6 +87,18 @@ describe('BookDiscoverFacetsRepository', () => {
       );
       expect(text).toContain('WHERE "authors"."id" IN (');
       expect(params).toContain(12);
+    });
+
+    it('only names values linked to a book in the scope, so ids from unreadable libraries stay unnamed', async () => {
+      const { repo, lastQuery } = makeRepo();
+
+      await repo.countRelationValues({ relation: 'author', where, scopeWhere, values: ['12'] });
+
+      const { sql: text } = lastQuery();
+      expect(text).toContain(
+        'AND exists ((select 1 from "book_authors" where "book_authors"."author_id" = "authors"."id" AND "book_authors"."book_id" IN (',
+      );
+      expect(text).toContain('where ("books"."library_id" IN (3, 4) and "books"."status" <> $');
     });
   });
 

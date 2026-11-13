@@ -128,6 +128,7 @@ export class BookDiscoverFacetsService {
         contentFilters: user.isSuperuser ? undefined : user.contentFilters,
       };
 
+      const libraryWhere = this.queryBuilder.buildWhere(undefined, { ...scope, q: undefined });
       const filters = new Map<string, EffectiveFilter>();
       const effective = (key: string, compile: () => GroupRule | undefined): EffectiveFilter => {
         let entry = filters.get(key);
@@ -146,12 +147,9 @@ export class BookDiscoverFacetsService {
       const facetFilters = request.facets.map((facet) => this.effectiveFilterFor(facet, request.selection, full, effective));
 
       const [totals, results] = await Promise.all([
-        Promise.all([
-          this.bookRepo.countWhere(full.where),
-          narrowed ? this.bookRepo.countWhere(this.queryBuilder.buildWhere(undefined, { ...scope, q: undefined })) : null,
-        ]),
+        Promise.all([this.bookRepo.countWhere(full.where), narrowed ? this.bookRepo.countWhere(libraryWhere) : null]),
         mapWithConcurrency(request.facets, FACET_CONCURRENCY, (facet, index) =>
-          this.computeFacet(facet, request.selection, facetFilters[index]!, scope),
+          this.computeFacet(facet, request.selection, facetFilters[index]!, scope, libraryWhere),
         ),
       ]);
       const [total, libraryTotal] = totals;
@@ -200,9 +198,10 @@ export class BookDiscoverFacetsService {
     selection: DiscoverSelection,
     filter: EffectiveFilter,
     scope: ScopeContext,
+    libraryWhere: SQL | undefined,
   ): Promise<DiscoverFacetResult> {
     if (isDiscoverRangeFacet(facet.key)) return this.computeRangeFacet(facet.key, filter);
-    return this.computeTermFacet(facet as DiscoverFacetRequest & { key: DiscoverTermFacetKey }, selection, filter, scope);
+    return this.computeTermFacet(facet as DiscoverFacetRequest & { key: DiscoverTermFacetKey }, selection, filter, scope, libraryWhere);
   }
 
   private async computeTermFacet(
@@ -210,6 +209,7 @@ export class BookDiscoverFacetsService {
     selection: DiscoverSelection,
     filter: EffectiveFilter,
     scope: ScopeContext,
+    libraryWhere: SQL | undefined,
   ): Promise<DiscoverTermFacetResult> {
     const key = facet.key;
     const term = selection.terms?.[key];
@@ -223,7 +223,7 @@ export class BookDiscoverFacetsService {
 
     const { listed, selectedCounts, noneCount } = FIXED_VALUE_FACETS.has(key)
       ? await this.countFixedFacet(key, filter.where, options, scope.userId)
-      : await this.countOpenFacet(key, filter, options, scope);
+      : await this.countOpenFacet(key, filter, options, scope, libraryWhere);
 
     const countsByValue = new Map(selectedCounts.map((row) => [row.value, row]));
     const selected: DiscoverFacetValue[] = selectedValues.map((value) => {
@@ -239,6 +239,7 @@ export class BookDiscoverFacetsService {
     filter: EffectiveFilter,
     options: TermListOptions,
     scope: ScopeContext,
+    libraryWhere: SQL | undefined,
   ): Promise<FacetCounts> {
     const relation = RELATION_BY_FACET[key];
     const column = key === 'language' || key === 'publisher' ? key : undefined;
@@ -249,7 +250,7 @@ export class BookDiscoverFacetsService {
         ? this.facetsRepo.findRelationValues({ relation, where, ...options })
         : this.facetsRepo.findMetadataValues({ column: column!, where, ...options }),
       relation
-        ? this.facetsRepo.countRelationValues({ relation, where, values })
+        ? this.facetsRepo.countRelationValues({ relation, where, scopeWhere: libraryWhere, values })
         : this.facetsRepo.countMetadataValues({ column: column!, where, values }),
       this.countNone(key, filter.filter, scope),
     ]);

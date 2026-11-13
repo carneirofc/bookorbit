@@ -582,6 +582,24 @@ describe('Discover facets (e2e)', { timeout: SCENARIO_TIMEOUT_MS }, () => {
       expect(response.statusCode).toBe(403);
     });
 
+    it('does not name a selected author who only writes in a library the viewer cannot read', async () => {
+      const hidden = await createLibraryWithFolder(ctx, { name: 'discover-facets-hidden' });
+      const [book] = await ctx.db
+        .insert(books)
+        .values({ libraryId: hidden.libraryId, libraryFolderId: hidden.libraryFolderId, folderPath: '/seed/discover-hidden', status: 'present' })
+        .returning({ id: books.id });
+      const [author] = await ctx.db.insert(authors).values({ name: 'Hidden Author', sortName: 'Hidden Author' }).returning({ id: authors.id });
+      await ctx.db.insert(bookAuthors).values({ bookId: book!.id, authorId: author!.id, displayOrder: 0 });
+      const hiddenId = String(author!.id);
+
+      const response = await fetchFacets(viewer.accessToken, {
+        selection: { terms: { authorId: { include: [hiddenId], exclude: [] } } },
+        facets: [{ key: 'authorId' }],
+      });
+
+      expect((response.facets.authorId as DiscoverTermFacetResult).selected).toEqual([{ value: hiddenId, label: hiddenId, count: 0 }]);
+    });
+
     it('returns 404 for an unknown library', async () => {
       const response = await postFacets(ctx.adminToken, { selection: {}, facets: [] }, 987_654);
       expect(response.statusCode).toBe(404);
